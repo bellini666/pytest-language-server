@@ -139,6 +139,4 @@ jobs:
         run: uvx maturin build --release --target ${{ matrix.target }} --out dist
 
       - name: Publish to PyPI
-        env:
-          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
         run: uvx maturin upload --skip-existing dist/*

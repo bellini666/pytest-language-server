@@ -1,4 +1,4 @@
-id = "pytest-lsp"
+id = "pytest-language-server"
 name = "pytest Language Server"
 version = "0.3.0"
 schema_version = 1
@@ -6,6 +6,6 @@ authors = ["Thiago Bellini Ribeiro <hackedbellini@gmail.com>"]
 description = "A blazingly fast Language Server Protocol implementation for pytest"
 repository = "https://github.com/bellini666/pytest-language-server"
 
-[language_servers.pytest-lsp]
+[language_servers.pytest-language-server]
 name = "pytest Language Server"
 languages = ["Python"]

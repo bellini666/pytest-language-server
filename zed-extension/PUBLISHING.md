@@ -29,8 +29,8 @@ This guide explains how to publish the pytest-language-server extension to the Z
 From the `extensions` repository root:
 
 ```bash
-git submodule add https://github.com/bellini666/pytest-language-server.git extensions/pytest-lsp
-git add extensions/pytest-lsp
+git submodule add https://github.com/bellini666/pytest-language-server.git extensions/pytest-language-server
+git add extensions/pytest-language-server
 ```
 
 **Note:** The submodule path should point to the root of the pytest-language-server repository, not the `zed-extension` subdirectory.
@@ -40,8 +40,8 @@ git add extensions/pytest-lsp
 Add this entry to the `extensions.toml` file in the root of the extensions repository:
 
 ```toml
-[pytest-lsp]
-submodule = "extensions/pytest-lsp"
+[pytest-language-server]
+submodule = "extensions/pytest-language-server"
 path = "zed-extension"
 version = "0.3.0"
 ```

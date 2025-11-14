@@ -42,6 +42,12 @@ Built with Rust for maximum performance:
 
 ### From PyPI (Recommended)
 
+Using uv (recommended):
+```bash
+uv tool install pytest-language-server
+```
+
+Or with pip:
 ```bash
 pip install pytest-language-server
 ```

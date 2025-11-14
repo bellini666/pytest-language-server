@@ -114,6 +114,18 @@ require'lspconfig'.pytest_lsp.setup{
 }
 ```
 
+### Zed
+
+Install the extension from the extensions marketplace:
+
+1. Open Zed
+2. Open the command palette (Cmd+Shift+P / Ctrl+Shift+P)
+3. Search for "zed: extensions"
+4. Search for "pytest Language Server"
+5. Click "Install"
+
+The extension will automatically detect `pytest-language-server` if it's in your PATH.
+
 ### VS Code
 
 Install the extension from the marketplace (coming soon) or configure manually:

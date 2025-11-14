@@ -1,0 +1,13 @@
+[package]
+name = "zed-pytest-lsp"
+version = "0.3.0"
+edition = "2021"
+repository = "https://github.com/bellini666/pytest-language-server"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.7.0"

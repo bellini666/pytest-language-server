@@ -154,11 +154,108 @@ jobs:
           name: wheels-sdist
           path: dist
 
+  # Standalone binary builds for Zed extension auto-download
+  binaries-linux:
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            arch: x86_64
+          - target: aarch64-unknown-linux-musl
+            arch: aarch64
+          - target: armv7-unknown-linux-musleabihf
+            arch: armv7
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install cross-compilation tools
+        if: matrix.arch != 'x86_64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+      - name: Build binary
+        run: |
+          # Install cross for easier cross-compilation
+          cargo install cross --git https://github.com/cross-rs/cross
+          cross build --release --target ${{ matrix.target }}
+      - name: Package binary
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf pytest-language-server-${{ github.ref_name }}-${{ matrix.arch }}-unknown-linux-musl.tar.gz pytest-language-server
+          mv pytest-language-server-${{ github.ref_name }}-${{ matrix.arch }}-unknown-linux-musl.tar.gz ../../../
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-linux-${{ matrix.arch }}
+          path: pytest-language-server-*.tar.gz
+
+  binaries-macos:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - runner: macos-13
+            target: x86_64-apple-darwin
+            arch: x86_64
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            arch: aarch64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build binary
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Package binary
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf pytest-language-server-${{ github.ref_name }}-${{ matrix.arch }}-apple-darwin.tar.gz pytest-language-server
+          mv pytest-language-server-${{ github.ref_name }}-${{ matrix.arch }}-apple-darwin.tar.gz ../../../
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-macos-${{ matrix.arch }}
+          path: pytest-language-server-*.tar.gz
+
+  binaries-windows:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            arch: x86_64
+          - target: i686-pc-windows-msvc
+            arch: x86
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build binary
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Package binary
+        shell: pwsh
+        run: |
+          cd target/${{ matrix.target }}/release
+          Compress-Archive -Path pytest-language-server.exe -DestinationPath ../../../pytest-language-server-${{ github.ref_name }}-${{ matrix.arch }}-pc-windows-msvc.zip
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-windows-${{ matrix.arch }}
+          path: pytest-language-server-*.zip
+
   release:
     name: Release
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [linux, musllinux, windows, windows-freethreaded, macos, sdist]
+    needs: [linux, musllinux, windows, windows-freethreaded, macos, sdist, binaries-linux, binaries-macos, binaries-windows]
     permissions:
       id-token: write
       contents: write
@@ -166,11 +263,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all artifacts
+      - name: Download wheel artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: wheels-*
           path: wheels
+
+      - name: Download binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          path: binaries
 
       - name: Generate artifact attestation
         uses: actions/attest-build-provenance@v2
@@ -182,6 +285,12 @@ jobs:
           mkdir -p dist
           find wheels -name "*.whl" -exec cp {} dist/ \;
           find wheels -name "*.tar.gz" -exec cp {} dist/ \;
+          ls -lh dist/
+
+      - name: Flatten binaries directory
+        run: |
+          find binaries -name "*.tar.gz" -exec cp {} dist/ \;
+          find binaries -name "*.zip" -exec cp {} dist/ \;
           ls -lh dist/
 
       - name: Create GitHub Release

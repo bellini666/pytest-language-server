@@ -177,17 +177,25 @@ jobs:
         with:
           subject-path: "wheels/*/*.whl"
 
+      - name: Flatten wheels directory
+        run: |
+          mkdir -p dist
+          find wheels -name "*.whl" -exec cp {} dist/ \;
+          find wheels -name "*.tar.gz" -exec cp {} dist/ \;
+          ls -lh dist/
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: wheels/*/*.whl
+          files: dist/*
           generate_release_notes: true
+          fail_on_unmatched_files: true
 
       - name: Publish to PyPI
-        uses: PyO3/maturin-action@v1
+        uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          command: upload
-          args: --non-interactive --skip-existing wheels/*/*.whl
+          skip-existing: true
+          verbose: true
 
   publish-crates:
     name: Publish to crates.io

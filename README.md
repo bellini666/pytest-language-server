@@ -55,7 +55,7 @@ cargo install pytest-language-server
 ### From Source
 
 ```bash
-git clone https://github.com/patrick91/pytest-language-server
+git clone https://github.com/bellini666/pytest-language-server
 cd pytest-language-server
 cargo build --release
 ```

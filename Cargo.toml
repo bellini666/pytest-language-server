@@ -2,10 +2,10 @@
 name = "pytest-language-server"
 version = "0.1.0"
 edition = "2021"
-authors = ["Patrick Arminio <patrick.arminio@gmail.com>"]
+authors = ["Thiago Bellini Ribeiro <hackedbellini@gmail.com>"]
 license = "MIT"
 description = "A blazingly fast Language Server Protocol implementation for pytest"
-repository = "https://github.com/patrick91/pytest-language-server"
+repository = "https://github.com/bellini666/pytest-language-server"
 keywords = ["pytest", "lsp", "language-server", "testing"]
 categories = ["development-tools", "development-tools::testing"]
 
@@ -22,4 +22,4 @@ tracing-appender = "0.2"
 
 [[example]]
 name = "test_parser_api"
-path = "test_parser_api.rs"
+path = "tests/test_parser_api.rs"

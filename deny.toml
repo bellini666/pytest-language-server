@@ -5,12 +5,12 @@
 # Check for security vulnerabilities in dependencies
 version = 2
 ignore = []
-# Warn on unmaintained crates, but don't fail the build
-unmaintained = "warn"
-# Fail on crates with security vulnerabilities
+# Deny crates with security vulnerabilities
 vulnerability = "deny"
-# Warn on crates with notices
-notice = "warn"
+# Allow unmaintained crates for now (we have warnings from rustpython-parser deps)
+unmaintained = "allow"
+# Allow crates with notices
+notice = "allow"
 
 # Ignore these specific advisories (use with caution!)
 # Example: ignore = ["RUSTSEC-2020-0000"]

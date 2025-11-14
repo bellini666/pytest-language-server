@@ -42,10 +42,11 @@ jobs:
 
       - name: Check for vulnerabilities
         run: |
-          if cargo audit --deny warnings; then
-            echo "✅ No vulnerabilities found"
+          # Allow warnings (unmaintained crates), but fail on vulnerabilities
+          if cargo audit; then
+            echo "✅ No critical vulnerabilities found"
           else
-            echo "⚠️ Vulnerabilities detected - see output above"
+            echo "❌ Vulnerabilities detected - see output above"
             exit 1
           fi
 

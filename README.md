@@ -6,7 +6,6 @@
 [![Crates.io](https://img.shields.io/crates/v/pytest-language-server.svg)](https://crates.io/crates/pytest-language-server)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python Version](https://img.shields.io/pypi/pyversions/pytest-language-server.svg)](https://pypi.org/project/pytest-language-server/)
-[![Downloads](https://pepy.tech/badge/pytest-language-server)](https://pepy.tech/project/pytest-language-server)
 
 > **Shamelessly vibed into existence** 🤖✨
 >

@@ -30,16 +30,11 @@ Homepage = "https://github.com/bellini666/pytest-language-server"
 Repository = "https://github.com/bellini666/pytest-language-server"
 Issues = "https://github.com/bellini666/pytest-language-server/issues"
 
-[project.scripts]
-pytest-language-server = "pytest_language_server:main"
-
 [tool.maturin]
 bindings = "bin"
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "maturin>=1.10.1",
     "pre-commit>=4.0.0",
 ]
-
-[tool.uv.sources]

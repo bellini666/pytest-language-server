@@ -219,7 +219,7 @@ Automatically discovers fixtures from popular pytest plugins:
 
 ### Prerequisites
 
-- Rust 1.80+ (2021 edition)
+- Rust 1.83+ (2021 edition)
 - Python 3.10+ (for testing)
 
 ### Building

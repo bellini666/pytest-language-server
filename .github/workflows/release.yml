@@ -94,6 +94,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
+      id-token: write  # Required for PyPI trusted publishing
     strategy:
       matrix:
         include:

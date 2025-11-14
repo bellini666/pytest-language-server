@@ -7,7 +7,7 @@ This is a [Zed](https://zed.dev) extension that provides support for the [pytest
 - **Go to Definition**: Jump directly to fixture definitions from anywhere they're used
 - **Find References**: Find all usages of a fixture across your entire test suite
 - **Hover Documentation**: View fixture information including signature, location, and docstring
-- **Automatic Installation**: The extension automatically downloads and manages the language server binary
+- **Simple Setup**: Uses your existing pytest-language-server installation
 - **Cross-platform**: Works on macOS, Linux, and Windows
 
 ## Installation
@@ -43,24 +43,13 @@ cargo install pytest-language-server
 
 ## Configuration
 
-The extension will automatically detect `pytest-language-server` if it's available in your PATH.
+The extension automatically detects `pytest-language-server` if it's in your PATH.
 
-### Custom Binary Path
+### Tips
 
-You can specify a custom path to the pytest-language-server binary in your Zed settings:
-
-```json
-{
-  "lsp": {
-    "pytest-lsp": {
-      "binary": {
-        "path": "/path/to/pytest-language-server",
-        "arguments": []
-      }
-    }
-  }
-}
-```
+- **Virtual Environments**: The extension respects your Python virtual environment, so install pytest-language-server in the same venv as your project
+- **Multiple Python Versions**: The extension uses whichever `pytest-language-server` is first in your PATH
+- **Logging**: Set the `RUST_LOG` environment variable before starting Zed to enable debug logging from the language server
 
 ### Environment Variables
 

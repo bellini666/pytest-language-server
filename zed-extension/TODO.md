@@ -1,38 +1,42 @@
 # TODO for Zed Extension
 
+## Design Philosophy
+
+This extension follows the **simple approach**: users install `pytest-language-server` via their preferred method (pip, uv, cargo, homebrew), and the extension just finds it in PATH.
+
+This is simpler to maintain and matches how most LSP extensions work (e.g., rust-analyzer, pyright, etc.).
+
 ## Future Improvements
 
-### Standalone Binary Releases
+### Nice-to-Have Features
 
-Currently, the GitHub releases only include Python wheels. To enable automatic installation in the Zed extension, we should add standalone binary releases to the release workflow.
+1. **Better Error Messages**
+   - Detect if user is in a virtual environment without pytest-language-server
+   - Suggest installation command based on detected package manager
+   - Link to installation docs
 
-**Required changes to `.github/workflows/release.yml`:**
+2. **Configuration Options**
+   - Allow users to specify custom command-line arguments
+   - Support for `RUST_LOG` environment variable configuration
+   - Workspace-specific settings
 
-1. Add a new job to build standalone binaries for each platform:
-   - Linux (x86_64, aarch64, armv7) - with musl for better compatibility
-   - macOS (x86_64, aarch64)
-   - Windows (x86_64, x86)
+3. **Status Indicators**
+   - Show when the language server is starting/ready
+   - Display version information
+   - Health check diagnostics
 
-2. Package each binary as a tar.gz (Linux/macOS) or zip (Windows) archive
+### Won't Implement
 
-3. Upload these as release assets alongside the Python wheels
+~~**Automatic Binary Downloads**~~
+- Adds complexity for minimal benefit
+- Users already have pip/cargo/brew installed
+- Virtual environment integration works better with pip install
+- Standalone binaries would need to be built and maintained
 
-**Binary naming convention:**
-```
-pytest-language-server-v{version}-{arch}-{os}.{extension}
-```
+## Contributing
 
-Examples:
-- `pytest-language-server-v0.3.0-x86_64-apple-darwin.tar.gz`
-- `pytest-language-server-v0.3.0-aarch64-unknown-linux-musl.tar.gz`
-- `pytest-language-server-v0.3.0-x86_64-pc-windows-msvc.zip`
-
-Once this is implemented, the Zed extension will automatically download and manage the language server binary without requiring manual installation.
-
-### Reference Implementation
-
-See other Rust-based LSP extensions for examples:
-- [just-lsp Zed extension](https://github.com/sectore/zed-just-ls)
-- [Ruff Zed extension](https://github.com/zed-industries/extensions)
-
-The extension code is already prepared to handle automatic downloads - it just needs the release assets to be available.
+If you want to add features, please:
+1. Keep it simple
+2. Test with different installation methods (pip, cargo, brew)
+3. Test in virtual environments
+4. Consider cross-platform compatibility

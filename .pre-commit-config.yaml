@@ -26,6 +26,22 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: cargo-audit
+        name: cargo audit (security)
+        entry: cargo audit
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [push]
+
+      - id: cargo-deny
+        name: cargo deny (licenses & security)
+        entry: cargo deny check
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [push]
+
   # General file checks
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0

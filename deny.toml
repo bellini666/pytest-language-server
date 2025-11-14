@@ -1,0 +1,73 @@
+# Configuration for cargo-deny
+# https://embarkstudios.github.io/cargo-deny/
+
+[advisories]
+# Check for security vulnerabilities in dependencies
+version = 2
+ignore = []
+# Warn on unmaintained crates, but don't fail the build
+unmaintained = "warn"
+# Fail on crates with security vulnerabilities
+vulnerability = "deny"
+# Warn on crates with notices
+notice = "warn"
+
+# Ignore these specific advisories (use with caution!)
+# Example: ignore = ["RUSTSEC-2020-0000"]
+
+[licenses]
+# Deny licenses that are incompatible with MIT
+version = 2
+# Allow these licenses
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "0BSD",
+    "Zlib",
+    "MPL-2.0",
+]
+
+# Deny these licenses (copyleft and proprietary)
+deny = [
+    "GPL-3.0",
+    "LGPL-3.0",
+    "AGPL-3.0",
+]
+
+# Confidence threshold for license detection
+confidence-threshold = 0.8
+
+# Allow licenses that require attribution
+exceptions = [
+    # { allow = ["GPL-3.0"], name = "specific-crate", version = "*" },
+]
+
+[bans]
+# Deny multiple versions of the same crate
+multiple-versions = "warn"
+wildcards = "allow"
+# Allow these specific crates to have multiple versions
+skip = [
+    # { name = "bitflags", version = "1.3" },
+]
+
+# Deny these specific crates
+deny = []
+
+# Skip these trees when checking for duplicates
+skip-tree = []
+
+[sources]
+# Ensure all dependencies come from trusted sources
+unknown-registry = "deny"
+unknown-git = "deny"
+
+# Allow crates.io
+[sources.allow-org]
+github = []

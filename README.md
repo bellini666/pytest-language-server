@@ -240,9 +240,34 @@ cargo test
 RUST_LOG=debug cargo run
 ```
 
+## Security
+
+Security is a priority. This project includes:
+- Automated dependency vulnerability scanning (cargo-audit)
+- License compliance checking (cargo-deny)
+- Daily security audits in CI/CD
+- Dependency review on pull requests
+- Pre-commit security hooks
+
+See [SECURITY.md](SECURITY.md) for our security policy and how to report vulnerabilities.
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
+
+### Development Setup
+
+1. Install pre-commit hooks:
+   ```bash
+   pre-commit install
+   ```
+
+2. Run security checks locally:
+   ```bash
+   cargo audit
+   cargo clippy
+   cargo test
+   ```
 
 ## License
 

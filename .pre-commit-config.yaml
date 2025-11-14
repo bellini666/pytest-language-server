@@ -32,7 +32,7 @@ repos:
         language: system
         types: [rust]
         pass_filenames: false
-        stages: [push]
+        stages: [pre-push]
 
       - id: cargo-deny
         name: cargo deny (licenses & security)
@@ -40,7 +40,7 @@ repos:
         language: system
         types: [rust]
         pass_filenames: false
-        stages: [push]
+        stages: [pre-push]
 
   # General file checks
   - repo: https://github.com/pre-commit/pre-commit-hooks

@@ -7,10 +7,11 @@ version = 2
 ignore = []
 # Deny crates with security vulnerabilities
 vulnerability = "deny"
-# Allow unmaintained crates for now (we have warnings from rustpython-parser deps)
-unmaintained = "allow"
-# Allow crates with notices
-notice = "allow"
+# Don't check for unmaintained crates (we have warnings from rustpython-parser deps)
+# Valid values: "all", "workspace", "transitive", "none"
+# unmaintained = "warn"
+# Don't check for crates with notices
+# notice = "warn"
 
 # Ignore these specific advisories (use with caution!)
 # Example: ignore = ["RUSTSEC-2020-0000"]

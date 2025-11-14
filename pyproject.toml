@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "pytest-language-server"
-version = "0.2.0"
+version = "0.3.0"
 description = "A blazingly fast Language Server Protocol implementation for pytest"
 authors = [{name = "Thiago Bellini Ribeiro", email = "hackedbellini@gmail.com"}]
 readme = "README.md"

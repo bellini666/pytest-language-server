@@ -40,25 +40,57 @@ Built with Rust for maximum performance:
 
 ## Installation
 
-### From PyPI (Recommended)
+Choose your preferred installation method:
 
-Using uv (recommended):
+### 📦 PyPI (Recommended)
+
+The easiest way to install for Python projects:
+
 ```bash
+# Using uv (recommended)
 uv tool install pytest-language-server
-```
 
-Or with pip:
-```bash
+# Or with pip
 pip install pytest-language-server
+
+# Or with pipx (isolated environment)
+pipx install pytest-language-server
 ```
 
-### From Crates.io
+### 🍺 Homebrew (macOS/Linux)
+
+Install via Homebrew for system-wide availability:
+
+```bash
+brew install bellini666/tap/pytest-language-server
+```
+
+To add the tap first:
+```bash
+brew tap bellini666/tap https://github.com/bellini666/pytest-language-server
+brew install pytest-language-server
+```
+
+### 🦀 Cargo (Rust)
+
+Install from crates.io if you have Rust installed:
 
 ```bash
 cargo install pytest-language-server
 ```
 
-### From Source
+### 📥 Pre-built Binaries
+
+Download pre-built binaries from the [GitHub Releases](https://github.com/bellini666/pytest-language-server/releases) page.
+
+Available for:
+- **Linux**: x86_64, aarch64, armv7 (glibc and musl)
+- **macOS**: Intel and Apple Silicon
+- **Windows**: x64 and x86
+
+### 🔨 From Source
+
+Build from source for development or customization:
 
 ```bash
 git clone https://github.com/bellini666/pytest-language-server
@@ -187,8 +219,8 @@ Automatically discovers fixtures from popular pytest plugins:
 
 ### Prerequisites
 
-- Rust 1.70+ (2021 edition)
-- Python 3.8+ (for testing)
+- Rust 1.80+ (2021 edition)
+- Python 3.10+ (for testing)
 
 ### Building
 

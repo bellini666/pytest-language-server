@@ -41,12 +41,28 @@ View fixture information on hover:
 - Docstring (with proper formatting and dedenting)
 - Markdown support in docstrings
 
+### 💡 Code Actions (Quick Fixes)
+One-click fixes for common pytest issues:
+- **Add missing fixture parameters**: Automatically add undeclared fixtures to function signatures
+- **Smart insertion**: Handles both empty and existing parameter lists
+- **Editor integration**: Works with any LSP-compatible editor's quick fix menu
+- **LSP compliant**: Full support for `CodeActionKind::QUICKFIX`
+
 ### ⚠️ Diagnostics & Quick Fixes
-Detect and fix common pytest fixture issues:
-- **Undeclared fixture warnings**: Detects when fixtures are used in function bodies but not declared as parameters
-- **One-click fixes**: Code actions to automatically add missing fixture parameters
+Detect and fix common pytest fixture issues with intelligent code actions:
+
+**Undeclared Fixture Detection:**
+- Detects when fixtures are used in function bodies but not declared as parameters
+- **Line-aware scoping**: Correctly handles local variables assigned later in the function
 - **Hierarchy-aware**: Only reports fixtures that are actually available in the current file's scope
 - **Works in tests and fixtures**: Detects undeclared usage in both test functions and fixture functions
+- Excludes built-in names (`self`, `request`) and actual local variables
+
+**One-Click Quick Fixes:**
+- **Code actions** to automatically add missing fixture parameters
+- Intelligent parameter insertion (handles both empty and existing parameter lists)
+- Works with both single-line and multi-line function signatures
+- Triggered directly from diagnostic warnings
 
 Example:
 ```python
@@ -59,9 +75,15 @@ def test_user(user_db):  # ✅ user_db properly declared
     assert user.name == "Alice"
 
 def test_broken():  # ⚠️ Warning: 'user_db' used but not declared
-    user = user_db.get_user(1)  # Quick fix available: add user_db parameter
+    user = user_db.get_user(1)  # 💡 Quick fix: Add 'user_db' fixture parameter
     assert user.name == "Alice"
 ```
+
+**How to use quick fixes:**
+1. Place cursor on the warning squiggle
+2. Trigger code actions menu (usually Cmd+. or Ctrl+. in most editors)
+3. Select "Add 'fixture_name' fixture parameter"
+4. The parameter is automatically added to your function signature
 
 ### ⚡️ Performance
 Built with Rust for maximum performance:
@@ -201,6 +223,17 @@ The server automatically detects your Python virtual environment:
 1. Checks for `.venv/`, `venv/`, or `env/` in your project root
 2. Falls back to `$VIRTUAL_ENV` environment variable
 3. Scans third-party pytest plugins for fixtures
+
+### Code Actions / Quick Fixes
+
+Code actions are automatically available on diagnostic warnings. If code actions don't appear in your editor:
+
+1. **Check LSP capabilities**: Ensure your editor supports code actions (most modern editors do)
+2. **Enable debug logging**: Use `RUST_LOG=info` to see if actions are being created
+3. **Verify diagnostics**: Code actions only appear where there are warnings
+4. **Trigger manually**: Use your editor's code action keybinding (Cmd+. / Ctrl+.)
+
+For detailed troubleshooting, see [CODE_ACTION_TESTING.md](CODE_ACTION_TESTING.md).
 
 ## Supported Fixture Patterns
 

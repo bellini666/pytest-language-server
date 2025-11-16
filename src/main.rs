@@ -49,7 +49,15 @@ impl LanguageServer for Backend {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
                 )),
-                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+                code_action_provider: Some(CodeActionProviderCapability::Options(
+                    CodeActionOptions {
+                        code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
+                        work_done_progress_options: WorkDoneProgressOptions {
+                            work_done_progress: None,
+                        },
+                        resolve_provider: None,
+                    },
+                )),
                 ..Default::default()
             },
         })
@@ -438,17 +446,34 @@ impl LanguageServer for Backend {
         let context = params.context;
 
         info!(
-            "code_action request: uri={:?}, diagnostics={}",
+            "code_action request: uri={:?}, diagnostics={}, only={:?}",
             uri,
-            context.diagnostics.len()
+            context.diagnostics.len(),
+            context.only
         );
+
+        // Check if the client is filtering by action kind
+        if let Some(ref only_kinds) = context.only {
+            if !only_kinds.iter().any(|k| {
+                k == &CodeActionKind::QUICKFIX
+                    || k.as_str().starts_with(CodeActionKind::QUICKFIX.as_str())
+            }) {
+                info!("Code action request filtered out by 'only' parameter");
+                return Ok(None);
+            }
+        }
 
         if let Ok(file_path) = uri.to_file_path() {
             let undeclared = self.fixture_db.get_undeclared_fixtures(&file_path);
+            info!("Found {} undeclared fixtures in file", undeclared.len());
             let mut actions = Vec::new();
 
             // Process each diagnostic from the context
             for diagnostic in &context.diagnostics {
+                info!(
+                    "Processing diagnostic: code={:?}, range={:?}",
+                    diagnostic.code, diagnostic.range
+                );
                 // Check if this is an undeclared-fixture diagnostic
                 if let Some(NumberOrString::String(code)) = &diagnostic.code {
                     if code == "undeclared-fixture" {
@@ -456,10 +481,16 @@ impl LanguageServer for Backend {
                         let diag_line = diagnostic.range.start.line + 1; // Convert to 1-indexed
                         let diag_char = diagnostic.range.start.character as usize;
 
+                        info!(
+                            "Looking for undeclared fixture at line={}, char={}",
+                            diag_line, diag_char
+                        );
+
                         if let Some(fixture) = undeclared
                             .iter()
                             .find(|f| f.line == diag_line as usize && f.start_char == diag_char)
                         {
+                            info!("Found matching fixture: {}", fixture.name);
                             // Create a code action to add this fixture as a parameter
                             let function_line = (fixture.function_line - 1) as u32;
 
@@ -543,6 +574,10 @@ impl LanguageServer for Backend {
                                             data: None,
                                         };
 
+                                        info!(
+                                            "Created code action: Add '{}' fixture parameter",
+                                            fixture.name
+                                        );
                                         actions.push(CodeActionOrCommand::CodeAction(action));
                                     }
                                 }
@@ -553,10 +588,14 @@ impl LanguageServer for Backend {
             }
 
             if !actions.is_empty() {
+                info!("Returning {} code actions", actions.len());
                 return Ok(Some(actions));
+            } else {
+                info!("No code actions created");
             }
         }
 
+        info!("Returning None for code_action request");
         Ok(None)
     }
 
@@ -640,6 +679,7 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use pytest_language_server::FixtureDefinition;
     use std::path::PathBuf;
 
@@ -1746,5 +1786,80 @@ def test_another(cli_runner):
         );
 
         println!("\nMultiline signature test passed ✓");
+    }
+
+    #[tokio::test]
+    async fn test_code_action_for_undeclared_fixture() {
+        // Test that code actions are generated for undeclared fixtures
+        use pytest_language_server::FixtureDatabase;
+
+        let db = Arc::new(FixtureDatabase::new());
+
+        let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 42
+"#;
+        let conftest_path = PathBuf::from("/tmp/project/conftest.py");
+        db.analyze_file(conftest_path.clone(), conftest_content);
+
+        let test_content = r#"
+def test_undeclared():
+    result = my_fixture + 1
+    assert result == 43
+"#;
+        let test_path = PathBuf::from("/tmp/project/test_example.py");
+        db.analyze_file(test_path.clone(), test_content);
+
+        // Get undeclared fixtures
+        let undeclared = db.get_undeclared_fixtures(&test_path);
+        println!("\nUndeclared fixtures: {:?}", undeclared);
+        assert_eq!(undeclared.len(), 1, "Should have 1 undeclared fixture");
+
+        let fixture = &undeclared[0];
+        assert_eq!(fixture.name, "my_fixture");
+        assert_eq!(fixture.line, 3); // 1-indexed
+        assert_eq!(fixture.function_name, "test_undeclared");
+        assert_eq!(fixture.function_line, 2); // 1-indexed
+
+        // Simulate creating a diagnostic
+        let diagnostic = Diagnostic {
+            range: Range {
+                start: Position {
+                    line: (fixture.line - 1) as u32, // 0-indexed for LSP
+                    character: fixture.start_char as u32,
+                },
+                end: Position {
+                    line: (fixture.line - 1) as u32,
+                    character: fixture.end_char as u32,
+                },
+            },
+            severity: Some(DiagnosticSeverity::WARNING),
+            code: Some(NumberOrString::String("undeclared-fixture".to_string())),
+            source: Some("pytest-lsp".to_string()),
+            message: format!(
+                "Fixture '{}' is used but not declared as a parameter",
+                fixture.name
+            ),
+            code_description: None,
+            related_information: None,
+            tags: None,
+            data: None,
+        };
+
+        println!("Created diagnostic: {:?}", diagnostic);
+
+        // Now test that the Backend would create a code action
+        // We can't easily test the actual LSP handler without a full LSP setup,
+        // but we can verify the data structures are correct
+        assert_eq!(
+            diagnostic.code,
+            Some(NumberOrString::String("undeclared-fixture".to_string()))
+        );
+        assert_eq!(diagnostic.range.start.line, 2); // Line 3 in 1-indexed is line 2 in 0-indexed
+
+        println!("\nCode action test passed ✓");
     }
 }

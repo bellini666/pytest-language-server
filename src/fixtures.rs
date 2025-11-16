@@ -722,6 +722,68 @@ impl FixtureDatabase {
                     );
                 }
             }
+            Stmt::AsyncFor(for_stmt) => {
+                self.visit_expr_for_names(
+                    &for_stmt.iter,
+                    file_path,
+                    content,
+                    declared_params,
+                    function_name,
+                    function_line,
+                );
+                for stmt in &for_stmt.body {
+                    self.visit_stmt_for_names(
+                        stmt,
+                        file_path,
+                        content,
+                        declared_params,
+                        function_name,
+                        function_line,
+                    );
+                }
+            }
+            Stmt::AsyncWith(with_stmt) => {
+                for item in &with_stmt.items {
+                    self.visit_expr_for_names(
+                        &item.context_expr,
+                        file_path,
+                        content,
+                        declared_params,
+                        function_name,
+                        function_line,
+                    );
+                }
+                for stmt in &with_stmt.body {
+                    self.visit_stmt_for_names(
+                        stmt,
+                        file_path,
+                        content,
+                        declared_params,
+                        function_name,
+                        function_line,
+                    );
+                }
+            }
+            Stmt::Assert(assert_stmt) => {
+                self.visit_expr_for_names(
+                    &assert_stmt.test,
+                    file_path,
+                    content,
+                    declared_params,
+                    function_name,
+                    function_line,
+                );
+                if let Some(ref msg) = assert_stmt.msg {
+                    self.visit_expr_for_names(
+                        msg,
+                        file_path,
+                        content,
+                        declared_params,
+                        function_name,
+                        function_line,
+                    );
+                }
+            }
             _ => {} // Other statement types
         }
     }
@@ -911,6 +973,17 @@ impl FixtureDatabase {
                         function_line,
                     );
                 }
+            }
+            Expr::Await(await_expr) => {
+                // Handle await expressions (async functions)
+                self.visit_expr_for_names(
+                    &await_expr.value,
+                    file_path,
+                    content,
+                    declared_params,
+                    function_name,
+                    function_line,
+                );
             }
             _ => {} // Other expression types
         }
@@ -3113,4 +3186,73 @@ def test_example():
             "Should not detect fixtures not in hierarchy"
         );
     }
+}
+
+#[test]
+fn test_undeclared_fixture_in_async_test() {
+    let db = FixtureDatabase::new();
+
+    // Add fixture in same file
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def http_client():
+    return "MockClient"
+
+async def test_with_undeclared():
+    response = await http_client.query("test")
+    assert response == "test"
+"#;
+    let test_path = PathBuf::from("/tmp/test_example.py");
+    db.analyze_file(test_path.clone(), content);
+
+    // Check that undeclared fixture was detected
+    let undeclared = db.get_undeclared_fixtures(&test_path);
+
+    println!("Found {} undeclared fixtures", undeclared.len());
+    for u in &undeclared {
+        println!("  - {} at line {} in {}", u.name, u.line, u.function_name);
+    }
+
+    assert_eq!(undeclared.len(), 1, "Should detect one undeclared fixture");
+    assert_eq!(undeclared[0].name, "http_client");
+    assert_eq!(undeclared[0].function_name, "test_with_undeclared");
+    assert_eq!(undeclared[0].line, 9);
+}
+
+#[test]
+fn test_undeclared_fixture_in_assert_statement() {
+    let db = FixtureDatabase::new();
+
+    // Add fixture in conftest
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def expected_value():
+    return 42
+"#;
+    let conftest_path = PathBuf::from("/tmp/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // Test file that uses fixture in assert without declaring it
+    let test_content = r#"
+def test_assertion():
+    result = calculate_value()
+    assert result == expected_value
+"#;
+    let test_path = PathBuf::from("/tmp/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Check that undeclared fixture was detected in assert
+    let undeclared = db.get_undeclared_fixtures(&test_path);
+
+    assert_eq!(
+        undeclared.len(),
+        1,
+        "Should detect one undeclared fixture in assert"
+    );
+    assert_eq!(undeclared[0].name, "expected_value");
+    assert_eq!(undeclared[0].function_name, "test_assertion");
 }

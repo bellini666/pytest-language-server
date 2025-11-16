@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FixtureDefinition {
     pub name: String,
     pub file_path: PathBuf,
@@ -27,6 +27,8 @@ pub struct FixtureDatabase {
     definitions: Arc<DashMap<String, Vec<FixtureDefinition>>>,
     // Map from file path to fixtures used in that file
     usages: Arc<DashMap<PathBuf, Vec<FixtureUsage>>>,
+    // Cache of file contents for analyzed files (mainly for testing)
+    file_cache: Arc<DashMap<PathBuf, String>>,
 }
 
 impl Default for FixtureDatabase {
@@ -40,6 +42,7 @@ impl FixtureDatabase {
         Self {
             definitions: Arc::new(DashMap::new()),
             usages: Arc::new(DashMap::new()),
+            file_cache: Arc::new(DashMap::new()),
         }
     }
 
@@ -241,6 +244,10 @@ impl FixtureDatabase {
     /// Analyze a single Python file for fixtures using AST parsing
     pub fn analyze_file(&self, file_path: PathBuf, content: &str) {
         debug!("Analyzing file: {:?}", file_path);
+
+        // Cache the file content for later use (e.g., in find_fixture_definition)
+        self.file_cache
+            .insert(file_path.clone(), content.to_string());
 
         // Parse the Python code
         let parsed = match parse(content, Mode::Module, "") {
@@ -559,50 +566,47 @@ impl FixtureDatabase {
         &self,
         file_path: &Path,
         line: u32,
-        _character: u32,
+        character: u32,
     ) -> Option<FixtureDefinition> {
         debug!(
-            "find_fixture_definition: file={:?}, line={}",
-            file_path, line
+            "find_fixture_definition: file={:?}, line={}, char={}",
+            file_path, line, character
         );
 
-        // First, find which fixture usage is at this position
-        let usages = self.usages.get(file_path)?;
-        debug!("Found {} usages in file", usages.len());
-
-        for usage in usages.iter() {
-            debug!("  Usage: {} at line {}", usage.name, usage.line);
-        }
-
         let target_line = (line + 1) as usize; // Convert from 0-based to 1-based
-        debug!("Looking for usage at line {} (1-based)", target_line);
 
-        let fixture_name = usages
-            .iter()
-            .find(|usage| {
-                debug!(
-                    "Comparing usage.line={} with target_line={}",
-                    usage.line, target_line
-                );
-                usage.line == target_line
-            })
-            .map(|u| {
-                info!("Found fixture name: {}", u.name);
-                u.name.clone()
-            })?;
-
-        info!("Searching for definition of fixture: {}", fixture_name);
-
-        // Find the closest definition (search upward through directory hierarchy)
-        let result = self.find_closest_definition(file_path, &fixture_name);
-
-        if result.is_some() {
-            info!("Found definition: {:?}", result);
+        // Read the file content - try cache first, then file system
+        let content = if let Some(cached) = self.file_cache.get(file_path) {
+            cached.clone()
         } else {
-            warn!("No definition found for fixture: {}", fixture_name);
+            std::fs::read_to_string(file_path).ok()?
+        };
+        let lines: Vec<&str> = content.lines().collect();
+
+        if target_line == 0 || target_line > lines.len() {
+            return None;
         }
 
-        result
+        let line_content = lines[target_line - 1];
+        debug!("Line content: {}", line_content);
+
+        // Extract the word at the character position
+        let word_at_cursor = self.extract_word_at_position(line_content, character as usize)?;
+        debug!("Word at cursor: {:?}", word_at_cursor);
+
+        // First, check if this word matches any fixture usage on this line
+        if let Some(usages) = self.usages.get(file_path) {
+            for usage in usages.iter() {
+                if usage.line == target_line && usage.name == word_at_cursor {
+                    info!("Found fixture usage at cursor position: {}", usage.name);
+                    // Find the closest definition for this fixture
+                    return self.find_closest_definition(file_path, &usage.name);
+                }
+            }
+        }
+
+        debug!("Word at cursor '{}' is not a fixture usage", word_at_cursor);
+        None
     }
 
     fn find_closest_definition(
@@ -679,8 +683,12 @@ impl FixtureDatabase {
             file_path, target_line, character
         );
 
-        // Read the file to get the actual line content
-        let content = std::fs::read_to_string(file_path).ok()?;
+        // Read the file content - try cache first, then file system
+        let content = if let Some(cached) = self.file_cache.get(file_path) {
+            cached.clone()
+        } else {
+            std::fs::read_to_string(file_path).ok()?
+        };
         let lines: Vec<&str> = content.lines().collect();
 
         if target_line == 0 || target_line > lines.len() {
@@ -734,35 +742,43 @@ impl FixtureDatabase {
     }
 
     fn extract_word_at_position(&self, line: &str, character: usize) -> Option<String> {
-        if character >= line.len() {
+        let chars: Vec<char> = line.chars().collect();
+
+        // If cursor is beyond the line, return None
+        if character > chars.len() {
             return None;
         }
 
-        // Find the start of the word
-        let mut start = character;
-        while start > 0 {
-            let c = line.chars().nth(start - 1)?;
-            if !c.is_alphanumeric() && c != '_' {
-                break;
+        // Check if cursor is ON an identifier character
+        if character < chars.len() {
+            let c = chars[character];
+            if c.is_alphanumeric() || c == '_' {
+                // Cursor is ON an identifier character, extract the word
+                let mut start = character;
+                while start > 0 {
+                    let prev_c = chars[start - 1];
+                    if !prev_c.is_alphanumeric() && prev_c != '_' {
+                        break;
+                    }
+                    start -= 1;
+                }
+
+                let mut end = character;
+                while end < chars.len() {
+                    let curr_c = chars[end];
+                    if !curr_c.is_alphanumeric() && curr_c != '_' {
+                        break;
+                    }
+                    end += 1;
+                }
+
+                if start < end {
+                    return Some(chars[start..end].iter().collect());
+                }
             }
-            start -= 1;
         }
 
-        // Find the end of the word
-        let mut end = character;
-        while end < line.len() {
-            let c = line.chars().nth(end)?;
-            if !c.is_alphanumeric() && c != '_' {
-                break;
-            }
-            end += 1;
-        }
-
-        if start == end {
-            return None;
-        }
-
-        Some(line[start..end].to_string())
+        None
     }
 
     /// Find all references (usages) of a fixture by name
@@ -885,7 +901,8 @@ def test_something(my_fixture):
         // Try to find the definition from the test file
         // The usage is on line 2 (1-indexed) - that's where the function parameter is
         // In 0-indexed LSP coordinates, that's line 1
-        let definition = db.find_fixture_definition(&test_path, 1, 0);
+        // Character position 19 is where 'my_fixture' starts
+        let definition = db.find_fixture_definition(&test_path, 1, 19);
 
         assert!(definition.is_some(), "Definition should be found");
         let def = definition.unwrap();
@@ -967,10 +984,12 @@ def test_something(local_fixture):
             .map(|u| u.line)
             .unwrap();
 
-        let definition = db.find_fixture_definition(&test_path, (usage_line - 1) as u32, 0);
+        // Character position 19 is where 'local_fixture' starts in "def test_something(local_fixture):"
+        let definition = db.find_fixture_definition(&test_path, (usage_line - 1) as u32, 19);
         assert!(
             definition.is_some(),
-            "Should find definition for fixture in same file"
+            "Should find definition for fixture in same file. Line: {}, char: 19",
+            usage_line
         );
         let def = definition.unwrap();
         assert_eq!(def.name, "local_fixture");
@@ -1013,5 +1032,156 @@ def test_sync_function(my_fixture):
             2,
             "Should detect fixture usage in both async and sync tests"
         );
+    }
+
+    #[test]
+    fn test_extract_word_at_position() {
+        let db = FixtureDatabase::new();
+
+        // Test basic word extraction
+        let line = "def test_something(my_fixture):";
+
+        // Cursor on 'm' of 'my_fixture' (position 19)
+        assert_eq!(
+            db.extract_word_at_position(line, 19),
+            Some("my_fixture".to_string())
+        );
+
+        // Cursor on 'y' of 'my_fixture' (position 20)
+        assert_eq!(
+            db.extract_word_at_position(line, 20),
+            Some("my_fixture".to_string())
+        );
+
+        // Cursor on last 'e' of 'my_fixture' (position 28)
+        assert_eq!(
+            db.extract_word_at_position(line, 28),
+            Some("my_fixture".to_string())
+        );
+
+        // Cursor on 'd' of 'def' (position 0)
+        assert_eq!(
+            db.extract_word_at_position(line, 0),
+            Some("def".to_string())
+        );
+
+        // Cursor on space after 'def' (position 3) - should return None
+        assert_eq!(db.extract_word_at_position(line, 3), None);
+
+        // Cursor on 't' of 'test_something' (position 4)
+        assert_eq!(
+            db.extract_word_at_position(line, 4),
+            Some("test_something".to_string())
+        );
+
+        // Cursor on opening parenthesis (position 18) - should return None
+        assert_eq!(db.extract_word_at_position(line, 18), None);
+
+        // Cursor on closing parenthesis (position 29) - should return None
+        assert_eq!(db.extract_word_at_position(line, 29), None);
+
+        // Cursor on colon (position 31) - should return None
+        assert_eq!(db.extract_word_at_position(line, 31), None);
+    }
+
+    #[test]
+    fn test_extract_word_at_position_fixture_definition() {
+        let db = FixtureDatabase::new();
+
+        let line = "@pytest.fixture";
+
+        // Cursor on '@' - should return None
+        assert_eq!(db.extract_word_at_position(line, 0), None);
+
+        // Cursor on 'p' of 'pytest' (position 1)
+        assert_eq!(
+            db.extract_word_at_position(line, 1),
+            Some("pytest".to_string())
+        );
+
+        // Cursor on '.' - should return None
+        assert_eq!(db.extract_word_at_position(line, 7), None);
+
+        // Cursor on 'f' of 'fixture' (position 8)
+        assert_eq!(
+            db.extract_word_at_position(line, 8),
+            Some("fixture".to_string())
+        );
+
+        let line2 = "def foo(other_fixture):";
+
+        // Cursor on 'd' of 'def'
+        assert_eq!(
+            db.extract_word_at_position(line2, 0),
+            Some("def".to_string())
+        );
+
+        // Cursor on space after 'def' - should return None
+        assert_eq!(db.extract_word_at_position(line2, 3), None);
+
+        // Cursor on 'f' of 'foo'
+        assert_eq!(
+            db.extract_word_at_position(line2, 4),
+            Some("foo".to_string())
+        );
+
+        // Cursor on 'o' of 'other_fixture'
+        assert_eq!(
+            db.extract_word_at_position(line2, 8),
+            Some("other_fixture".to_string())
+        );
+
+        // Cursor on parenthesis - should return None
+        assert_eq!(db.extract_word_at_position(line2, 7), None);
+    }
+
+    #[test]
+    fn test_word_detection_only_on_fixtures() {
+        let db = FixtureDatabase::new();
+
+        // Set up a conftest with a fixture
+        let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 42
+"#;
+        let conftest_path = PathBuf::from("/tmp/test/conftest.py");
+        db.analyze_file(conftest_path.clone(), conftest_content);
+
+        // Set up a test file
+        let test_content = r#"
+def test_something(my_fixture, regular_param):
+    assert my_fixture == 42
+"#;
+        let test_path = PathBuf::from("/tmp/test/test_example.py");
+        db.analyze_file(test_path.clone(), test_content);
+
+        // Line 2 is "def test_something(my_fixture, regular_param):"
+        // Character positions:
+        // 0: 'd' of 'def'
+        // 4: 't' of 'test_something'
+        // 19: 'm' of 'my_fixture'
+        // 31: 'r' of 'regular_param'
+
+        // Cursor on 'def' - should NOT find a fixture (LSP line 1, 0-based)
+        assert_eq!(db.find_fixture_definition(&test_path, 1, 0), None);
+
+        // Cursor on 'test_something' - should NOT find a fixture
+        assert_eq!(db.find_fixture_definition(&test_path, 1, 4), None);
+
+        // Cursor on 'my_fixture' - SHOULD find the fixture
+        let result = db.find_fixture_definition(&test_path, 1, 19);
+        assert!(result.is_some());
+        let def = result.unwrap();
+        assert_eq!(def.name, "my_fixture");
+
+        // Cursor on 'regular_param' - should NOT find a fixture (it's not a fixture)
+        assert_eq!(db.find_fixture_definition(&test_path, 1, 31), None);
+
+        // Cursor on comma or parenthesis - should NOT find a fixture
+        assert_eq!(db.find_fixture_definition(&test_path, 1, 18), None); // '('
+        assert_eq!(db.find_fixture_definition(&test_path, 1, 29), None); // ','
     }
 }

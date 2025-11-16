@@ -9,7 +9,7 @@ This document helps AI agents understand the pytest-language-server codebase str
 - **Language**: Rust (Edition 2021, MSRV 1.83)
 - **Lines of Code**: ~4,000 lines (2,501 in fixtures.rs, 1,574 in main.rs)
 - **Architecture**: Async LSP server using tower-lsp
-- **Key Features**: Fixture go-to-definition, find-references, hover docs, fixture overriding
+- **Key Features**: Fixture go-to-definition, find-references, hover docs, fixture overriding, undeclared fixture diagnostics
 
 ## Core Architecture
 
@@ -56,6 +56,16 @@ pub struct FixtureUsage {
     pub end_char: usize,    // Character position on line
 }
 
+pub struct UndeclaredFixture {
+    pub name: String,
+    pub file_path: PathBuf,
+    pub line: usize,
+    pub start_char: usize,
+    pub end_char: usize,
+    pub function_name: String,  // Name of test/fixture where used
+    pub function_line: usize,   // Line where function is defined
+}
+
 pub struct FixtureDatabase {
     // Map: fixture name -> all definitions (multiple conftest.py files)
     definitions: Arc<DashMap<String, Vec<FixtureDefinition>>>,
@@ -63,6 +73,8 @@ pub struct FixtureDatabase {
     usages: Arc<DashMap<PathBuf, Vec<FixtureUsage>>>,
     // Cache of analyzed file contents
     file_cache: Arc<DashMap<PathBuf, String>>,
+    // Map: file path -> undeclared fixtures in function bodies
+    undeclared_fixtures: Arc<DashMap<PathBuf, Vec<UndeclaredFixture>>>,
 }
 ```
 
@@ -100,12 +112,22 @@ This is handled by `start_char` and `end_char` in `FixtureUsage`.
 - `find_fixture_at_position(&self, file_path: &Path, line: usize, char: usize)` - Finds fixture name at cursor
 - `find_all_references(&self, fixture_name: &str, def_file: &Path)` - Finds all usages of a fixture
 - `get_char_position_from_offset(&self, file_path: &Path, line: usize, char_offset: usize)` - Converts byte offset to character position
+- `get_undeclared_fixtures(&self, file_path: &Path)` - Gets all undeclared fixture usages in a file
+- `scan_function_body_for_undeclared_fixtures()` - Detects fixtures used in function bodies without parameter declaration
 
 **AST Parsing:**
 - Uses `rustpython-parser` to parse Python files
 - Looks for `@pytest.fixture` decorators
 - Handles assignment-style fixtures (pytest-mock pattern: `mocker = pytest.fixture()(_mocker)`)
 - Extracts function signatures, docstrings, and parameter dependencies
+- Walks function body AST to find Name expressions that reference available fixtures
+
+**Undeclared Fixture Detection:**
+- Scans test and fixture function bodies for name references
+- Checks if each name is an available fixture (respects hierarchy)
+- Excludes declared parameters and built-in names (self, request)
+- Tracks line/character position for diagnostics
+- Only reports fixtures that are actually available in the current scope
 
 ### src/main.rs
 
@@ -114,7 +136,9 @@ This is handled by `start_char` and `end_char` in `FixtureUsage`.
 - `goto_definition()` - Calls `find_fixture_at_position()` then `find_fixture_definition()`
 - `references()` - Finds all references, ensures current position is included (LSP spec compliance)
 - `hover()` - Shows fixture signature and docstring in Markdown format
-- `did_open()`, `did_change()` - Re-analyzes files when opened/modified
+- `did_open()`, `did_change()` - Re-analyzes files when opened/modified, publishes diagnostics
+- `code_action()` - Provides quick fixes to add missing fixture parameters
+- `publish_diagnostics_for_file()` - Publishes warnings for undeclared fixtures
 
 ## Testing
 
@@ -136,16 +160,16 @@ tests/
 ### Running Tests
 
 ```bash
-cargo test                    # Run all tests (35 tests)
-cargo test --lib             # Run library tests (fixtures.rs: 23 tests)
+cargo test                    # Run all tests (40 tests)
+cargo test --lib             # Run library tests (fixtures.rs: 28 tests)
 cargo test --bin            # Run binary tests (main.rs: 12 tests)
 RUST_LOG=debug cargo test  # Run with debug logging
 ```
 
 ### Test Coverage
 
-- **35 total tests passing**
-  - 23 tests in `src/fixtures.rs`
+- **40 total tests passing**
+  - 28 tests in `src/fixtures.rs`
   - 12 tests in `src/main.rs`
 
 Key test areas:
@@ -156,6 +180,8 @@ Key test areas:
 - LSP spec compliance (references always include current position)
 - Multiline function signatures
 - Third-party fixture detection
+- Undeclared fixture detection (5 new tests)
+- Hierarchy-aware undeclared fixture reporting
 
 ## Development Workflow
 
@@ -314,7 +340,7 @@ Critical LSP specification requirements:
 ## Troubleshooting
 
 ### Tests failing after fixture logic changes
-- Check that all 35 tests pass: `cargo test`
+- Check that all 40 tests pass: `cargo test`
 - Focus on failing tests in `fixtures.rs` (fixture resolution) or `main.rs` (LSP handlers)
 - Common issue: fixture priority rules not respecting conftest.py hierarchy
 
@@ -349,7 +375,8 @@ Critical LSP specification requirements:
 
 ## Version History
 
-- **v0.4.0** (Current) - Character-position aware references, LSP spec compliance
+- **v0.5.0** (In Development) - Undeclared fixture diagnostics and code actions
+- **v0.4.0** - Character-position aware references, LSP spec compliance
 - **v0.3.1** - Previous stable release
 - See GitHub releases for full changelog
 

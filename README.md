@@ -41,6 +41,28 @@ View fixture information on hover:
 - Docstring (with proper formatting and dedenting)
 - Markdown support in docstrings
 
+### ⚠️ Diagnostics & Quick Fixes
+Detect and fix common pytest fixture issues:
+- **Undeclared fixture warnings**: Detects when fixtures are used in function bodies but not declared as parameters
+- **One-click fixes**: Code actions to automatically add missing fixture parameters
+- **Hierarchy-aware**: Only reports fixtures that are actually available in the current file's scope
+- **Works in tests and fixtures**: Detects undeclared usage in both test functions and fixture functions
+
+Example:
+```python
+@pytest.fixture
+def user_db():
+    return Database()
+
+def test_user(user_db):  # ✅ user_db properly declared
+    user = user_db.get_user(1)
+    assert user.name == "Alice"
+
+def test_broken():  # ⚠️ Warning: 'user_db' used but not declared
+    user = user_db.get_user(1)  # Quick fix available: add user_db parameter
+    assert user.name == "Alice"
+```
+
 ### ⚡️ Performance
 Built with Rust for maximum performance:
 - Fast workspace scanning with concurrent file processing

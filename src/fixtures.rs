@@ -2930,4 +2930,168 @@ def cli_runner(cli_runner):
             panic!("Position 16 (parameter) should resolve to parent definition");
         }
     }
+
+    #[test]
+    fn test_undeclared_fixture_detection_in_test() {
+        let db = FixtureDatabase::new();
+
+        // Add a fixture definition in conftest
+        let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 42
+"#;
+        let conftest_path = PathBuf::from("/tmp/conftest.py");
+        db.analyze_file(conftest_path.clone(), conftest_content);
+
+        // Add a test that uses the fixture without declaring it
+        let test_content = r#"
+def test_example():
+    result = my_fixture.get()
+    assert result == 42
+"#;
+        let test_path = PathBuf::from("/tmp/test_example.py");
+        db.analyze_file(test_path.clone(), test_content);
+
+        // Check that undeclared fixture was detected
+        let undeclared = db.get_undeclared_fixtures(&test_path);
+        assert_eq!(undeclared.len(), 1, "Should detect one undeclared fixture");
+
+        let fixture = &undeclared[0];
+        assert_eq!(fixture.name, "my_fixture");
+        assert_eq!(fixture.function_name, "test_example");
+        assert_eq!(fixture.line, 3); // Line 3: "result = my_fixture.get()"
+    }
+
+    #[test]
+    fn test_undeclared_fixture_detection_in_fixture() {
+        let db = FixtureDatabase::new();
+
+        // Add fixture definitions in conftest
+        let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def base_fixture():
+    return "base"
+
+@pytest.fixture
+def helper_fixture():
+    return "helper"
+"#;
+        let conftest_path = PathBuf::from("/tmp/conftest.py");
+        db.analyze_file(conftest_path.clone(), conftest_content);
+
+        // Add a fixture that uses another fixture without declaring it
+        let test_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture(base_fixture):
+    data = helper_fixture.value
+    return f"{base_fixture}-{data}"
+"#;
+        let test_path = PathBuf::from("/tmp/test_example.py");
+        db.analyze_file(test_path.clone(), test_content);
+
+        // Check that undeclared fixture was detected
+        let undeclared = db.get_undeclared_fixtures(&test_path);
+        assert_eq!(undeclared.len(), 1, "Should detect one undeclared fixture");
+
+        let fixture = &undeclared[0];
+        assert_eq!(fixture.name, "helper_fixture");
+        assert_eq!(fixture.function_name, "my_fixture");
+        assert_eq!(fixture.line, 6); // Line 6: "data = helper_fixture.value"
+    }
+
+    #[test]
+    fn test_no_false_positive_for_declared_fixtures() {
+        let db = FixtureDatabase::new();
+
+        // Add a fixture definition in conftest
+        let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 42
+"#;
+        let conftest_path = PathBuf::from("/tmp/conftest.py");
+        db.analyze_file(conftest_path.clone(), conftest_content);
+
+        // Add a test that properly declares the fixture as a parameter
+        let test_content = r#"
+def test_example(my_fixture):
+    result = my_fixture
+    assert result == 42
+"#;
+        let test_path = PathBuf::from("/tmp/test_example.py");
+        db.analyze_file(test_path.clone(), test_content);
+
+        // Check that no undeclared fixtures were detected
+        let undeclared = db.get_undeclared_fixtures(&test_path);
+        assert_eq!(
+            undeclared.len(),
+            0,
+            "Should not detect any undeclared fixtures"
+        );
+    }
+
+    #[test]
+    fn test_no_false_positive_for_non_fixtures() {
+        let db = FixtureDatabase::new();
+
+        // Add a test that uses regular variables (not fixtures)
+        let test_content = r#"
+def test_example():
+    my_variable = 42
+    result = my_variable + 10
+    assert result == 52
+"#;
+        let test_path = PathBuf::from("/tmp/test_example.py");
+        db.analyze_file(test_path.clone(), test_content);
+
+        // Check that no undeclared fixtures were detected
+        let undeclared = db.get_undeclared_fixtures(&test_path);
+        assert_eq!(
+            undeclared.len(),
+            0,
+            "Should not detect any undeclared fixtures"
+        );
+    }
+
+    #[test]
+    fn test_undeclared_fixture_not_available_in_hierarchy() {
+        let db = FixtureDatabase::new();
+
+        // Add a fixture in a different directory (not in hierarchy)
+        let other_conftest = r#"
+import pytest
+
+@pytest.fixture
+def other_fixture():
+    return "other"
+"#;
+        let other_path = PathBuf::from("/other/conftest.py");
+        db.analyze_file(other_path.clone(), other_conftest);
+
+        // Add a test that uses a name that happens to match a fixture but isn't available
+        let test_content = r#"
+def test_example():
+    result = other_fixture.value
+    assert result == "other"
+"#;
+        let test_path = PathBuf::from("/tmp/test_example.py");
+        db.analyze_file(test_path.clone(), test_content);
+
+        // Should not detect undeclared fixture because it's not in the hierarchy
+        let undeclared = db.get_undeclared_fixtures(&test_path);
+        assert_eq!(
+            undeclared.len(),
+            0,
+            "Should not detect fixtures not in hierarchy"
+        );
+    }
 }

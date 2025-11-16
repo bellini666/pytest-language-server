@@ -355,11 +355,11 @@ impl LanguageServer for Backend {
                         range: Range {
                             start: Position {
                                 line: (reference.line.saturating_sub(1)) as u32,
-                                character: 0,
+                                character: reference.start_char as u32,
                             },
                             end: Position {
                                 line: (reference.line.saturating_sub(1)) as u32,
-                                character: 0,
+                                character: reference.end_char as u32,
                             },
                         },
                     };
@@ -704,6 +704,24 @@ def test_two(cli_runner):
             test_refs.len(),
             2,
             "References should include both test usages"
+        );
+
+        // Verify that the current usage (line 2 where we clicked) IS included
+        let current_usage = refs
+            .iter()
+            .find(|r| r.file_path == test_path && r.line == 2);
+        assert!(
+            current_usage.is_some(),
+            "References should include the current usage (line 2) where cursor is positioned"
+        );
+
+        // Verify the other usage is also included
+        let other_usage = refs
+            .iter()
+            .find(|r| r.file_path == test_path && r.line == 5);
+        assert!(
+            other_usage.is_some(),
+            "References should include the other usage (line 5)"
         );
     }
 

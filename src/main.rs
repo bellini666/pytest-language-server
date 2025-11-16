@@ -578,8 +578,8 @@ impl Backend {
                     code_description: None,
                     source: Some("pytest-lsp".to_string()),
                     message: format!(
-                        "Fixture '{}' is used but not declared as a parameter in '{}'",
-                        fixture.name, fixture.function_name
+                        "Fixture '{}' is used but not declared as a parameter",
+                        fixture.name
                     ),
                     related_information: None,
                     tags: None,

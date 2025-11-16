@@ -44,6 +44,8 @@ pub struct FixtureDatabase {
     file_cache: Arc<DashMap<PathBuf, String>>,
     // Map from file path to undeclared fixtures used in function bodies
     undeclared_fixtures: Arc<DashMap<PathBuf, Vec<UndeclaredFixture>>>,
+    // Map from file path to imported names in that file
+    imports: Arc<DashMap<PathBuf, std::collections::HashSet<String>>>,
 }
 
 impl Default for FixtureDatabase {
@@ -59,6 +61,7 @@ impl FixtureDatabase {
             usages: Arc::new(DashMap::new()),
             file_cache: Arc::new(DashMap::new()),
             undeclared_fixtures: Arc::new(DashMap::new()),
+            imports: Arc::new(DashMap::new()),
         }
     }
 
@@ -280,6 +283,9 @@ impl FixtureDatabase {
         // Clear previous undeclared fixtures for this file
         self.undeclared_fixtures.remove(&file_path);
 
+        // Clear previous imports for this file
+        self.imports.remove(&file_path);
+
         // Clear previous fixture definitions from this file
         // We need to remove definitions that were in this file
         for mut entry in self.definitions.iter_mut() {
@@ -298,6 +304,15 @@ impl FixtureDatabase {
         // Process each statement in the module
         if let rustpython_parser::ast::Mod::Module(module) = parsed {
             debug!("Module has {} statements", module.body.len());
+
+            // First pass: collect all imports
+            let mut imports = std::collections::HashSet::new();
+            for stmt in &module.body {
+                self.collect_imports(stmt, &mut imports);
+            }
+            self.imports.insert(file_path.clone(), imports);
+
+            // Second pass: analyze fixtures and tests
             for stmt in &module.body {
                 self.visit_stmt(stmt, &file_path, is_conftest, content);
             }
@@ -565,6 +580,17 @@ impl FixtureDatabase {
         function_name: &str,
         function_line: usize,
     ) {
+        // First, collect all local variable names (left-hand side of assignments)
+        let mut local_vars = std::collections::HashSet::new();
+        self.collect_local_variables(body, &mut local_vars);
+
+        // Also add imported names to local_vars (they shouldn't be flagged as undeclared fixtures)
+        if let Some(imports) = self.imports.get(file_path) {
+            for import in imports.iter() {
+                local_vars.insert(import.clone());
+            }
+        }
+
         // Walk through the function body and find all Name references
         for stmt in body {
             self.visit_stmt_for_names(
@@ -572,18 +598,128 @@ impl FixtureDatabase {
                 file_path,
                 content,
                 declared_params,
+                &local_vars,
                 function_name,
                 function_line,
             );
         }
     }
 
+    fn collect_imports(&self, stmt: &Stmt, imports: &mut std::collections::HashSet<String>) {
+        match stmt {
+            Stmt::Import(import_stmt) => {
+                for alias in &import_stmt.names {
+                    // If there's an "as" alias, use that; otherwise use the original name
+                    let name = alias.asname.as_ref().unwrap_or(&alias.name);
+                    imports.insert(name.to_string());
+                }
+            }
+            Stmt::ImportFrom(import_from) => {
+                for alias in &import_from.names {
+                    // If there's an "as" alias, use that; otherwise use the original name
+                    let name = alias.asname.as_ref().unwrap_or(&alias.name);
+                    imports.insert(name.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_local_variables(
+        &self,
+        body: &[Stmt],
+        local_vars: &mut std::collections::HashSet<String>,
+    ) {
+        for stmt in body {
+            match stmt {
+                Stmt::Assign(assign) => {
+                    // Collect variable names from left-hand side
+                    for target in &assign.targets {
+                        self.collect_names_from_expr(target, local_vars);
+                    }
+                }
+                Stmt::AnnAssign(ann_assign) => {
+                    // Collect annotated assignment targets
+                    self.collect_names_from_expr(&ann_assign.target, local_vars);
+                }
+                Stmt::AugAssign(aug_assign) => {
+                    // Collect augmented assignment targets (+=, -=, etc.)
+                    self.collect_names_from_expr(&aug_assign.target, local_vars);
+                }
+                Stmt::For(for_stmt) => {
+                    // Collect loop variable
+                    self.collect_names_from_expr(&for_stmt.target, local_vars);
+                    // Recursively collect from body
+                    self.collect_local_variables(&for_stmt.body, local_vars);
+                }
+                Stmt::AsyncFor(for_stmt) => {
+                    self.collect_names_from_expr(&for_stmt.target, local_vars);
+                    self.collect_local_variables(&for_stmt.body, local_vars);
+                }
+                Stmt::While(while_stmt) => {
+                    self.collect_local_variables(&while_stmt.body, local_vars);
+                }
+                Stmt::If(if_stmt) => {
+                    self.collect_local_variables(&if_stmt.body, local_vars);
+                    self.collect_local_variables(&if_stmt.orelse, local_vars);
+                }
+                Stmt::With(with_stmt) => {
+                    // Collect context manager variables
+                    for item in &with_stmt.items {
+                        if let Some(ref optional_vars) = item.optional_vars {
+                            self.collect_names_from_expr(optional_vars, local_vars);
+                        }
+                    }
+                    self.collect_local_variables(&with_stmt.body, local_vars);
+                }
+                Stmt::AsyncWith(with_stmt) => {
+                    for item in &with_stmt.items {
+                        if let Some(ref optional_vars) = item.optional_vars {
+                            self.collect_names_from_expr(optional_vars, local_vars);
+                        }
+                    }
+                    self.collect_local_variables(&with_stmt.body, local_vars);
+                }
+                Stmt::Try(try_stmt) => {
+                    self.collect_local_variables(&try_stmt.body, local_vars);
+                    // Note: ExceptHandler struct doesn't expose name/body in current API
+                    // This is a limitation of rustpython-parser 0.4.0
+                    self.collect_local_variables(&try_stmt.orelse, local_vars);
+                    self.collect_local_variables(&try_stmt.finalbody, local_vars);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[allow(clippy::only_used_in_recursion)]
+    fn collect_names_from_expr(&self, expr: &Expr, names: &mut std::collections::HashSet<String>) {
+        match expr {
+            Expr::Name(name) => {
+                names.insert(name.id.to_string());
+            }
+            Expr::Tuple(tuple) => {
+                for elt in &tuple.elts {
+                    self.collect_names_from_expr(elt, names);
+                }
+            }
+            Expr::List(list) => {
+                for elt in &list.elts {
+                    self.collect_names_from_expr(elt, names);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn visit_stmt_for_names(
         &self,
         stmt: &Stmt,
         file_path: &PathBuf,
         content: &str,
         declared_params: &std::collections::HashSet<String>,
+        local_vars: &std::collections::HashSet<String>,
         function_name: &str,
         function_line: usize,
     ) {
@@ -594,6 +730,7 @@ impl FixtureDatabase {
                     file_path,
                     content,
                     declared_params,
+                    local_vars,
                     function_name,
                     function_line,
                 );
@@ -604,6 +741,7 @@ impl FixtureDatabase {
                     file_path,
                     content,
                     declared_params,
+                    local_vars,
                     function_name,
                     function_line,
                 );
@@ -614,6 +752,7 @@ impl FixtureDatabase {
                     file_path,
                     content,
                     declared_params,
+                    local_vars,
                     function_name,
                     function_line,
                 );
@@ -625,6 +764,7 @@ impl FixtureDatabase {
                         file_path,
                         content,
                         declared_params,
+                        local_vars,
                         function_name,
                         function_line,
                     );
@@ -636,6 +776,7 @@ impl FixtureDatabase {
                     file_path,
                     content,
                     declared_params,
+                    local_vars,
                     function_name,
                     function_line,
                 );
@@ -645,6 +786,7 @@ impl FixtureDatabase {
                         file_path,
                         content,
                         declared_params,
+                        local_vars,
                         function_name,
                         function_line,
                     );
@@ -655,6 +797,7 @@ impl FixtureDatabase {
                         file_path,
                         content,
                         declared_params,
+                        local_vars,
                         function_name,
                         function_line,
                     );
@@ -666,6 +809,7 @@ impl FixtureDatabase {
                     file_path,
                     content,
                     declared_params,
+                    local_vars,
                     function_name,
                     function_line,
                 );
@@ -675,6 +819,7 @@ impl FixtureDatabase {
                         file_path,
                         content,
                         declared_params,
+                        local_vars,
                         function_name,
                         function_line,
                     );
@@ -686,6 +831,7 @@ impl FixtureDatabase {
                     file_path,
                     content,
                     declared_params,
+                    local_vars,
                     function_name,
                     function_line,
                 );
@@ -695,6 +841,7 @@ impl FixtureDatabase {
                         file_path,
                         content,
                         declared_params,
+                        local_vars,
                         function_name,
                         function_line,
                     );
@@ -707,6 +854,7 @@ impl FixtureDatabase {
                         file_path,
                         content,
                         declared_params,
+                        local_vars,
                         function_name,
                         function_line,
                     );
@@ -717,6 +865,7 @@ impl FixtureDatabase {
                         file_path,
                         content,
                         declared_params,
+                        local_vars,
                         function_name,
                         function_line,
                     );
@@ -728,6 +877,7 @@ impl FixtureDatabase {
                     file_path,
                     content,
                     declared_params,
+                    local_vars,
                     function_name,
                     function_line,
                 );
@@ -737,6 +887,7 @@ impl FixtureDatabase {
                         file_path,
                         content,
                         declared_params,
+                        local_vars,
                         function_name,
                         function_line,
                     );
@@ -749,6 +900,7 @@ impl FixtureDatabase {
                         file_path,
                         content,
                         declared_params,
+                        local_vars,
                         function_name,
                         function_line,
                     );
@@ -759,6 +911,7 @@ impl FixtureDatabase {
                         file_path,
                         content,
                         declared_params,
+                        local_vars,
                         function_name,
                         function_line,
                     );
@@ -770,6 +923,7 @@ impl FixtureDatabase {
                     file_path,
                     content,
                     declared_params,
+                    local_vars,
                     function_name,
                     function_line,
                 );
@@ -779,6 +933,7 @@ impl FixtureDatabase {
                         file_path,
                         content,
                         declared_params,
+                        local_vars,
                         function_name,
                         function_line,
                     );
@@ -788,12 +943,14 @@ impl FixtureDatabase {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn visit_expr_for_names(
         &self,
         expr: &Expr,
         file_path: &PathBuf,
         content: &str,
         declared_params: &std::collections::HashSet<String>,
+        local_vars: &std::collections::HashSet<String>,
         function_name: &str,
         function_line: usize,
     ) {
@@ -801,8 +958,9 @@ impl FixtureDatabase {
             Expr::Name(name) => {
                 let name_str = name.id.as_str();
 
-                // Check if this name is a known fixture and not a declared parameter
+                // Check if this name is a known fixture and not a declared parameter or local variable
                 if !declared_params.contains(name_str)
+                    && !local_vars.contains(name_str)
                     && self.is_available_fixture(file_path, name_str)
                 {
                     let line = self.get_line_from_offset(name.range.start().to_usize(), content);
@@ -838,6 +996,7 @@ impl FixtureDatabase {
                     file_path,
                     content,
                     declared_params,
+                    local_vars,
                     function_name,
                     function_line,
                 );
@@ -847,6 +1006,7 @@ impl FixtureDatabase {
                         file_path,
                         content,
                         declared_params,
+                        local_vars,
                         function_name,
                         function_line,
                     );
@@ -858,6 +1018,7 @@ impl FixtureDatabase {
                     file_path,
                     content,
                     declared_params,
+                    local_vars,
                     function_name,
                     function_line,
                 );
@@ -868,6 +1029,7 @@ impl FixtureDatabase {
                     file_path,
                     content,
                     declared_params,
+                    local_vars,
                     function_name,
                     function_line,
                 );
@@ -876,6 +1038,7 @@ impl FixtureDatabase {
                     file_path,
                     content,
                     declared_params,
+                    local_vars,
                     function_name,
                     function_line,
                 );
@@ -886,6 +1049,7 @@ impl FixtureDatabase {
                     file_path,
                     content,
                     declared_params,
+                    local_vars,
                     function_name,
                     function_line,
                 );
@@ -896,6 +1060,7 @@ impl FixtureDatabase {
                     file_path,
                     content,
                     declared_params,
+                    local_vars,
                     function_name,
                     function_line,
                 );
@@ -905,6 +1070,7 @@ impl FixtureDatabase {
                         file_path,
                         content,
                         declared_params,
+                        local_vars,
                         function_name,
                         function_line,
                     );
@@ -916,6 +1082,7 @@ impl FixtureDatabase {
                     file_path,
                     content,
                     declared_params,
+                    local_vars,
                     function_name,
                     function_line,
                 );
@@ -924,6 +1091,7 @@ impl FixtureDatabase {
                     file_path,
                     content,
                     declared_params,
+                    local_vars,
                     function_name,
                     function_line,
                 );
@@ -935,6 +1103,7 @@ impl FixtureDatabase {
                         file_path,
                         content,
                         declared_params,
+                        local_vars,
                         function_name,
                         function_line,
                     );
@@ -947,6 +1116,7 @@ impl FixtureDatabase {
                         file_path,
                         content,
                         declared_params,
+                        local_vars,
                         function_name,
                         function_line,
                     );
@@ -959,6 +1129,7 @@ impl FixtureDatabase {
                         file_path,
                         content,
                         declared_params,
+                        local_vars,
                         function_name,
                         function_line,
                     );
@@ -969,6 +1140,7 @@ impl FixtureDatabase {
                         file_path,
                         content,
                         declared_params,
+                        local_vars,
                         function_name,
                         function_line,
                     );
@@ -981,6 +1153,7 @@ impl FixtureDatabase {
                     file_path,
                     content,
                     declared_params,
+                    local_vars,
                     function_name,
                     function_line,
                 );
@@ -3255,4 +3428,110 @@ def test_assertion():
     );
     assert_eq!(undeclared[0].name, "expected_value");
     assert_eq!(undeclared[0].function_name, "test_assertion");
+}
+
+#[test]
+fn test_no_false_positive_for_local_variable() {
+    // Problem 2: Should not warn if a local variable shadows a fixture name
+    let db = FixtureDatabase::new();
+
+    // Add fixture in conftest
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def foo():
+    return "fixture"
+"#;
+    let conftest_path = PathBuf::from("/tmp/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // Test file that has a local variable with the same name
+    let test_content = r#"
+def test_with_local_variable():
+    foo = "local variable"
+    result = foo.upper()
+    assert result == "LOCAL VARIABLE"
+"#;
+    let test_path = PathBuf::from("/tmp/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Should NOT detect undeclared fixture because foo is a local variable
+    let undeclared = db.get_undeclared_fixtures(&test_path);
+
+    assert_eq!(
+        undeclared.len(),
+        0,
+        "Should not detect undeclared fixture when name is a local variable"
+    );
+}
+
+#[test]
+fn test_no_false_positive_for_imported_name() {
+    // Problem 2: Should not warn if an imported name shadows a fixture name
+    let db = FixtureDatabase::new();
+
+    // Add fixture in conftest
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def foo():
+    return "fixture"
+"#;
+    let conftest_path = PathBuf::from("/tmp/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // Test file that imports a name
+    let test_content = r#"
+from mymodule import foo
+
+def test_with_import():
+    result = foo.something()
+    assert result == "value"
+"#;
+    let test_path = PathBuf::from("/tmp/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Should NOT detect undeclared fixture because foo is imported
+    let undeclared = db.get_undeclared_fixtures(&test_path);
+
+    assert_eq!(
+        undeclared.len(),
+        0,
+        "Should not detect undeclared fixture when name is imported"
+    );
+}
+
+#[test]
+fn test_warn_for_fixture_used_directly() {
+    // Problem 2: SHOULD warn if trying to use a fixture defined in the same file
+    // This is an error because fixtures must be accessed through parameters
+    let db = FixtureDatabase::new();
+
+    let test_content = r#"
+import pytest
+
+@pytest.fixture
+def foo():
+    return "fixture"
+
+def test_using_fixture_directly():
+    # This is an error - fixtures must be declared as parameters
+    result = foo.something()
+    assert result == "value"
+"#;
+    let test_path = PathBuf::from("/tmp/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // SHOULD detect undeclared fixture even though foo is defined in same file
+    let undeclared = db.get_undeclared_fixtures(&test_path);
+
+    assert_eq!(
+        undeclared.len(),
+        1,
+        "Should detect fixture used directly without parameter declaration"
+    );
+    assert_eq!(undeclared[0].name, "foo");
+    assert_eq!(undeclared[0].function_name, "test_using_fixture_directly");
 }

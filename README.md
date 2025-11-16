@@ -17,6 +17,12 @@
 
 A blazingly fast Language Server Protocol (LSP) implementation for pytest, built with Rust.
 
+## Demo
+
+![pytest-language-server demo](demo.gif)
+
+*Showcasing go-to-definition, find-references, hover documentation, and code actions. Demo also vibed into existence.* ✨
+
 ## Features
 
 ### 🎯 Go to Definition

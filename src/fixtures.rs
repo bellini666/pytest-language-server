@@ -375,8 +375,16 @@ impl FixtureDatabase {
                 .push(definition);
 
             // Fixtures can depend on other fixtures - record these as usages too
+            let mut declared_params: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            declared_params.insert("self".to_string());
+            declared_params.insert("request".to_string());
+            declared_params.insert(func_name.to_string()); // Exclude function name itself
+
             for arg in &args.args {
                 let arg_name = arg.def.arg.as_str();
+                declared_params.insert(arg_name.to_string());
+
                 if arg_name != "self" && arg_name != "request" {
                     // Get the actual line where this parameter appears
                     // arg.def.range contains the location of the parameter name
@@ -406,13 +414,24 @@ impl FixtureDatabase {
                         .push(usage);
                 }
             }
+
+            // Scan fixture body for undeclared fixture usages
+            let function_line = self.get_line_from_offset(range.start().to_usize(), content);
+            self.scan_function_body_for_undeclared_fixtures(
+                body,
+                file_path,
+                content,
+                &declared_params,
+                func_name,
+                function_line,
+            );
         }
 
-        // Check if this is a test function or fixture
-        let is_test_or_fixture = func_name.starts_with("test_") || is_fixture;
+        // Check if this is a test function
+        let is_test = func_name.starts_with("test_");
 
-        if is_test_or_fixture {
-            debug!("Found test/fixture function: {}", func_name);
+        if is_test {
+            debug!("Found test function: {}", func_name);
 
             // Collect declared parameters
             let mut declared_params: std::collections::HashSet<String> =

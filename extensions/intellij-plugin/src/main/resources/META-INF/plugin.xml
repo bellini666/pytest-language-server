@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>com.github.bellini666.pytest-language-server</id>
     <name>pytest Language Server</name>
-    <version>0.5.1</version>
+    <version>0.5.2</version>
     <vendor email="hackedbellini@gmail.com" url="https://github.com/bellini666/pytest-language-server">Thiago Bellini Ribeiro</vendor>
 
     <description><![CDATA[

@@ -89,17 +89,44 @@ cd extensions/intellij-plugin
 
 ### 3. Zed Extension Setup
 
-**Note**: Zed currently uses a manual extension publishing process or requires submitting to their repository.
+**Automated Publishing (via GitHub Action):**
 
-**For Manual Distribution:**
-The CI automatically packages the Zed extension as `pytest-language-server-zed-extension.tar.gz` and uploads it to GitHub releases.
+Zed extensions are published by creating PRs to the official Zed extensions repository. This is automated using the `huacnlee/zed-extension-action` GitHub Action.
 
-**For Official Zed Extension Directory:**
-1. Fork https://github.com/zed-industries/extensions
-2. Add extension to `extensions/` directory
-3. Submit PR to Zed extensions repo
+**Setup Steps:**
 
-The extension will still be bundled with binaries in your GitHub releases for users to install manually.
+1. **Fork the Zed Extensions Repo:**
+   ```bash
+   # Go to https://github.com/zed-industries/extensions
+   # Click "Fork" (fork to your personal account, not an organization)
+   ```
+
+2. **Add Your Extension to Your Fork:**
+   ```bash
+   git clone https://github.com/YOUR_USERNAME/extensions
+   cd extensions
+   git submodule add https://github.com/bellini666/pytest-language-server.git extensions/pytest-language-server
+   ```
+
+3. **Add Entry to extensions.toml:**
+   ```toml
+   [pytest-language-server]
+   submodule = "extensions/pytest-language-server"
+   path = "extensions/zed-extension"
+   version = "0.5.2"
+   ```
+
+4. **Create Initial PR:**
+   Submit the initial PR to zed-industries/extensions manually.
+
+5. **Automated Updates:**
+   After the initial setup, the GitHub Action automatically creates PRs to update your extension when you create a new release tag.
+
+**How It Works:**
+- When you push a new version tag (e.g., `v0.6.0`), the `publish-zed` job runs
+- It uses your `COMMITTER_TOKEN` to create a PR on your fork of zed-industries/extensions
+- The PR updates the submodule commit and version in `extensions.toml`
+- You review and merge the PR to your fork, then submit to zed-industries/extensions
 
 ### 4. GitHub Secrets Configuration
 
@@ -109,7 +136,16 @@ Add these secrets to your GitHub repository (Settings → Secrets and variables 
 VSCE_TOKEN=<your-vscode-marketplace-token>
 JETBRAINS_TOKEN=<your-jetbrains-marketplace-token>
 CARGO_REGISTRY_TOKEN=<your-crates-io-token>
+COMMITTER_TOKEN=<your-github-pat-with-repo-and-workflow-scopes>
 ```
+
+**COMMITTER_TOKEN Setup (Required for Zed Extension):**
+1. Go to https://github.com/settings/tokens/new
+2. Create a **Classic** Personal Access Token with these scopes:
+   - `repo` (Full control of private repositories)
+   - `workflow` (Update GitHub Action workflows)
+3. Copy the token and add it as `COMMITTER_TOKEN` secret
+4. This token allows the Zed extension action to create PRs to your fork of zed-industries/extensions
 
 **Optional IntelliJ Plugin Signing (for paid plugins):**
 ```
@@ -277,6 +313,10 @@ If versions get out of sync:
 - [ ] Create JetBrains plugin listing
 - [ ] Generate JetBrains token
 - [ ] Add JETBRAINS_TOKEN to GitHub secrets
+- [ ] Fork zed-industries/extensions repository
+- [ ] Generate GitHub PAT with repo & workflow scopes
+- [ ] Add COMMITTER_TOKEN to GitHub secrets
+- [ ] Add CARGO_REGISTRY_TOKEN to GitHub secrets
 - [ ] Test VSCode extension locally
 - [ ] Test IntelliJ plugin locally
 - [ ] Test Zed extension locally

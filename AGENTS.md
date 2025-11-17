@@ -160,28 +160,32 @@ tests/
 ### Running Tests
 
 ```bash
-cargo test                    # Run all tests (40 tests)
-cargo test --lib             # Run library tests (fixtures.rs: 28 tests)
-cargo test --bin            # Run binary tests (main.rs: 12 tests)
+cargo test                    # Run all tests
+cargo test --lib             # Run library tests (fixtures.rs: 47 tests)
+cargo test --bin            # Run binary tests (main.rs: 13 tests)
 RUST_LOG=debug cargo test  # Run with debug logging
 ```
 
 ### Test Coverage
 
-- **52 total tests passing** (as of v0.5.0)
-  - 28 tests in `src/fixtures.rs`
-  - 12 tests in `src/main.rs`
+- **60 total tests passing** (as of v0.5.1)
+  - 47 tests in `src/fixtures.rs`
+  - 13 tests in `src/main.rs`
 
 Key test areas:
 - Fixture definition extraction from various patterns
 - Fixture usage detection in test functions and other fixtures
-- Fixture priority/shadowing rules
+- Fixture priority/shadowing rules (8 comprehensive hierarchy tests)
 - Character-position awareness for self-referencing fixtures
 - LSP spec compliance (references always include current position)
 - Multiline function signatures
 - Third-party fixture detection
-- Undeclared fixture detection (5 new tests)
+- Undeclared fixture detection (5 tests)
 - Hierarchy-aware undeclared fixture reporting
+- Deterministic fixture resolution (ensures no random behavior with multiple definitions)
+- Path normalization and canonicalization
+- Deep directory hierarchy support
+- Sibling directory isolation
 
 ## Development Workflow
 
@@ -308,6 +312,17 @@ Python test discovery patterns:
 5. **Third-party fixtures**: pytest-mock, pytest-asyncio, pytest-django
    - Scanned from virtual environment site-packages
 
+6. **Path normalization and canonicalization** (fixed in v0.5.1)
+   - All file paths are canonicalized in `analyze_file()` to handle symlinks and resolve absolute paths
+   - This ensures consistent path comparisons in fixture resolution
+   - Prevents random fixture selection when paths have different representations
+   - Critical for large projects with multiple conftest.py files
+
+7. **Deterministic fixture resolution** (fixed in v0.5.1)
+   - When multiple fixture definitions exist in unrelated directories, resolution is deterministic
+   - Priority order: same file > conftest hierarchy > third-party (site-packages) > sorted by path
+   - Prevents non-deterministic behavior from DashMap iteration order
+
 ## LSP Spec Compliance
 
 Critical LSP specification requirements:
@@ -381,6 +396,7 @@ Critical LSP specification requirements:
 
 ## Version History
 
+- **v0.5.1** (November 2025) - Critical fix for deterministic fixture resolution, path canonicalization, 8 new comprehensive hierarchy tests
 - **v0.5.0** (November 2025) - Undeclared fixture diagnostics, code actions (quick fixes), line-aware scoping, LSP compliance improvements
 - **v0.4.0** (November 2025) - Character-position aware references, LSP spec compliance
 - **v0.3.1** - Previous stable release
@@ -388,6 +404,6 @@ Critical LSP specification requirements:
 
 ---
 
-**Last Updated**: v0.5.0 (November 2025)
+**Last Updated**: v0.5.1 (November 2025)
 
 This document should be updated when making significant architectural changes or adding new features.

@@ -262,6 +262,18 @@ impl FixtureDatabase {
 
     /// Analyze a single Python file for fixtures using AST parsing
     pub fn analyze_file(&self, file_path: PathBuf, content: &str) {
+        // Canonicalize the path to handle symlinks and normalize path representation
+        // This ensures consistent path comparisons later
+        let file_path = file_path.canonicalize().unwrap_or_else(|_| {
+            // If canonicalization fails (e.g., file doesn't exist yet, or on some filesystems),
+            // fall back to the original path
+            debug!(
+                "Warning: Could not canonicalize path {:?}, using as-is",
+                file_path
+            );
+            file_path
+        });
+
         debug!("Analyzing file: {:?}", file_path);
 
         // Cache the file content for later use (e.g., in find_fixture_definition)
@@ -1543,12 +1555,37 @@ impl FixtureDatabase {
             }
         }
 
-        // If no conftest.py found, return the first definition
-        warn!(
-            "No fixture {} found following priority rules, returning first available",
+        // Priority 3: Check for third-party fixtures (from virtual environment)
+        // These are fixtures from pytest plugins in site-packages
+        debug!(
+            "No fixture {} found in conftest hierarchy, checking for third-party fixtures",
             fixture_name
         );
-        definitions.iter().next().cloned()
+        for def in definitions.iter() {
+            if def.file_path.to_string_lossy().contains("site-packages") {
+                info!(
+                    "Found third-party fixture {} in site-packages: {:?}",
+                    fixture_name, def.file_path
+                );
+                return Some(def.clone());
+            }
+        }
+
+        // Priority 4: If still no match, this means the fixture is defined somewhere
+        // unrelated to the current file's hierarchy. This is unusual but can happen
+        // when fixtures are defined in unrelated test directories.
+        // Return the first definition sorted by path for determinism.
+        warn!(
+            "No fixture {} found following priority rules (same file, conftest hierarchy, third-party)",
+            fixture_name
+        );
+        warn!(
+            "Falling back to first definition by path (deterministic fallback for unrelated fixtures)"
+        );
+
+        let mut defs: Vec<_> = definitions.iter().cloned().collect();
+        defs.sort_by(|a, b| a.file_path.cmp(&b.file_path));
+        defs.first().cloned()
     }
 
     /// Find the closest definition for a fixture, excluding a specific definition
@@ -1630,14 +1667,39 @@ impl FixtureDatabase {
             }
         }
 
-        // If no conftest.py found, return the first definition that's not excluded
-        warn!(
-            "No fixture {} found following priority rules, returning first available (excluding specified)",
+        // Priority 3: Check for third-party fixtures (from virtual environment)
+        debug!(
+            "No fixture {} found in conftest hierarchy (excluding specified), checking for third-party fixtures",
             fixture_name
         );
-        definitions
+        for def in definitions.iter() {
+            // Skip excluded definition
+            if let Some(excluded) = exclude {
+                if def == excluded {
+                    continue;
+                }
+            }
+            if def.file_path.to_string_lossy().contains("site-packages") {
+                info!(
+                    "Found third-party fixture {} in site-packages: {:?}",
+                    fixture_name, def.file_path
+                );
+                return Some(def.clone());
+            }
+        }
+
+        // Priority 4: Deterministic fallback - return first definition by path (excluding specified)
+        warn!(
+            "No fixture {} found following priority rules (excluding specified)",
+            fixture_name
+        );
+        warn!(
+            "Falling back to first definition by path (deterministic fallback for unrelated fixtures)"
+        );
+
+        let mut defs: Vec<_> = definitions
             .iter()
-            .find(|def| {
+            .filter(|def| {
                 if let Some(excluded) = exclude {
                     def != &excluded
                 } else {
@@ -1645,6 +1707,9 @@ impl FixtureDatabase {
                 }
             })
             .cloned()
+            .collect();
+        defs.sort_by(|a, b| a.file_path.cmp(&b.file_path));
+        defs.first().cloned()
     }
 
     /// Find the fixture name at a given position (either definition or usage)
@@ -3853,5 +3918,589 @@ def http_client():
     assert_eq!(
         undeclared[0].line, 2,
         "Should flag usage on line 2 before assignment on line 4"
+    );
+}
+
+#[test]
+fn test_fixture_resolution_priority_deterministic() {
+    // Test that fixture resolution is deterministic and follows priority rules
+    // This test ensures we don't randomly pick a definition from DashMap iteration
+    let db = FixtureDatabase::new();
+
+    // Create multiple conftest.py files with the same fixture name in different locations
+    // Scenario: /tmp/project/app/tests/test_foo.py should resolve to closest conftest
+
+    // Root conftest
+    let root_content = r#"
+import pytest
+
+@pytest.fixture
+def db():
+    return "root_db"
+"#;
+    let root_conftest = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(root_conftest.clone(), root_content);
+
+    // Unrelated conftest (different branch of directory tree)
+    let unrelated_content = r#"
+import pytest
+
+@pytest.fixture
+def db():
+    return "unrelated_db"
+"#;
+    let unrelated_conftest = PathBuf::from("/tmp/other/conftest.py");
+    db.analyze_file(unrelated_conftest.clone(), unrelated_content);
+
+    // App-level conftest
+    let app_content = r#"
+import pytest
+
+@pytest.fixture
+def db():
+    return "app_db"
+"#;
+    let app_conftest = PathBuf::from("/tmp/project/app/conftest.py");
+    db.analyze_file(app_conftest.clone(), app_content);
+
+    // Tests-level conftest (closest)
+    let tests_content = r#"
+import pytest
+
+@pytest.fixture
+def db():
+    return "tests_db"
+"#;
+    let tests_conftest = PathBuf::from("/tmp/project/app/tests/conftest.py");
+    db.analyze_file(tests_conftest.clone(), tests_content);
+
+    // Test file
+    let test_content = r#"
+def test_database(db):
+    assert db is not None
+"#;
+    let test_path = PathBuf::from("/tmp/project/app/tests/test_foo.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Run the resolution multiple times to ensure it's deterministic
+    for iteration in 0..10 {
+        let result = db.find_fixture_definition(&test_path, 1, 18); // Line 2, column 18 = "db" parameter
+
+        assert!(
+            result.is_some(),
+            "Iteration {}: Should find a fixture definition",
+            iteration
+        );
+
+        let def = result.unwrap();
+        assert_eq!(
+            def.name, "db",
+            "Iteration {}: Should find 'db' fixture",
+            iteration
+        );
+
+        // Should ALWAYS resolve to the closest conftest.py (tests_conftest)
+        assert_eq!(
+            def.file_path, tests_conftest,
+            "Iteration {}: Should consistently resolve to closest conftest.py at {:?}, but got {:?}",
+            iteration,
+            tests_conftest,
+            def.file_path
+        );
+    }
+}
+
+#[test]
+fn test_fixture_resolution_prefers_parent_over_unrelated() {
+    // Test that when no fixture is in same file or conftest hierarchy,
+    // we prefer third-party fixtures (site-packages) over random unrelated conftest files
+    let db = FixtureDatabase::new();
+
+    // Unrelated conftest in different directory tree
+    let unrelated_content = r#"
+import pytest
+
+@pytest.fixture
+def custom_fixture():
+    return "unrelated"
+"#;
+    let unrelated_conftest = PathBuf::from("/tmp/other_project/conftest.py");
+    db.analyze_file(unrelated_conftest.clone(), unrelated_content);
+
+    // Third-party fixture (mock in site-packages)
+    let third_party_content = r#"
+import pytest
+
+@pytest.fixture
+def custom_fixture():
+    return "third_party"
+"#;
+    let third_party_path =
+        PathBuf::from("/tmp/.venv/lib/python3.11/site-packages/pytest_custom/plugin.py");
+    db.analyze_file(third_party_path.clone(), third_party_content);
+
+    // Test file in a different project
+    let test_content = r#"
+def test_custom(custom_fixture):
+    assert custom_fixture is not None
+"#;
+    let test_path = PathBuf::from("/tmp/my_project/test_foo.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Should prefer third-party fixture over unrelated conftest
+    let result = db.find_fixture_definition(&test_path, 1, 16);
+    assert!(result.is_some());
+    let def = result.unwrap();
+
+    // Should be the third-party fixture (site-packages)
+    assert_eq!(
+        def.file_path, third_party_path,
+        "Should prefer third-party fixture from site-packages over unrelated conftest.py"
+    );
+}
+
+#[test]
+fn test_fixture_resolution_hierarchy_over_third_party() {
+    // Test that fixtures in the conftest hierarchy are preferred over third-party
+    let db = FixtureDatabase::new();
+
+    // Third-party fixture
+    let third_party_content = r#"
+import pytest
+
+@pytest.fixture
+def mocker():
+    return "third_party_mocker"
+"#;
+    let third_party_path =
+        PathBuf::from("/tmp/project/.venv/lib/python3.11/site-packages/pytest_mock/plugin.py");
+    db.analyze_file(third_party_path.clone(), third_party_content);
+
+    // Local conftest.py that overrides mocker
+    let local_content = r#"
+import pytest
+
+@pytest.fixture
+def mocker():
+    return "local_mocker"
+"#;
+    let local_conftest = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(local_conftest.clone(), local_content);
+
+    // Test file
+    let test_content = r#"
+def test_mocking(mocker):
+    assert mocker is not None
+"#;
+    let test_path = PathBuf::from("/tmp/project/test_foo.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Should prefer local conftest over third-party
+    let result = db.find_fixture_definition(&test_path, 1, 17);
+    assert!(result.is_some());
+    let def = result.unwrap();
+
+    assert_eq!(
+        def.file_path, local_conftest,
+        "Should prefer local conftest.py fixture over third-party fixture"
+    );
+}
+
+#[test]
+fn test_fixture_resolution_with_relative_paths() {
+    // Test that fixture resolution works even when paths are stored with different representations
+    // This simulates the case where analyze_file is called with relative paths vs absolute paths
+    let db = FixtureDatabase::new();
+
+    // Conftest with absolute path
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def shared():
+    return "conftest"
+"#;
+    let conftest_abs = PathBuf::from("/tmp/project/tests/conftest.py");
+    db.analyze_file(conftest_abs.clone(), conftest_content);
+
+    // Test file also with absolute path
+    let test_content = r#"
+def test_example(shared):
+    assert shared == "conftest"
+"#;
+    let test_abs = PathBuf::from("/tmp/project/tests/test_foo.py");
+    db.analyze_file(test_abs.clone(), test_content);
+
+    // Should find the fixture from conftest
+    let result = db.find_fixture_definition(&test_abs, 1, 17);
+    assert!(result.is_some(), "Should find fixture with absolute paths");
+    let def = result.unwrap();
+    assert_eq!(def.file_path, conftest_abs, "Should resolve to conftest.py");
+}
+
+#[test]
+fn test_fixture_resolution_deep_hierarchy() {
+    // Test resolution in a deep directory hierarchy to ensure path traversal works correctly
+    let db = FixtureDatabase::new();
+
+    // Root level fixture
+    let root_content = r#"
+import pytest
+
+@pytest.fixture
+def db():
+    return "root"
+"#;
+    let root_conftest = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(root_conftest.clone(), root_content);
+
+    // Level 1
+    let level1_content = r#"
+import pytest
+
+@pytest.fixture
+def db():
+    return "level1"
+"#;
+    let level1_conftest = PathBuf::from("/tmp/project/src/conftest.py");
+    db.analyze_file(level1_conftest.clone(), level1_content);
+
+    // Level 2
+    let level2_content = r#"
+import pytest
+
+@pytest.fixture
+def db():
+    return "level2"
+"#;
+    let level2_conftest = PathBuf::from("/tmp/project/src/app/conftest.py");
+    db.analyze_file(level2_conftest.clone(), level2_content);
+
+    // Level 3 - deepest
+    let level3_content = r#"
+import pytest
+
+@pytest.fixture
+def db():
+    return "level3"
+"#;
+    let level3_conftest = PathBuf::from("/tmp/project/src/app/tests/conftest.py");
+    db.analyze_file(level3_conftest.clone(), level3_content);
+
+    // Test at level 3 - should use level 3 fixture
+    let test_l3_content = r#"
+def test_db(db):
+    assert db == "level3"
+"#;
+    let test_l3 = PathBuf::from("/tmp/project/src/app/tests/test_foo.py");
+    db.analyze_file(test_l3.clone(), test_l3_content);
+
+    let result_l3 = db.find_fixture_definition(&test_l3, 1, 12);
+    assert!(result_l3.is_some());
+    assert_eq!(
+        result_l3.unwrap().file_path,
+        level3_conftest,
+        "Test at level 3 should use level 3 fixture"
+    );
+
+    // Test at level 2 - should use level 2 fixture
+    let test_l2_content = r#"
+def test_db(db):
+    assert db == "level2"
+"#;
+    let test_l2 = PathBuf::from("/tmp/project/src/app/test_bar.py");
+    db.analyze_file(test_l2.clone(), test_l2_content);
+
+    let result_l2 = db.find_fixture_definition(&test_l2, 1, 12);
+    assert!(result_l2.is_some());
+    assert_eq!(
+        result_l2.unwrap().file_path,
+        level2_conftest,
+        "Test at level 2 should use level 2 fixture"
+    );
+
+    // Test at level 1 - should use level 1 fixture
+    let test_l1_content = r#"
+def test_db(db):
+    assert db == "level1"
+"#;
+    let test_l1 = PathBuf::from("/tmp/project/src/test_baz.py");
+    db.analyze_file(test_l1.clone(), test_l1_content);
+
+    let result_l1 = db.find_fixture_definition(&test_l1, 1, 12);
+    assert!(result_l1.is_some());
+    assert_eq!(
+        result_l1.unwrap().file_path,
+        level1_conftest,
+        "Test at level 1 should use level 1 fixture"
+    );
+
+    // Test at root - should use root fixture
+    let test_root_content = r#"
+def test_db(db):
+    assert db == "root"
+"#;
+    let test_root = PathBuf::from("/tmp/project/test_root.py");
+    db.analyze_file(test_root.clone(), test_root_content);
+
+    let result_root = db.find_fixture_definition(&test_root, 1, 12);
+    assert!(result_root.is_some());
+    assert_eq!(
+        result_root.unwrap().file_path,
+        root_conftest,
+        "Test at root should use root fixture"
+    );
+}
+
+#[test]
+fn test_fixture_resolution_sibling_directories() {
+    // Test that fixtures in sibling directories don't leak into each other
+    let db = FixtureDatabase::new();
+
+    // Root conftest
+    let root_content = r#"
+import pytest
+
+@pytest.fixture
+def shared():
+    return "root"
+"#;
+    let root_conftest = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(root_conftest.clone(), root_content);
+
+    // Module A with its own fixture
+    let module_a_content = r#"
+import pytest
+
+@pytest.fixture
+def module_specific():
+    return "module_a"
+"#;
+    let module_a_conftest = PathBuf::from("/tmp/project/module_a/conftest.py");
+    db.analyze_file(module_a_conftest.clone(), module_a_content);
+
+    // Module B with its own fixture (same name!)
+    let module_b_content = r#"
+import pytest
+
+@pytest.fixture
+def module_specific():
+    return "module_b"
+"#;
+    let module_b_conftest = PathBuf::from("/tmp/project/module_b/conftest.py");
+    db.analyze_file(module_b_conftest.clone(), module_b_content);
+
+    // Test in module A - should use module A's fixture
+    let test_a_content = r#"
+def test_a(module_specific, shared):
+    assert module_specific == "module_a"
+    assert shared == "root"
+"#;
+    let test_a = PathBuf::from("/tmp/project/module_a/test_a.py");
+    db.analyze_file(test_a.clone(), test_a_content);
+
+    let result_a = db.find_fixture_definition(&test_a, 1, 11);
+    assert!(result_a.is_some());
+    assert_eq!(
+        result_a.unwrap().file_path,
+        module_a_conftest,
+        "Test in module_a should use module_a's fixture"
+    );
+
+    // Test in module B - should use module B's fixture
+    let test_b_content = r#"
+def test_b(module_specific, shared):
+    assert module_specific == "module_b"
+    assert shared == "root"
+"#;
+    let test_b = PathBuf::from("/tmp/project/module_b/test_b.py");
+    db.analyze_file(test_b.clone(), test_b_content);
+
+    let result_b = db.find_fixture_definition(&test_b, 1, 11);
+    assert!(result_b.is_some());
+    assert_eq!(
+        result_b.unwrap().file_path,
+        module_b_conftest,
+        "Test in module_b should use module_b's fixture"
+    );
+
+    // Both should be able to access shared root fixture
+    // "shared" starts at column 29 (after "module_specific, ")
+    let result_a_shared = db.find_fixture_definition(&test_a, 1, 29);
+    assert!(result_a_shared.is_some());
+    assert_eq!(
+        result_a_shared.unwrap().file_path,
+        root_conftest,
+        "Test in module_a should access root's shared fixture"
+    );
+
+    let result_b_shared = db.find_fixture_definition(&test_b, 1, 29);
+    assert!(result_b_shared.is_some());
+    assert_eq!(
+        result_b_shared.unwrap().file_path,
+        root_conftest,
+        "Test in module_b should access root's shared fixture"
+    );
+}
+
+#[test]
+fn test_fixture_resolution_multiple_unrelated_branches_is_deterministic() {
+    // This is the key test: when a fixture is defined in multiple unrelated branches,
+    // the resolution should be deterministic (not random based on DashMap iteration)
+    let db = FixtureDatabase::new();
+
+    // Three unrelated project branches
+    let branch_a_content = r#"
+import pytest
+
+@pytest.fixture
+def common_fixture():
+    return "branch_a"
+"#;
+    let branch_a_conftest = PathBuf::from("/tmp/projects/project_a/conftest.py");
+    db.analyze_file(branch_a_conftest.clone(), branch_a_content);
+
+    let branch_b_content = r#"
+import pytest
+
+@pytest.fixture
+def common_fixture():
+    return "branch_b"
+"#;
+    let branch_b_conftest = PathBuf::from("/tmp/projects/project_b/conftest.py");
+    db.analyze_file(branch_b_conftest.clone(), branch_b_content);
+
+    let branch_c_content = r#"
+import pytest
+
+@pytest.fixture
+def common_fixture():
+    return "branch_c"
+"#;
+    let branch_c_conftest = PathBuf::from("/tmp/projects/project_c/conftest.py");
+    db.analyze_file(branch_c_conftest.clone(), branch_c_content);
+
+    // Test in yet another unrelated location
+    let test_content = r#"
+def test_something(common_fixture):
+    assert common_fixture is not None
+"#;
+    let test_path = PathBuf::from("/tmp/unrelated/test_foo.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Run resolution multiple times - should always return the same result
+    let mut results = Vec::new();
+    for _ in 0..20 {
+        let result = db.find_fixture_definition(&test_path, 1, 19);
+        assert!(result.is_some(), "Should find a fixture");
+        results.push(result.unwrap().file_path.clone());
+    }
+
+    // All results should be identical (deterministic)
+    let first_result = &results[0];
+    for (i, result) in results.iter().enumerate() {
+        assert_eq!(
+            result, first_result,
+            "Iteration {}: fixture resolution should be deterministic, expected {:?} but got {:?}",
+            i, first_result, result
+        );
+    }
+}
+
+#[test]
+fn test_fixture_resolution_conftest_at_various_depths() {
+    // Test that conftest.py files at different depths are correctly prioritized
+    let db = FixtureDatabase::new();
+
+    // Deep conftest
+    let deep_content = r#"
+import pytest
+
+@pytest.fixture
+def fixture_a():
+    return "deep"
+
+@pytest.fixture
+def fixture_b():
+    return "deep"
+"#;
+    let deep_conftest = PathBuf::from("/tmp/project/src/module/tests/integration/conftest.py");
+    db.analyze_file(deep_conftest.clone(), deep_content);
+
+    // Mid-level conftest - overrides fixture_a but not fixture_b
+    let mid_content = r#"
+import pytest
+
+@pytest.fixture
+def fixture_a():
+    return "mid"
+"#;
+    let mid_conftest = PathBuf::from("/tmp/project/src/module/conftest.py");
+    db.analyze_file(mid_conftest.clone(), mid_content);
+
+    // Root conftest - defines fixture_c
+    let root_content = r#"
+import pytest
+
+@pytest.fixture
+def fixture_c():
+    return "root"
+"#;
+    let root_conftest = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(root_conftest.clone(), root_content);
+
+    // Test in deep directory
+    let test_content = r#"
+def test_all(fixture_a, fixture_b, fixture_c):
+    assert fixture_a == "deep"
+    assert fixture_b == "deep"
+    assert fixture_c == "root"
+"#;
+    let test_path = PathBuf::from("/tmp/project/src/module/tests/integration/test_foo.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // fixture_a: should resolve to deep (closest)
+    let result_a = db.find_fixture_definition(&test_path, 1, 13);
+    assert!(result_a.is_some());
+    assert_eq!(
+        result_a.unwrap().file_path,
+        deep_conftest,
+        "fixture_a should resolve to closest conftest (deep)"
+    );
+
+    // fixture_b: should resolve to deep (only defined there)
+    let result_b = db.find_fixture_definition(&test_path, 1, 24);
+    assert!(result_b.is_some());
+    assert_eq!(
+        result_b.unwrap().file_path,
+        deep_conftest,
+        "fixture_b should resolve to deep conftest"
+    );
+
+    // fixture_c: should resolve to root (only defined there)
+    let result_c = db.find_fixture_definition(&test_path, 1, 35);
+    assert!(result_c.is_some());
+    assert_eq!(
+        result_c.unwrap().file_path,
+        root_conftest,
+        "fixture_c should resolve to root conftest"
+    );
+
+    // Test in mid-level directory (one level up)
+    let test_mid_content = r#"
+def test_mid(fixture_a, fixture_c):
+    assert fixture_a == "mid"
+    assert fixture_c == "root"
+"#;
+    let test_mid_path = PathBuf::from("/tmp/project/src/module/test_bar.py");
+    db.analyze_file(test_mid_path.clone(), test_mid_content);
+
+    // fixture_a from mid-level: should resolve to mid conftest
+    let result_a_mid = db.find_fixture_definition(&test_mid_path, 1, 13);
+    assert!(result_a_mid.is_some());
+    assert_eq!(
+        result_a_mid.unwrap().file_path,
+        mid_conftest,
+        "fixture_a from mid-level test should resolve to mid conftest"
     );
 }

@@ -9,5 +9,6 @@ webpack.config.js
 **/*.map
 **/*.ts
 node_modules/**
-!node_modules/vscode-languageclient/**
 out/**
+.eslintrc.json
+tsconfig.json

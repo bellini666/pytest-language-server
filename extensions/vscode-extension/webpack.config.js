@@ -29,5 +29,10 @@ module.exports = {
         ]
       }
     ]
-  }
+  },
+  ignoreWarnings: [
+    {
+      module: /node_modules\/vscode-languageserver-types/,
+    },
+  ],
 };

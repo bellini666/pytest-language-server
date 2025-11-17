@@ -14,7 +14,6 @@
     "url": "https://github.com/bellini666/pytest-language-server/issues"
   },
   "homepage": "https://github.com/bellini666/pytest-language-server#readme",
-  "icon": "icon.png",
   "engines": {
     "vscode": "^1.75.0"
   },

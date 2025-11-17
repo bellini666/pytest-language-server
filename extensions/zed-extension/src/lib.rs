@@ -1,4 +1,3 @@
-use std::fs;
 use zed::settings::LspSettings;
 use zed_extension_api::{self as zed, Result};
 
@@ -83,18 +82,8 @@ impl PytestLspExtension {
 
         let bundled_path = format!("bin/{}", binary_name);
 
-        // Ensure the bundled binary is executable
-        if platform != zed::Os::Windows {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Ok(metadata) = fs::metadata(&bundled_path) {
-                    let mut permissions = metadata.permissions();
-                    permissions.set_mode(0o755);
-                    let _ = fs::set_permissions(&bundled_path, permissions);
-                }
-            }
-        }
+        // Ensure the bundled binary is executable (no-op on Windows)
+        zed::make_file_executable(&bundled_path)?;
 
         self.cached_binary_path = Some(bundled_path.clone());
         Ok(bundled_path)

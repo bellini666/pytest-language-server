@@ -492,7 +492,7 @@ impl LanguageServer for Backend {
 
                         CompletionItem {
                             label: fixture.name.clone(),
-                            kind: Some(CompletionItemKind::FUNCTION),
+                            kind: Some(CompletionItemKind::VALUE),
                             detail: Some(detail),
                             documentation,
                             insert_text: Some(fixture.name.clone()),

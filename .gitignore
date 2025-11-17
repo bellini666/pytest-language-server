@@ -1,2 +1,19 @@
 /target
 .DS_Store
+
+# VSCode extension
+extensions/vscode-extension/node_modules/
+extensions/vscode-extension/out/
+extensions/vscode-extension/dist/
+extensions/vscode-extension/bin/
+extensions/vscode-extension/*.vsix
+
+# IntelliJ plugin
+extensions/intellij-plugin/.gradle/
+extensions/intellij-plugin/build/
+extensions/intellij-plugin/.idea/
+extensions/intellij-plugin/*.iml
+extensions/intellij-plugin/src/main/resources/bin/
+
+# Zed extension binaries
+extensions/zed-extension/bin/

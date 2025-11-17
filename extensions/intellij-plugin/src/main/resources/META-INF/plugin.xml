@@ -1,0 +1,41 @@
+<idea-plugin>
+    <id>com.github.bellini666.pytest-language-server</id>
+    <name>pytest Language Server</name>
+    <vendor email="hackedbellini@gmail.com" url="https://github.com/bellini666/pytest-language-server">Thiago Bellini Ribeiro</vendor>
+
+    <description><![CDATA[
+        A blazingly fast Language Server Protocol implementation for pytest fixtures, written in Rust.
+        <br/><br/>
+        <b>Features:</b>
+        <ul>
+            <li>Go to Definition: Jump to fixture definitions from usage</li>
+            <li>Find References: Find all usages of a fixture</li>
+            <li>Hover Documentation: View fixture signatures and docstrings</li>
+            <li>Diagnostics: Warnings for undeclared fixtures used in function bodies</li>
+            <li>Code Actions: Quick fixes to add missing fixture parameters</li>
+            <li>Fixture Priority: Correctly handles pytest's fixture shadowing rules</li>
+        </ul>
+    ]]></description>
+
+    <change-notes><![CDATA[
+        <b>0.5.1</b>
+        <ul>
+            <li>Critical fix for deterministic fixture resolution</li>
+            <li>Path canonicalization improvements</li>
+            <li>Performance optimizations</li>
+        </ul>
+    ]]></change-notes>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.python</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <projectService serviceImplementation="com.github.bellini666.pytestlsp.PytestLanguageServerService"/>
+        <fileType name="Python" extensions="py" implementationClass="com.jetbrains.python.PythonFileType"/>
+    </extensions>
+
+    <applicationListeners>
+        <listener class="com.github.bellini666.pytestlsp.PytestLanguageServerListener"
+                  topic="com.intellij.openapi.project.ProjectManagerListener"/>
+    </applicationListeners>
+</idea-plugin>

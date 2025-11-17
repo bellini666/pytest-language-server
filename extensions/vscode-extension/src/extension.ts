@@ -1,0 +1,98 @@
+import * as path from 'path';
+import * as vscode from 'vscode';
+import {
+  LanguageClient,
+  LanguageClientOptions,
+  ServerOptions,
+} from 'vscode-languageclient/node';
+
+let client: LanguageClient | undefined;
+
+export async function activate(context: vscode.ExtensionContext) {
+  const config = vscode.workspace.getConfiguration('pytestLanguageServer');
+  const customExecutable = config.get<string>('executable', '');
+
+  let command: string;
+
+  if (customExecutable) {
+    // User specified a custom executable
+    command = customExecutable;
+  } else {
+    // Use bundled binary
+    const platform = process.platform;
+    const arch = process.arch;
+
+    let binaryName: string;
+    if (platform === 'win32') {
+      binaryName = 'pytest-language-server.exe';
+    } else if (platform === 'darwin') {
+      // macOS
+      if (arch === 'arm64') {
+        binaryName = 'pytest-language-server-aarch64-apple-darwin';
+      } else {
+        binaryName = 'pytest-language-server-x86_64-apple-darwin';
+      }
+    } else if (platform === 'linux') {
+      if (arch === 'arm64') {
+        binaryName = 'pytest-language-server-aarch64-unknown-linux-gnu';
+      } else {
+        binaryName = 'pytest-language-server-x86_64-unknown-linux-gnu';
+      }
+    } else {
+      vscode.window.showErrorMessage(
+        `Unsupported platform: ${platform}. Please install pytest-language-server manually and configure the executable path.`
+      );
+      return;
+    }
+
+    command = context.asAbsolutePath(path.join('bin', binaryName));
+  }
+
+  // Check if the binary exists and is executable
+  try {
+    const fs = require('fs');
+    if (!fs.existsSync(command)) {
+      vscode.window.showErrorMessage(
+        `pytest-language-server binary not found at: ${command}. Please install pytest-language-server or configure the executable path.`
+      );
+      return;
+    }
+    // Make sure it's executable on Unix-like systems
+    if (process.platform !== 'win32') {
+      fs.chmodSync(command, 0o755);
+    }
+  } catch (error) {
+    vscode.window.showErrorMessage(
+      `Failed to access pytest-language-server binary: ${error}`
+    );
+    return;
+  }
+
+  const serverOptions: ServerOptions = {
+    command,
+    args: [],
+  };
+
+  const clientOptions: LanguageClientOptions = {
+    documentSelector: [{ scheme: 'file', language: 'python' }],
+    synchronize: {
+      fileEvents: vscode.workspace.createFileSystemWatcher('**/*.py'),
+    },
+  };
+
+  client = new LanguageClient(
+    'pytestLanguageServer',
+    'pytest Language Server',
+    serverOptions,
+    clientOptions
+  );
+
+  await client.start();
+}
+
+export function deactivate(): Thenable<void> | undefined {
+  if (!client) {
+    return undefined;
+  }
+  return client.stop();
+}

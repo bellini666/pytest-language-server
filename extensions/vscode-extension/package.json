@@ -1,0 +1,80 @@
+{
+  "name": "pytest-language-server",
+  "displayName": "pytest Language Server",
+  "description": "A blazingly fast Language Server Protocol implementation for pytest fixtures",
+  "version": "0.5.1",
+  "publisher": "bellini666",
+  "license": "MIT",
+  "author": "Thiago Bellini Ribeiro <hackedbellini@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bellini666/pytest-language-server"
+  },
+  "bugs": {
+    "url": "https://github.com/bellini666/pytest-language-server/issues"
+  },
+  "homepage": "https://github.com/bellini666/pytest-language-server#readme",
+  "icon": "icon.png",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters"
+  ],
+  "keywords": [
+    "python",
+    "pytest",
+    "fixtures",
+    "lsp",
+    "language-server"
+  ],
+  "activationEvents": [
+    "onLanguage:python"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "configuration": {
+      "type": "object",
+      "title": "pytest Language Server",
+      "properties": {
+        "pytestLanguageServer.executable": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the pytest-language-server executable. Leave empty to use the bundled binary, or set to 'pytest-language-server' to use the system version from PATH."
+        },
+        "pytestLanguageServer.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Traces the communication between VS Code and the language server."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "webpack",
+    "watch": "webpack --watch",
+    "package": "webpack --mode production --devtool hidden-source-map",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.75.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "ts-loader": "^9.4.0",
+    "typescript": "^5.0.0",
+    "webpack": "^5.88.0",
+    "webpack-cli": "^5.1.0"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.0"
+  }
+}

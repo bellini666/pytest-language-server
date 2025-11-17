@@ -39,7 +39,7 @@ Then restart your terminal and verify:
 which rustc
 # Should output: /Users/YOUR_USERNAME/.cargo/bin/rustc
 
-which cargo  
+which cargo
 # Should output: /Users/YOUR_USERNAME/.cargo/bin/cargo
 ```
 

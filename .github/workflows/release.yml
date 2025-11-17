@@ -209,3 +209,166 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Publish to crates.io
         run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  build-binaries:
+    name: Build standalone binaries for extensions
+    runs-on: ${{ matrix.os }}
+    if: startsWith(github.ref, 'refs/tags/')
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary_name: pytest-language-server-x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            binary_name: pytest-language-server-aarch64-unknown-linux-gnu
+          - os: macos-13
+            target: x86_64-apple-darwin
+            binary_name: pytest-language-server-x86_64-apple-darwin
+          - os: macos-14
+            target: aarch64-apple-darwin
+            binary_name: pytest-language-server-aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary_name: pytest-language-server.exe
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Build binary
+        run: |
+          cargo build --release --target ${{ matrix.target }}
+      - name: Rename binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mv target/${{ matrix.target }}/release/pytest-language-server target/${{ matrix.target }}/release/${{ matrix.binary_name }}
+      - name: Rename binary (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          move target\${{ matrix.target }}\release\pytest-language-server.exe target\${{ matrix.target }}\release\${{ matrix.binary_name }}
+      - name: Upload binary
+        uses: actions/upload-artifact@v5
+        with:
+          name: binary-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/${{ matrix.binary_name }}
+
+  publish-vscode:
+    name: Publish VSCode extension
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build-binaries]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Download all binaries
+        uses: actions/download-artifact@v6
+        with:
+          pattern: binary-*
+          path: extensions/vscode-extension/bin
+      - name: Flatten binaries
+        run: |
+          cd extensions/vscode-extension/bin
+          find . -type f -name "pytest-language-server*" -exec mv {} . \;
+          find . -type d -empty -delete
+          chmod +x pytest-language-server-* || true
+          ls -lh
+      - name: Install dependencies
+        run: |
+          cd vscode-extension
+          npm install
+          npm install -g @vscode/vsce
+      - name: Package extension
+        run: |
+          cd vscode-extension
+          vsce package
+      - name: Publish to VSCode Marketplace
+        run: |
+          cd vscode-extension
+          vsce publish -p ${{ secrets.VSCE_TOKEN }}
+
+  publish-intellij:
+    name: Publish IntelliJ/PyCharm plugin
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build-binaries]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      - name: Download all binaries
+        uses: actions/download-artifact@v6
+        with:
+          pattern: binary-*
+          path: extensions/intellij-plugin/src/main/resources/bin
+      - name: Flatten binaries
+        run: |
+          cd extensions/intellij-plugin/src/main/resources/bin
+          find . -type f -name "pytest-language-server*" -exec mv {} . \;
+          find . -type d -empty -delete
+          chmod +x pytest-language-server-* || true
+          ls -lh
+      - name: Build and publish plugin
+        run: |
+          cd intellij-plugin
+          chmod +x gradlew
+          ./gradlew buildPlugin
+          ./gradlew publishPlugin
+        env:
+          PUBLISH_TOKEN: ${{ secrets.JETBRAINS_TOKEN }}
+
+  publish-zed:
+    name: Publish Zed extension
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build-binaries]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - name: Download all binaries
+        uses: actions/download-artifact@v6
+        with:
+          pattern: binary-*
+          path: extensions/zed-extension/bin
+      - name: Flatten binaries
+        run: |
+          cd extensions/zed-extension/bin
+          find . -type f -name "pytest-language-server*" -exec mv {} . \;
+          find . -type d -empty -delete
+          chmod +x pytest-language-server-* || true
+          ls -lh
+      - name: Build Zed extension
+        run: |
+          cd zed-extension
+          cargo build --release --target wasm32-wasip1
+      - name: Package extension
+        run: |
+          cd zed-extension
+          mkdir -p dist
+          cp target/wasm32-wasip1/release/pytest_language_server.wasm dist/extension.wasm
+          cp -r bin dist/
+          cp extension.toml dist/
+      - name: Publish to Zed Extensions
+        run: |
+          cd zed-extension
+          # Note: Zed extension publishing requires manual submission or API key
+          # For now, just upload the packaged extension to GitHub releases
+          tar -czf ../pytest-language-server-zed-extension.tar.gz -C dist .
+      - name: Upload Zed extension to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: pytest-language-server-zed-extension.tar.gz

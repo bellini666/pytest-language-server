@@ -647,6 +647,13 @@ impl Backend {
 
 #[tokio::main]
 async fn main() {
+    // Handle --version flag
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 && (args[1] == "--version" || args[1] == "-v") {
+        println!("{}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
     // Set up stderr logging with env-filter support
     // Users can control verbosity with RUST_LOG env var:
     // RUST_LOG=debug pytest-language-server

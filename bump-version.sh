@@ -27,11 +27,23 @@ sed -i.bak "s/^version = \".*\"/version = \"$NEW_VERSION\"/" Cargo.toml && rm Ca
 # Update pyproject.toml
 sed -i.bak "s/^version = \".*\"/version = \"$NEW_VERSION\"/" pyproject.toml && rm pyproject.toml.bak
 
-# Update zed-extension/Cargo.toml
-sed -i.bak "s/^version = \".*\"/version = \"$NEW_VERSION\"/" zed-extension/Cargo.toml && rm zed-extension/Cargo.toml.bak
+# Update extensions/zed-extension/Cargo.toml
+sed -i.bak "s/^version = \".*\"/version = \"$NEW_VERSION\"/" extensions/zed-extension/Cargo.toml && rm extensions/zed-extension/Cargo.toml.bak
 
-# Update zed-extension/extension.toml
-sed -i.bak "s/^version = \".*\"/version = \"$NEW_VERSION\"/" zed-extension/extension.toml && rm zed-extension/extension.toml.bak
+# Update extensions/zed-extension/extension.toml
+sed -i.bak "s/^version = \".*\"/version = \"$NEW_VERSION\"/" extensions/zed-extension/extension.toml && rm extensions/zed-extension/extension.toml.bak
+
+# Update VSCode extension
+if [ -f "extensions/vscode-extension/package.json" ]; then
+    sed -i.bak "s/\"version\": \".*\"/\"version\": \"$NEW_VERSION\"/" extensions/vscode-extension/package.json && rm extensions/vscode-extension/package.json.bak
+    echo "  - extensions/vscode-extension/package.json"
+fi
+
+# Update IntelliJ plugin
+if [ -f "extensions/intellij-plugin/build.gradle.kts" ]; then
+    sed -i.bak "s/^version = '.*'/version = '$NEW_VERSION'/" extensions/intellij-plugin/build.gradle.kts && rm extensions/intellij-plugin/build.gradle.kts.bak
+    echo "  - extensions/intellij-plugin/build.gradle.kts"
+fi
 
 # Update Cargo.lock
 cargo update -p pytest-language-server
@@ -39,8 +51,8 @@ cargo update -p pytest-language-server
 echo "✓ Version bumped to $NEW_VERSION in:"
 echo "  - Cargo.toml"
 echo "  - pyproject.toml"
-echo "  - zed-extension/Cargo.toml"
-echo "  - zed-extension/extension.toml"
+echo "  - extensions/zed-extension/Cargo.toml"
+echo "  - extensions/zed-extension/extension.toml"
 echo "  - Cargo.lock"
 echo ""
 echo "Run 'git add -A && git commit -m \"chore: bump version to $NEW_VERSION\"' to commit"

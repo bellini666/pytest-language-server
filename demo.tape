@@ -24,9 +24,9 @@ Type "cd /Users/bellini/dev/pytest-language-server/tests/test_project" Enter
 Show
 
 # Title
-Type 'echo "pytest-language-server Demo"' Enter
+Type 'echo "🐍 pytest-language-server Demo ⚡"' Enter
 Sleep 1.5s
-Type 'echo "1. Hover Documentation"' Enter
+Type 'echo "📖 1. Hover Documentation & Go to Definition"' Enter
 Sleep 1.5s
 
 Type "nvim test_example.py" Enter
@@ -36,26 +36,17 @@ Hide
 Type ":set nu" Enter
 Show
 
+# Hover on sample_fixture
 Type "ggf(w"
 Sleep 1s
 Type "K"
 Sleep 3.5s
+
+# Close hover popup explicitly
 Escape
+Sleep 500ms
 
-Type "ZQ"
-Sleep 300ms
-
-Type 'echo "2. Go to Definition"' Enter
-Sleep 1.5s
-
-Type "nvim test_example.py" Enter
-Sleep 2s
-
-Hide
-Type ":set nu" Enter
-Show
-
-Type "ggf(w"
+# Go to definition on same fixture
 Type "gd"
 Sleep 2.5s
 Ctrl+O
@@ -63,7 +54,7 @@ Ctrl+O
 Type "ZQ"
 Sleep 300ms
 
-Type 'echo "3. Code Actions"' Enter
+Type 'echo "🔧 2. Code Actions (Quick Fixes)"' Enter
 Sleep 1.5s
 
 Type "nvim test_undeclared_example.py" Enter
@@ -87,5 +78,5 @@ Sleep 2s
 
 Type "ZQ"
 
-Type 'echo "github.com/bellini666/pytest-language-server"' Enter
+Type 'echo "✨ github.com/bellini666/pytest-language-server ✨"' Enter
 Sleep 2s

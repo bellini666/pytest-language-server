@@ -342,7 +342,9 @@ jobs:
   publish-zed:
     name: Publish Zed extension
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    # Disabled: Zed extension must be manually added as submodule first
+    # Follow instructions in extensions/zed-extension/PUBLISHING.md
+    if: false && startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: huacnlee/zed-extension-action@v1
         with:

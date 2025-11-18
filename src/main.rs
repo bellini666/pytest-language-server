@@ -88,7 +88,7 @@ impl LanguageServer for Backend {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri.clone();
         info!("did_open: {:?}", uri);
-        if let Ok(file_path) = uri.to_file_path() {
+        if let Some(file_path) = self.uri_to_path(&uri) {
             info!("Analyzing file: {:?}", file_path);
             self.fixture_db
                 .analyze_file(file_path.clone(), &params.text_document.text);
@@ -101,7 +101,7 @@ impl LanguageServer for Backend {
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri.clone();
         info!("did_change: {:?}", uri);
-        if let Ok(file_path) = uri.to_file_path() {
+        if let Some(file_path) = self.uri_to_path(&uri) {
             if let Some(change) = params.content_changes.first() {
                 info!("Re-analyzing file: {:?}", file_path);
                 self.fixture_db
@@ -125,7 +125,7 @@ impl LanguageServer for Backend {
             uri, position.line, position.character
         );
 
-        if let Ok(file_path) = uri.to_file_path() {
+        if let Some(file_path) = self.uri_to_path(&uri) {
             info!(
                 "Looking for fixture definition at {:?}:{}:{}",
                 file_path, position.line, position.character
@@ -137,34 +137,20 @@ impl LanguageServer for Backend {
                 position.character,
             ) {
                 info!("Found definition: {:?}", definition);
-                let def_uri = match Url::from_file_path(&definition.file_path) {
-                    Ok(uri) => uri,
-                    Err(_) => {
-                        warn!("Failed to convert path to URI: {:?}", definition.file_path);
-                        return Ok(None);
-                    }
+                let Some(def_uri) = self.path_to_uri(&definition.file_path) else {
+                    return Ok(None);
                 };
 
+                let def_line = Self::internal_line_to_lsp(definition.line);
                 let location = Location {
                     uri: def_uri.clone(),
-                    range: Range {
-                        start: Position {
-                            line: (definition.line.saturating_sub(1)) as u32,
-                            character: 0,
-                        },
-                        end: Position {
-                            line: (definition.line.saturating_sub(1)) as u32,
-                            character: 0,
-                        },
-                    },
+                    range: Self::create_point_range(def_line, 0),
                 };
                 info!("Returning location: {:?}", location);
                 return Ok(Some(GotoDefinitionResponse::Scalar(location)));
             } else {
                 info!("No fixture definition found");
             }
-        } else {
-            warn!("Failed to convert URI to file path: {:?}", uri);
         }
 
         Ok(None)
@@ -179,7 +165,7 @@ impl LanguageServer for Backend {
             uri, position.line, position.character
         );
 
-        if let Ok(file_path) = uri.to_file_path() {
+        if let Some(file_path) = self.uri_to_path(&uri) {
             info!(
                 "Looking for fixture at {:?}:{}:{}",
                 file_path, position.line, position.character
@@ -269,8 +255,6 @@ impl LanguageServer for Backend {
             } else {
                 info!("No fixture found for hover");
             }
-        } else {
-            warn!("Failed to convert URI to file path: {:?}", uri);
         }
 
         Ok(None)
@@ -285,7 +269,7 @@ impl LanguageServer for Backend {
             uri, position.line, position.character
         );
 
-        if let Ok(file_path) = uri.to_file_path() {
+        if let Some(file_path) = self.uri_to_path(&uri) {
             info!(
                 "Looking for fixture references at {:?}:{}:{}",
                 file_path, position.line, position.character
@@ -302,7 +286,7 @@ impl LanguageServer for Backend {
                     fixture_name
                 );
 
-                let current_line = (position.line + 1) as usize; // Convert to 1-indexed
+                let current_line = Self::lsp_line_to_internal(position.line);
                 info!(
                     "Current cursor position: line {} (1-indexed), char {}",
                     current_line, position.character
@@ -329,7 +313,7 @@ impl LanguageServer for Backend {
                 } else {
                     // find_fixture_definition returns None if cursor is on a definition line (not a usage)
                     // Check if we're on a fixture definition line
-                    let target_line = (position.line + 1) as usize;
+                    let target_line = Self::lsp_line_to_internal(position.line);
                     if let Some(definition_at_line) = self.fixture_db.get_definition_at_line(
                         &file_path,
                         target_line,
@@ -387,29 +371,14 @@ impl LanguageServer for Backend {
 
                 // First, add the definition if we have one (LSP spec: includeDeclaration)
                 if let Some(ref def) = definition_to_include {
-                    let def_uri = match Url::from_file_path(&def.file_path) {
-                        Ok(uri) => uri,
-                        Err(_) => {
-                            warn!(
-                                "Failed to convert definition path to URI: {:?}",
-                                def.file_path
-                            );
-                            return Ok(None);
-                        }
+                    let Some(def_uri) = self.path_to_uri(&def.file_path) else {
+                        return Ok(None);
                     };
 
+                    let def_line = Self::internal_line_to_lsp(def.line);
                     let def_location = Location {
                         uri: def_uri,
-                        range: Range {
-                            start: Position {
-                                line: (def.line.saturating_sub(1)) as u32,
-                                character: 0,
-                            },
-                            end: Position {
-                                line: (def.line.saturating_sub(1)) as u32,
-                                character: 0,
-                            },
-                        },
+                        range: Self::create_point_range(def_line, 0),
                     };
                     locations.push(def_location);
                 }
@@ -430,26 +399,19 @@ impl LanguageServer for Backend {
                         }
                     }
 
-                    let ref_uri = match Url::from_file_path(&reference.file_path) {
-                        Ok(uri) => uri,
-                        Err(_) => {
-                            warn!("Failed to convert path to URI: {:?}", reference.file_path);
-                            continue;
-                        }
+                    let Some(ref_uri) = self.path_to_uri(&reference.file_path) else {
+                        continue;
                     };
 
+                    let ref_line = Self::internal_line_to_lsp(reference.line);
                     let location = Location {
                         uri: ref_uri,
-                        range: Range {
-                            start: Position {
-                                line: (reference.line.saturating_sub(1)) as u32,
-                                character: reference.start_char as u32,
-                            },
-                            end: Position {
-                                line: (reference.line.saturating_sub(1)) as u32,
-                                character: reference.end_char as u32,
-                            },
-                        },
+                        range: Self::create_range(
+                            ref_line,
+                            reference.start_char as u32,
+                            ref_line,
+                            reference.end_char as u32,
+                        ),
                     };
                     debug!(
                         "Adding reference location: {:?}:{} (chars {}-{})",
@@ -477,8 +439,6 @@ impl LanguageServer for Backend {
             } else {
                 info!("No fixture found at this position");
             }
-        } else {
-            warn!("Failed to convert URI to file path: {:?}", uri);
         }
 
         Ok(None)
@@ -493,7 +453,7 @@ impl LanguageServer for Backend {
             uri, position.line, position.character
         );
 
-        if let Ok(file_path) = uri.to_file_path() {
+        if let Some(file_path) = self.uri_to_path(&uri) {
             // Check if we're inside a test or fixture function
             if let Some((function_name, is_fixture, declared_params)) = self
                 .fixture_db
@@ -541,8 +501,6 @@ impl LanguageServer for Backend {
             } else {
                 info!("Not inside a test or fixture function");
             }
-        } else {
-            warn!("Failed to convert URI to file path: {:?}", uri);
         }
 
         Ok(None)
@@ -570,7 +528,7 @@ impl LanguageServer for Backend {
             }
         }
 
-        if let Ok(file_path) = uri.to_file_path() {
+        if let Some(file_path) = self.uri_to_path(&uri) {
             let undeclared = self.fixture_db.get_undeclared_fixtures(&file_path);
             info!("Found {} undeclared fixtures in file", undeclared.len());
             let mut actions = Vec::new();
@@ -585,7 +543,7 @@ impl LanguageServer for Backend {
                 if let Some(NumberOrString::String(code)) = &diagnostic.code {
                     if code == "undeclared-fixture" {
                         // Find the corresponding undeclared fixture
-                        let diag_line = diagnostic.range.start.line + 1; // Convert to 1-indexed
+                        let diag_line = Self::lsp_line_to_internal(diagnostic.range.start.line);
                         let diag_char = diagnostic.range.start.character as usize;
 
                         info!(
@@ -595,11 +553,11 @@ impl LanguageServer for Backend {
 
                         if let Some(fixture) = undeclared
                             .iter()
-                            .find(|f| f.line == diag_line as usize && f.start_char == diag_char)
+                            .find(|f| f.line == diag_line && f.start_char == diag_char)
                         {
                             info!("Found matching fixture: {}", fixture.name);
                             // Create a code action to add this fixture as a parameter
-                            let function_line = (fixture.function_line - 1) as u32;
+                            let function_line = Self::internal_line_to_lsp(fixture.function_line);
 
                             // Read the file to determine where to insert the parameter
                             if let Ok(content) = std::fs::read_to_string(&file_path) {
@@ -647,16 +605,10 @@ impl LanguageServer for Backend {
                                                 vec![(
                                                     uri.clone(),
                                                     vec![TextEdit {
-                                                        range: Range {
-                                                            start: Position {
-                                                                line: insert_pos.0,
-                                                                character: insert_pos.1,
-                                                            },
-                                                            end: Position {
-                                                                line: insert_pos.0,
-                                                                character: insert_pos.1,
-                                                            },
-                                                        },
+                                                        range: Self::create_point_range(
+                                                            insert_pos.0,
+                                                            insert_pos.1,
+                                                        ),
                                                         new_text: text_to_insert,
                                                     }],
                                                 )]
@@ -712,24 +664,71 @@ impl LanguageServer for Backend {
 }
 
 impl Backend {
+    /// Convert URI to PathBuf with error logging
+    fn uri_to_path(&self, uri: &Url) -> Option<PathBuf> {
+        match uri.to_file_path() {
+            Ok(path) => Some(path),
+            Err(_) => {
+                warn!("Failed to convert URI to file path: {:?}", uri);
+                None
+            }
+        }
+    }
+
+    /// Convert PathBuf to URI with error logging
+    fn path_to_uri(&self, path: &std::path::Path) -> Option<Url> {
+        match Url::from_file_path(path) {
+            Ok(uri) => Some(uri),
+            Err(_) => {
+                warn!("Failed to convert path to URI: {:?}", path);
+                None
+            }
+        }
+    }
+
+    /// Convert LSP position (0-based line) to internal representation (1-based line)
+    fn lsp_line_to_internal(line: u32) -> usize {
+        (line + 1) as usize
+    }
+
+    /// Convert internal line (1-based) to LSP position (0-based)
+    fn internal_line_to_lsp(line: usize) -> u32 {
+        line.saturating_sub(1) as u32
+    }
+
+    /// Create a Range from start and end positions
+    fn create_range(start_line: u32, start_char: u32, end_line: u32, end_char: u32) -> Range {
+        Range {
+            start: Position {
+                line: start_line,
+                character: start_char,
+            },
+            end: Position {
+                line: end_line,
+                character: end_char,
+            },
+        }
+    }
+
+    /// Create a point Range (start == end) for a single position
+    fn create_point_range(line: u32, character: u32) -> Range {
+        Self::create_range(line, character, line, character)
+    }
+
     async fn publish_diagnostics_for_file(&self, uri: &Url, file_path: &std::path::Path) {
         let undeclared = self.fixture_db.get_undeclared_fixtures(file_path);
 
         let diagnostics: Vec<Diagnostic> = undeclared
             .into_iter()
             .map(|fixture| {
-                let line = (fixture.line - 1) as u32; // Convert to 0-indexed
+                let line = Self::internal_line_to_lsp(fixture.line);
                 Diagnostic {
-                    range: Range {
-                        start: Position {
-                            line,
-                            character: fixture.start_char as u32,
-                        },
-                        end: Position {
-                            line,
-                            character: fixture.end_char as u32,
-                        },
-                    },
+                    range: Self::create_range(
+                        line,
+                        fixture.start_char as u32,
+                        line,
+                        fixture.end_char as u32,
+                    ),
                     severity: Some(DiagnosticSeverity::WARNING),
                     code: Some(NumberOrString::String("undeclared-fixture".to_string())),
                     code_description: None,

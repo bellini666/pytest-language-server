@@ -12,6 +12,7 @@ pub struct FixtureDefinition {
     pub file_path: PathBuf,
     pub line: usize,
     pub docstring: Option<String>,
+    pub return_type: Option<String>, // The return type annotation (for generators, the yielded type)
 }
 
 #[derive(Debug, Clone)]
@@ -341,13 +342,14 @@ impl FixtureDatabase {
         }
 
         // Handle both regular and async function definitions
-        let (func_name, decorator_list, args, range, body) = match stmt {
+        let (func_name, decorator_list, args, range, body, returns) = match stmt {
             Stmt::FunctionDef(func_def) => (
                 func_def.name.as_str(),
                 &func_def.decorator_list,
                 &func_def.args,
                 func_def.range,
                 &func_def.body,
+                &func_def.returns,
             ),
             Stmt::AsyncFunctionDef(func_def) => (
                 func_def.name.as_str(),
@@ -355,6 +357,7 @@ impl FixtureDatabase {
                 &func_def.args,
                 func_def.range,
                 &func_def.body,
+                &func_def.returns,
             ),
             _ => return,
         };
@@ -382,6 +385,9 @@ impl FixtureDatabase {
             // Extract docstring if present
             let docstring = self.extract_docstring(body);
 
+            // Extract return type annotation
+            let return_type = self.extract_return_type(returns, body, content);
+
             info!(
                 "Found fixture definition: {} at {:?}:{}",
                 func_name, file_path, line
@@ -389,12 +395,16 @@ impl FixtureDatabase {
             if let Some(ref doc) = docstring {
                 debug!("  Docstring: {}", doc);
             }
+            if let Some(ref ret_type) = return_type {
+                debug!("  Return type: {}", ret_type);
+            }
 
             let definition = FixtureDefinition {
                 name: func_name.to_string(),
                 file_path: file_path.clone(),
                 line,
                 docstring,
+                return_type,
             };
 
             self.definitions
@@ -546,12 +556,13 @@ impl FixtureDatabase {
                                 fixture_name, file_path, line
                             );
 
-                            // We don't have a docstring for assignment-style fixtures
+                            // We don't have a docstring or return type for assignment-style fixtures
                             let definition = FixtureDefinition {
                                 name: fixture_name.to_string(),
                                 file_path: file_path.clone(),
                                 line,
                                 docstring: None,
+                                return_type: None,
                             };
 
                             self.definitions
@@ -1370,6 +1381,145 @@ impl FixtureDatabase {
 
         // 5. Join lines back together
         result.join("\n")
+    }
+
+    fn extract_return_type(
+        &self,
+        returns: &Option<Box<rustpython_parser::ast::Expr>>,
+        body: &[Stmt],
+        content: &str,
+    ) -> Option<String> {
+        if let Some(return_expr) = returns {
+            // Check if the function body contains yield statements
+            let has_yield = self.contains_yield(body);
+
+            if has_yield {
+                // For generators, extract the yielded type from Generator[YieldType, ...]
+                // or Iterator[YieldType] or similar
+                return self.extract_yielded_type(return_expr, content);
+            } else {
+                // For regular functions, just return the type annotation as-is
+                return Some(self.expr_to_string(return_expr, content));
+            }
+        }
+        None
+    }
+
+    #[allow(clippy::only_used_in_recursion)]
+    fn contains_yield(&self, body: &[Stmt]) -> bool {
+        for stmt in body {
+            match stmt {
+                Stmt::Expr(expr_stmt) => {
+                    if let Expr::Yield(_) | Expr::YieldFrom(_) = &*expr_stmt.value {
+                        return true;
+                    }
+                }
+                Stmt::If(if_stmt) => {
+                    if self.contains_yield(&if_stmt.body) || self.contains_yield(&if_stmt.orelse) {
+                        return true;
+                    }
+                }
+                Stmt::For(for_stmt) => {
+                    if self.contains_yield(&for_stmt.body) || self.contains_yield(&for_stmt.orelse)
+                    {
+                        return true;
+                    }
+                }
+                Stmt::While(while_stmt) => {
+                    if self.contains_yield(&while_stmt.body)
+                        || self.contains_yield(&while_stmt.orelse)
+                    {
+                        return true;
+                    }
+                }
+                Stmt::With(with_stmt) => {
+                    if self.contains_yield(&with_stmt.body) {
+                        return true;
+                    }
+                }
+                Stmt::Try(try_stmt) => {
+                    if self.contains_yield(&try_stmt.body)
+                        || self.contains_yield(&try_stmt.orelse)
+                        || self.contains_yield(&try_stmt.finalbody)
+                    {
+                        return true;
+                    }
+                    // Note: ExceptHandler struct doesn't expose body in current API
+                    // This is a limitation of rustpython-parser 0.4.0
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn extract_yielded_type(
+        &self,
+        expr: &rustpython_parser::ast::Expr,
+        content: &str,
+    ) -> Option<String> {
+        // Handle Generator[YieldType, SendType, ReturnType] -> extract YieldType
+        // Handle Iterator[YieldType] -> extract YieldType
+        // Handle Iterable[YieldType] -> extract YieldType
+        if let Expr::Subscript(subscript) = expr {
+            // Get the base type name (Generator, Iterator, etc.)
+            let _base_name = self.expr_to_string(&subscript.value, content);
+
+            // Extract the first type argument (the yield type)
+            if let Expr::Tuple(tuple) = &*subscript.slice {
+                if let Some(first_elem) = tuple.elts.first() {
+                    return Some(self.expr_to_string(first_elem, content));
+                }
+            } else {
+                // Single type argument (like Iterator[str])
+                return Some(self.expr_to_string(&subscript.slice, content));
+            }
+        }
+
+        // If we can't extract the yielded type, return the whole annotation
+        Some(self.expr_to_string(expr, content))
+    }
+
+    #[allow(clippy::only_used_in_recursion)]
+    fn expr_to_string(&self, expr: &rustpython_parser::ast::Expr, _content: &str) -> String {
+        match expr {
+            Expr::Name(name) => name.id.to_string(),
+            Expr::Attribute(attr) => {
+                format!(
+                    "{}.{}",
+                    self.expr_to_string(&attr.value, _content),
+                    attr.attr
+                )
+            }
+            Expr::Subscript(subscript) => {
+                let base = self.expr_to_string(&subscript.value, _content);
+                let slice = self.expr_to_string(&subscript.slice, _content);
+                format!("{}[{}]", base, slice)
+            }
+            Expr::Tuple(tuple) => {
+                let elements: Vec<String> = tuple
+                    .elts
+                    .iter()
+                    .map(|e| self.expr_to_string(e, _content))
+                    .collect();
+                elements.join(", ")
+            }
+            Expr::Constant(constant) => {
+                format!("{:?}", constant.value)
+            }
+            Expr::BinOp(binop) if matches!(binop.op, rustpython_parser::ast::Operator::BitOr) => {
+                // Handle union types like str | int
+                format!(
+                    "{} | {}",
+                    self.expr_to_string(&binop.left, _content),
+                    self.expr_to_string(&binop.right, _content)
+                )
+            }
+            _ => {
+                // Fallback for complex types we don't handle yet
+                "Any".to_string()
+            }
+        }
     }
 
     fn get_line_from_offset(&self, offset: usize, content: &str) -> usize {
@@ -4958,4 +5108,103 @@ async def test_async_example(async_fixture):
     assert_eq!(func_name, "test_async_example");
     assert!(!is_fixture);
     assert_eq!(params, vec!["async_fixture"]);
+}
+
+#[test]
+fn test_fixture_with_simple_return_type() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def string_fixture() -> str:
+    return "hello"
+"#;
+    let file_path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(file_path.clone(), content);
+
+    let fixtures = db.definitions.get("string_fixture").unwrap();
+    assert_eq!(fixtures.len(), 1);
+    assert_eq!(fixtures[0].return_type, Some("str".to_string()));
+}
+
+#[test]
+fn test_fixture_with_generator_return_type() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+from typing import Generator
+
+@pytest.fixture
+def generator_fixture() -> Generator[str, None, None]:
+    yield "value"
+"#;
+    let file_path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(file_path.clone(), content);
+
+    let fixtures = db.definitions.get("generator_fixture").unwrap();
+    assert_eq!(fixtures.len(), 1);
+    // Should extract the yielded type (str) from Generator[str, None, None]
+    assert_eq!(fixtures[0].return_type, Some("str".to_string()));
+}
+
+#[test]
+fn test_fixture_with_iterator_return_type() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+from typing import Iterator
+
+@pytest.fixture
+def iterator_fixture() -> Iterator[int]:
+    yield 42
+"#;
+    let file_path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(file_path.clone(), content);
+
+    let fixtures = db.definitions.get("iterator_fixture").unwrap();
+    assert_eq!(fixtures.len(), 1);
+    // Should extract the yielded type (int) from Iterator[int]
+    assert_eq!(fixtures[0].return_type, Some("int".to_string()));
+}
+
+#[test]
+fn test_fixture_without_return_type() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def no_type_fixture():
+    return 123
+"#;
+    let file_path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(file_path.clone(), content);
+
+    let fixtures = db.definitions.get("no_type_fixture").unwrap();
+    assert_eq!(fixtures.len(), 1);
+    assert_eq!(fixtures[0].return_type, None);
+}
+
+#[test]
+fn test_fixture_with_union_return_type() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def union_fixture() -> str | int:
+    return "string"
+"#;
+    let file_path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(file_path.clone(), content);
+
+    let fixtures = db.definitions.get("union_fixture").unwrap();
+    assert_eq!(fixtures.len(), 1);
+    assert_eq!(fixtures[0].return_type, Some("str | int".to_string()));
 }

@@ -1,4 +1,5 @@
 use pytest_language_server::FixtureDatabase;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -9,6 +10,7 @@ use tracing::{debug, info, warn};
 struct Backend {
     client: Client,
     fixture_db: Arc<FixtureDatabase>,
+    workspace_root: Arc<tokio::sync::RwLock<Option<PathBuf>>>,
 }
 
 #[tower_lsp::async_trait]
@@ -20,6 +22,10 @@ impl LanguageServer for Backend {
         if let Some(root_uri) = params.root_uri.clone() {
             if let Ok(root_path) = root_uri.to_file_path() {
                 info!("Scanning workspace: {:?}", root_path);
+
+                // Store the workspace root
+                *self.workspace_root.write().await = Some(root_path.clone());
+
                 self.client
                     .log_message(
                         MessageType::INFO,
@@ -189,23 +195,51 @@ impl LanguageServer for Backend {
                 // Build hover content
                 let mut content = String::new();
 
-                // Header with fixture name
-                content.push_str(&format!(
-                    "```python\n@pytest.fixture\ndef {}(...):\n```\n",
-                    definition.name
-                ));
+                // Calculate relative path from workspace root
+                let relative_path =
+                    if let Some(workspace_root) = self.workspace_root.read().await.as_ref() {
+                        definition
+                            .file_path
+                            .strip_prefix(workspace_root)
+                            .ok()
+                            .and_then(|p| p.to_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| {
+                                definition
+                                    .file_path
+                                    .file_name()
+                                    .and_then(|f| f.to_str())
+                                    .unwrap_or("unknown")
+                                    .to_string()
+                            })
+                    } else {
+                        // Fallback to just the filename if no workspace root
+                        definition
+                            .file_path
+                            .file_name()
+                            .and_then(|f| f.to_str())
+                            .unwrap_or("unknown")
+                            .to_string()
+                    };
 
-                // Add file path
-                if let Some(file_name) = definition.file_path.file_name() {
-                    content.push_str(&format!(
-                        "\n**Defined in:** `{}`\n",
-                        file_name.to_string_lossy()
-                    ));
-                }
+                // Add "from" line with relative path
+                content.push_str(&format!("**from** `{}`\n", relative_path));
+
+                // Add code block with fixture signature
+                let return_annotation = if let Some(ref ret_type) = definition.return_type {
+                    format!(" -> {}", ret_type)
+                } else {
+                    String::new()
+                };
+
+                content.push_str(&format!(
+                    "```python\n@pytest.fixture\ndef {}(...){}:\n```",
+                    definition.name, return_annotation
+                ));
 
                 // Add docstring if present
                 if let Some(ref docstring) = definition.docstring {
-                    content.push_str("\n---\n\n");
+                    content.push_str("\n\n---\n\n");
 
                     // Check if docstring looks like it contains markdown formatting
                     // (contains headers, lists, code blocks, etc.)
@@ -751,6 +785,7 @@ async fn main() {
     let (service, socket) = LspService::new(|client| Backend {
         client,
         fixture_db: fixture_db.clone(),
+        workspace_root: Arc::new(tokio::sync::RwLock::new(None)),
     });
 
     info!("LSP server ready");
@@ -771,56 +806,55 @@ mod tests {
             file_path: PathBuf::from("/tmp/test/conftest.py"),
             line: 4,
             docstring: Some("This is a test fixture.\n\nIt does something useful.".to_string()),
+            return_type: None,
         };
 
         // Build hover content (same logic as hover method)
         let mut content = String::new();
 
-        // Header with fixture name
+        // Add "from" line with relative path (using just filename for test)
+        let relative_path = definition
+            .file_path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("unknown");
+        content.push_str(&format!("**from** `{}`\n", relative_path));
+
+        // Add code block with fixture signature
         content.push_str(&format!(
-            "```python\n@pytest.fixture\ndef {}(...):\n```\n",
+            "```python\n@pytest.fixture\ndef {}(...):\n```",
             definition.name
         ));
 
-        // Add file path
-        if let Some(file_name) = definition.file_path.file_name() {
-            content.push_str(&format!(
-                "\n**Defined in:** `{}`\n",
-                file_name.to_string_lossy()
-            ));
-        }
-
         // Add docstring if present
         if let Some(ref docstring) = definition.docstring {
-            content.push_str("\n---\n\n");
+            content.push_str("\n\n---\n\n");
             content.push_str(docstring);
         }
 
-        // Verify the structure with empty line after code block
+        // Verify the structure
         let lines: Vec<&str> = content.lines().collect();
 
         // The structure should be:
-        // 0: ```python
-        // 1: @pytest.fixture
-        // 2: def my_fixture(...):
-        // 3: ```
-        // 4: (empty line)
-        // 5: **Defined in:** `conftest.py`
-        // 6: (empty line from \n---\n)
-        // 7: ---
-        // 8: (empty line)
-        // 9+: docstring content
+        // 0: **from** `conftest.py`
+        // 1: ```python
+        // 2: @pytest.fixture
+        // 3: def my_fixture(...):
+        // 4: ```
+        // 5: (empty line from \n\n---\n)
+        // 6: ---
+        // 7: (empty line)
+        // 8+: docstring content
 
-        assert_eq!(lines[0], "```python");
-        assert_eq!(lines[1], "@pytest.fixture");
-        assert!(lines[2].starts_with("def my_fixture"));
-        assert_eq!(lines[3], "```");
-        assert_eq!(lines[4], ""); // Empty line after code block
         assert!(
-            lines[5].starts_with("**Defined in:**"),
-            "Line 5 should be 'Defined in', got: '{}'",
-            lines[5]
+            lines[0].starts_with("**from**"),
+            "Line 0 should start with 'From', got: '{}'",
+            lines[0]
         );
+        assert_eq!(lines[1], "```python");
+        assert_eq!(lines[2], "@pytest.fixture");
+        assert!(lines[3].starts_with("def my_fixture"));
+        assert_eq!(lines[4], "```");
     }
 
     #[test]
@@ -831,30 +865,33 @@ mod tests {
             file_path: PathBuf::from("/tmp/test/conftest.py"),
             line: 4,
             docstring: None,
+            return_type: None,
         };
 
         // Build hover content
         let mut content = String::new();
 
+        // Add "from" line with relative path (using just filename for test)
+        let relative_path = definition
+            .file_path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("unknown");
+        content.push_str(&format!("**from** `{}`\n", relative_path));
+
+        // Add code block with fixture signature
         content.push_str(&format!(
-            "```python\n@pytest.fixture\ndef {}(...):\n```\n",
+            "```python\n@pytest.fixture\ndef {}(...):\n```",
             definition.name
         ));
 
-        if let Some(file_name) = definition.file_path.file_name() {
-            content.push_str(&format!(
-                "\n**Defined in:** `{}`\n",
-                file_name.to_string_lossy()
-            ));
-        }
-
-        // For a fixture without docstring, the content should end with "Defined in"
-        // with an empty line before it
+        // For a fixture without docstring, the content should end with the code block
         let lines: Vec<&str> = content.lines().collect();
 
-        assert_eq!(lines.len(), 6); // code block (4 lines) + empty line + defined in (1 line)
-        assert_eq!(lines[4], ""); // Empty line
-        assert!(lines[5].starts_with("**Defined in:**"));
+        assert_eq!(lines.len(), 5); // from line (1 line) + code block (4 lines)
+        assert!(lines[0].starts_with("**from**"));
+        assert_eq!(lines[1], "```python");
+        assert_eq!(lines[4], "```");
     }
 
     #[test]

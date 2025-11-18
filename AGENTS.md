@@ -7,7 +7,7 @@ This document helps AI agents understand the pytest-language-server codebase str
 **pytest-language-server** is a Language Server Protocol (LSP) implementation for pytest fixtures, written in Rust. It provides IDE features like go-to-definition, find-references, and hover documentation for pytest fixtures.
 
 - **Language**: Rust (Edition 2021, MSRV 1.83)
-- **Lines of Code**: ~4,000 lines (2,501 in fixtures.rs, 1,574 in main.rs)
+- **Lines of Code**: ~3,050 lines (2,256 in fixtures.rs, 794 in main.rs)
 - **Architecture**: Async LSP server using tower-lsp
 - **Key Features**: Fixture go-to-definition, find-references, hover docs, fixture overriding, undeclared fixture diagnostics
 
@@ -18,8 +18,8 @@ This document helps AI agents understand the pytest-language-server codebase str
 ```
 src/
 ├── lib.rs          # Library exports (3 lines)
-├── main.rs         # LSP server implementation (~1,574 lines)
-└── fixtures.rs     # Fixture analysis engine (~2,501 lines)
+├── main.rs         # LSP server implementation (794 lines)
+└── fixtures.rs     # Fixture analysis engine (2,256 lines)
 ```
 
 ### Key Components
@@ -145,32 +145,37 @@ This is handled by `start_char` and `end_char` in `FixtureUsage`.
 ### Test Structure
 
 ```
+src/
+├── fixtures.rs           # Main code (2,256 lines)
+└── main.rs              # LSP server (794 lines)
+
 tests/
-├── test_project/         # Fixture test files for integration tests
-│   ├── conftest.py
-│   ├── test_example.py
-│   ├── test_parent_usage.py
-│   └── subdir/
-│       ├── conftest.py
-│       ├── test_hierarchy.py
-│       └── test_override.py
-└── test_parser_api.rs    # Integration tests
+├── test_fixtures.rs     # FixtureDatabase integration tests (60 tests, 2,951 lines)
+├── test_lsp.rs         # LSP protocol tests (13 tests, 1,187 lines)
+└── test_project/       # Fixture test files for integration tests
+    ├── conftest.py
+    ├── test_example.py
+    ├── test_parent_usage.py
+    └── subdir/
+        ├── conftest.py
+        ├── test_hierarchy.py
+        └── test_override.py
 ```
 
 ### Running Tests
 
 ```bash
-cargo test                    # Run all tests
-cargo test --lib             # Run library tests (fixtures.rs: 47 tests)
-cargo test --bin            # Run binary tests (main.rs: 13 tests)
-RUST_LOG=debug cargo test  # Run with debug logging
+cargo test                          # Run all tests (73 total)
+cargo test --test test_fixtures     # Run FixtureDatabase tests (60 tests)
+cargo test --test test_lsp         # Run LSP protocol tests (13 tests)
+RUST_LOG=debug cargo test          # Run with debug logging
 ```
 
 ### Test Coverage
 
-- **60 total tests passing** (as of v0.5.1)
-  - 47 tests in `src/fixtures.rs`
-  - 13 tests in `src/main.rs`
+- **73 total tests passing** (as of v0.6.0)
+  - 60 integration tests in `tests/test_fixtures.rs` (FixtureDatabase API)
+  - 13 integration tests in `tests/test_lsp.rs` (LSP protocol handlers)
 
 Key test areas:
 - Fixture definition extraction from various patterns

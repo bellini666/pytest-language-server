@@ -1,7 +1,7 @@
 # pytest-language-server 🔥
 
-[![CI](https://github.com/bellini666/pytest-language-server/workflows/CI/badge.svg?branch=main)](https://github.com/bellini666/pytest-language-server/actions/workflows/ci.yml)
-[![Security Audit](https://github.com/bellini666/pytest-language-server/workflows/Security%20Audit/badge.svg?branch=main)](https://github.com/bellini666/pytest-language-server/actions/workflows/security.yml)
+[![CI](https://github.com/bellini666/pytest-language-server/workflows/CI/badge.svg?branch=master)](https://github.com/bellini666/pytest-language-server/actions/workflows/ci.yml)
+[![Security Audit](https://github.com/bellini666/pytest-language-server/workflows/Security%20Audit/badge.svg?branch=master)](https://github.com/bellini666/pytest-language-server/actions/workflows/security.yml)
 [![PyPI version](https://badge.fury.io/py/pytest-language-server.svg)](https://badge.fury.io/py/pytest-language-server)
 [![Downloads](https://static.pepy.tech/badge/pytest-language-server)](https://pepy.tech/project/pytest-language-server)
 [![Crates.io](https://img.shields.io/crates/v/pytest-language-server.svg)](https://crates.io/crates/pytest-language-server)

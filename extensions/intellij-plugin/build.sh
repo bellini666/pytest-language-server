@@ -16,6 +16,7 @@ mkdir -p build/META-INF
 # Copy resources
 echo "Copying resources..."
 cp src/main/resources/META-INF/plugin.xml build/META-INF/
+cp src/main/resources/META-INF/python-support.xml build/META-INF/
 cp src/main/resources/META-INF/pluginIcon.png build/META-INF/
 
 # Copy bundled binaries if they exist

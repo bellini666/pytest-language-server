@@ -13,10 +13,10 @@ Output demo.mp4
 
 Set Shell "bash"
 Set FontSize 12
-Set Width 1200
-Set Height 700
+Set Width 800
+Set Height 400
 Set Padding 10
-Set Framerate 20
+Set Framerate 30
 Set Theme "Dracula"
 
 Hide
@@ -36,20 +36,17 @@ Hide
 Type ":set nu" Enter
 Show
 
-# Hover on sample_fixture
+# Hover on sample_fixture (position cursor on the fixture name)
 Type "ggf(w"
 Sleep 1s
 Type "K"
-Sleep 3.5s
+Sleep 3s
 
-# Close hover popup explicitly
-Escape
-Sleep 500ms
-
-# Go to definition on same fixture
+# Go to definition (this will close hover and jump)
 Type "gd"
 Sleep 2.5s
 Ctrl+O
+Sleep 500ms
 
 Type "ZQ"
 Sleep 300ms

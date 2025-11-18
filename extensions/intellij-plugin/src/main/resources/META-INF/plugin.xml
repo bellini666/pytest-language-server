@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>com.github.bellini666.pytest-language-server</id>
     <name>pytest Language Server</name>
-    <version>0.7.0</version>
+    <version>0.7.1</version>
     <vendor email="hackedbellini@gmail.com" url="https://github.com/bellini666/pytest-language-server">Thiago Bellini Ribeiro</vendor>
 
     <description><![CDATA[
@@ -30,11 +30,10 @@
     <idea-version since-build="223" until-build="242.*"/>
 
     <depends>com.intellij.modules.platform</depends>
-    <depends>com.intellij.modules.python</depends>
+    <depends optional="true" config-file="python-support.xml">com.intellij.modules.python</depends>
 
     <extensions defaultExtensionNs="com.intellij">
         <projectService serviceImplementation="com.github.bellini666.pytestlsp.PytestLanguageServerService"/>
-        <fileType name="Python" extensions="py" implementationClass="com.jetbrains.python.PythonFileType"/>
     </extensions>
 
     <applicationListeners>

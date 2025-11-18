@@ -342,8 +342,7 @@ jobs:
   publish-zed:
     name: Publish Zed extension
     runs-on: ubuntu-latest
-    # Disabled until the extension is ready to be published
-    if: false
+    if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: huacnlee/zed-extension-action@v1
         with:

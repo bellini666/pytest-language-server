@@ -19,7 +19,7 @@ cp src/main/resources/META-INF/plugin.xml build/META-INF/
 cp src/main/resources/META-INF/pluginIcon.png build/META-INF/
 
 # Copy bundled binaries if they exist
-if [ -d "src/main/resources/bin" ]; then
+if [ -d "src/main/resources/bin" ] && [ -n "$(ls -A src/main/resources/bin 2>/dev/null)" ]; then
   echo "Copying bundled binaries..."
   mkdir -p build/bin
   cp -r src/main/resources/bin/* build/bin/

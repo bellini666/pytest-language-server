@@ -381,16 +381,14 @@ impl FixtureDatabase {
         });
 
         if is_fixture {
-            // Calculate line number from the function def, not the decorators
-            // In ruff, range includes decorators, so we need to find the actual def line
-            // Search for "def <func_name>" after the range start
-            let range_start = range.start().to_usize();
-            let search_str = format!("def {}", func_name);
-            let def_offset = content[range_start..]
-                .find(&search_str)
-                .map(|pos| range_start + pos)
-                .unwrap_or(range_start);
-            let line = self.get_line_from_offset(def_offset, content);
+            // Calculate line number from the function name position
+            // In ruff, the function definition range includes decorators,
+            // but the name identifier has its own range that points to the actual function name
+            let name_range = match stmt {
+                Stmt::FunctionDef(func_def) => func_def.name.range,
+                _ => range, // Fallback, shouldn't happen
+            };
+            let line = self.get_line_from_offset(name_range.start().to_usize(), content);
 
             // Extract docstring if present
             let docstring = self.extract_docstring(body);
@@ -435,7 +433,7 @@ impl FixtureDatabase {
 
                 if arg_name != "self" && arg_name != "request" {
                     // Get the actual line where this parameter appears
-                    // arg.parameter.range contains the location of the parameter name
+                    // arg.parameter.range() contains the location of the parameter name
                     let arg_line = self
                         .get_line_from_offset(arg.parameter.range().start().to_usize(), content);
                     let start_char = self.get_char_position_from_offset(
@@ -499,7 +497,7 @@ impl FixtureDatabase {
                 if arg_name != "self" {
                     // Get the actual line where this parameter appears
                     // This handles multiline function signatures correctly
-                    // arg.parameter.range contains the location of the parameter name
+                    // arg.parameter.range() contains the location of the parameter name
                     let arg_offset = arg.parameter.range().start().to_usize();
                     let arg_line = self.get_line_from_offset(arg_offset, content);
                     let start_char = self.get_char_position_from_offset(arg_offset, content);
@@ -610,18 +608,8 @@ impl FixtureDatabase {
             }
             Expr::Call(call) => {
                 // Handle @pytest.fixture() or @fixture() with parentheses
-                // Need to check the call.func expression
-                match &*call.func {
-                    Expr::Name(name) => name.id.as_str() == "fixture",
-                    Expr::Attribute(attr) => {
-                        if let Expr::Name(value) = &*attr.value {
-                            value.id.as_str() == "pytest" && attr.attr.as_str() == "fixture"
-                        } else {
-                            false
-                        }
-                    }
-                    _ => false,
-                }
+                // Recursively check the function being called
+                Self::is_fixture_expr(&call.func)
             }
             _ => false,
         }
@@ -1466,9 +1454,15 @@ impl FixtureDatabase {
                 elements.join(", ")
             }
             // Ruff has different literal types instead of Constant
-            Expr::NumberLiteral(num) => format!("{:?}", num.value),
-            Expr::StringLiteral(s) => format!("{:?}", s.value),
-            Expr::BytesLiteral(b) => format!("{:?}", b.value),
+            Expr::NumberLiteral(num) => match &num.value {
+                ruff_python_ast::Number::Int(i) => i.to_string(),
+                ruff_python_ast::Number::Float(f) => f.to_string(),
+                ruff_python_ast::Number::Complex { real, imag } => {
+                    format!("{}+{}j", real, imag)
+                }
+            },
+            Expr::StringLiteral(s) => s.value.to_string(),
+            Expr::BytesLiteral(b) => format!("b{:?}", b.value.as_slice()),
             Expr::BooleanLiteral(b) => b.value.to_string(),
             Expr::NoneLiteral(_) => "None".to_string(),
             Expr::EllipsisLiteral(_) => "...".to_string(),

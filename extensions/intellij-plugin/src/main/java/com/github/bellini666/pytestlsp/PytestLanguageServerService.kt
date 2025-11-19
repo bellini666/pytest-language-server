@@ -15,6 +15,16 @@ class PytestLanguageServerService(private val project: Project) {
 
     private val LOG = Logger.getInstance(PytestLanguageServerService::class.java)
 
+    /**
+     * Gets the path to the pytest-language-server executable.
+     *
+     * Priority order:
+     * 1. Custom path via system property: -Dpytest.lsp.executable=/path/to/binary
+     * 2. System PATH via system property: -Dpytest.lsp.useSystemPath=true
+     * 3. Bundled binary (default)
+     *
+     * @return The path to the executable, or null if not found
+     */
     fun getExecutablePath(): String? {
         // Check if user explicitly configured a custom path or wants to use PATH
         val customPath = System.getProperty("pytest.lsp.executable")

@@ -1,6 +1,6 @@
 plugins {
-    id("org.jetbrains.kotlin.jvm") version "1.9.22"
-    id("org.jetbrains.intellij") version "1.17.2"
+    id("org.jetbrains.kotlin.jvm") version "2.1.0"
+    id("org.jetbrains.intellij.platform") version "2.10.4"
 }
 
 group = "com.github.bellini666"
@@ -8,19 +8,41 @@ version = "0.7.2"
 
 repositories {
     mavenCentral()
+    intellijPlatform {
+        defaultRepositories()
+    }
 }
 
-intellij {
-    version.set("2023.3")
-    type.set("PC") // PyCharm Community
-    plugins.set(listOf("PythonCore"))
+dependencies {
+    intellijPlatform {
+        create("PC", "2024.2") // PyCharm Community
+        bundledPlugins("PythonCore")
 
-    // Download sources and javadocs for development
-    downloadSources.set(true)
+        // Add LSP4IJ dependency from JetBrains Marketplace
+        // Use version 0.18.0 which is compatible with PyCharm 2024.2+
+        plugin("com.redhat.devtools.lsp4ij", "0.18.0")
+
+        pluginVerifier()
+    }
 }
 
 kotlin {
     jvmToolchain(17)
+}
+
+intellijPlatform {
+    pluginConfiguration {
+        ideaVersion {
+            sinceBuild = "242"
+            untilBuild = provider { null } // Support all future versions
+        }
+    }
+
+    pluginVerification {
+        ides {
+            recommended()
+        }
+    }
 }
 
 tasks {
@@ -30,26 +52,21 @@ tasks {
         targetCompatibility = "17"
     }
     withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
-        kotlinOptions {
-            jvmTarget = "17"
-            apiVersion = "1.8"
-            languageVersion = "1.8"
+        compilerOptions {
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+            apiVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_1_9)
+            languageVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_1_9)
         }
-    }
-
-    patchPluginXml {
-        // Support from PyCharm 2023.3 (build 233) onwards
-        sinceBuild.set("233")
-        // Leave empty for forward compatibility with all future versions
-        untilBuild.set("")
     }
 
     // Ensure binaries are included in the plugin distribution
     // Place them in lib/bin relative to plugin root
     prepareSandbox {
         from("src/main/resources/bin") {
-            into("${pluginName.get()}/lib/bin")
-            fileMode = 0b111101101 // 0755 in octal - executable
+            into("pytest Language Server/lib/bin")
+            filePermissions {
+                unix("rwxr-xr-x")
+            }
         }
     }
 
@@ -57,7 +74,9 @@ tasks {
     buildPlugin {
         from("src/main/resources/bin") {
             into("lib/bin")
-            fileMode = 0b111101101 // 0755 in octal - executable
+            filePermissions {
+                unix("rwxr-xr-x")
+            }
         }
     }
 

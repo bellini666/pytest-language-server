@@ -9,8 +9,14 @@ out/
 *.iws
 *.ipr
 
+# IntelliJ Platform Gradle Plugin cache
+.intellijPlatform/
+
 # Local plugin configuration
 local.properties
+
+# Binaries downloaded for local builds
+src/main/resources/bin/
 
 # macOS
 .DS_Store

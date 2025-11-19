@@ -324,8 +324,8 @@ jobs:
       - name: Build plugin
         run: |
           cd extensions/intellij-plugin
-          chmod +x gradlew
-          ./gradlew buildPlugin
+          chmod +x build.sh gradlew
+          ./build.sh
       - name: Upload plugin to GitHub release
         uses: softprops/action-gh-release@v2
         with:

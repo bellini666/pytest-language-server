@@ -1,0 +1,16 @@
+# Gradle build artifacts
+.gradle/
+build/
+out/
+
+# IntelliJ IDEA
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Local plugin configuration
+local.properties
+
+# macOS
+.DS_Store

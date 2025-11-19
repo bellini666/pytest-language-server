@@ -15,8 +15,9 @@ extensions/intellij-plugin/dist/
 extensions/intellij-plugin/.idea/
 extensions/intellij-plugin/*.iml
 extensions/intellij-plugin/*.jar
-extensions/intellij-plugin/gradle/
-extensions/intellij-plugin/gradlew*
+!extensions/intellij-plugin/gradle/wrapper/gradle-wrapper.jar
+extensions/intellij-plugin/gradle/*
+!extensions/intellij-plugin/gradle/wrapper/
 extensions/intellij-plugin/src/main/resources/bin/
 
 # Zed extension binaries

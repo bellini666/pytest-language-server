@@ -324,18 +324,18 @@ jobs:
       - name: Build plugin
         run: |
           cd extensions/intellij-plugin
-          chmod +x build.sh
-          ./build.sh
+          chmod +x gradlew
+          ./gradlew buildPlugin
       - name: Upload plugin to GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: extensions/intellij-plugin/dist/pytest-language-server-*.zip
+          files: extensions/intellij-plugin/build/distributions/pytest-language-server-*.zip
       - name: Verify plugin compatibility
         run: |
           # Download plugin verifier
           curl -L https://github.com/JetBrains/intellij-plugin-verifier/releases/download/1.307/plugin-verifier-1.307-all.jar -o plugin-verifier.jar
           # Run verification (informational only)
-          PLUGIN_ZIP=$(ls extensions/intellij-plugin/dist/pytest-language-server-*.zip | head -1)
+          PLUGIN_ZIP=$(ls extensions/intellij-plugin/build/distributions/pytest-language-server-*.zip | head -1)
           java -jar plugin-verifier.jar check-plugin "$PLUGIN_ZIP" || true
         continue-on-error: true
       - name: Publish to JetBrains Marketplace
@@ -343,7 +343,7 @@ jobs:
           JETBRAINS_TOKEN: ${{ secrets.JETBRAINS_TOKEN }}
           JETBRAINS_PLUGIN_ID: ${{ secrets.JETBRAINS_PLUGIN_ID }}
         run: |
-          PLUGIN_ZIP=$(ls extensions/intellij-plugin/dist/pytest-language-server-*.zip | head -1)
+          PLUGIN_ZIP=$(ls extensions/intellij-plugin/build/distributions/pytest-language-server-*.zip | head -1)
 
           if [ -z "$JETBRAINS_TOKEN" ] || [ -z "$JETBRAINS_PLUGIN_ID" ]; then
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

@@ -1,7 +1,9 @@
 package com.github.bellini666.pytestlsp
 
+import com.intellij.ide.plugins.PluginManagerCore
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.diagnostic.Logger
+import com.intellij.openapi.extensions.PluginId
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.SystemInfo
 import java.io.File
@@ -14,28 +16,43 @@ class PytestLanguageServerService(private val project: Project) {
     private val LOG = Logger.getInstance(PytestLanguageServerService::class.java)
 
     fun getExecutablePath(): String? {
-        // First, check if user configured a custom path
+        // Check if user explicitly configured a custom path or wants to use PATH
         val customPath = System.getProperty("pytest.lsp.executable")
-        if (customPath != null && File(customPath).exists()) {
-            LOG.info("Using custom pytest-language-server from: $customPath")
-            return customPath
+        val useSystemPath = System.getProperty("pytest.lsp.useSystemPath")?.toBoolean() ?: false
+
+        if (customPath != null) {
+            // User specified a custom path
+            val file = File(customPath)
+            if (file.exists()) {
+                LOG.info("Using custom pytest-language-server from: $customPath")
+                return customPath
+            } else {
+                LOG.error("Custom pytest-language-server path does not exist: $customPath")
+                return null
+            }
         }
 
-        // Try to find in PATH
-        val pathExecutable = findInPath()
-        if (pathExecutable != null) {
-            LOG.info("Using pytest-language-server from PATH: $pathExecutable")
-            return pathExecutable
+        if (useSystemPath) {
+            // User wants to use system PATH
+            val pathExecutable = findInPath()
+            if (pathExecutable != null) {
+                LOG.info("Using pytest-language-server from PATH: $pathExecutable")
+                return pathExecutable
+            } else {
+                LOG.error("pytest-language-server not found in PATH. Install via: pip install pytest-language-server")
+                return null
+            }
         }
 
-        // Use bundled binary
+        // Default: use bundled binary
         val bundledPath = getBundledBinaryPath()
-        if (bundledPath != null && File(bundledPath).exists()) {
+        if (bundledPath != null) {
             LOG.info("Using bundled pytest-language-server: $bundledPath")
             return bundledPath
         }
 
-        LOG.error("pytest-language-server binary not found")
+        // This is an error - bundled binary should always be present in releases
+        LOG.error("Bundled pytest-language-server binary not found. This is a packaging error. Please report at: https://github.com/bellini666/pytest-language-server/issues")
         return null
     }
 
@@ -77,19 +94,38 @@ class PytestLanguageServerService(private val project: Project) {
             }
         }
 
-        // Extract bundled binary to temp location
-        val pluginDir = this::class.java.protectionDomain.codeSource.location.toURI().path
-        val binDir = File(pluginDir, "bin")
-        val bundledBinary = File(binDir, binaryName)
-
-        if (bundledBinary.exists()) {
-            // Ensure executable permissions on Unix-like systems
-            if (!SystemInfo.isWindows) {
-                bundledBinary.setExecutable(true)
-            }
-            return bundledBinary.absolutePath
+        // Get plugin directory using IntelliJ's plugin API
+        val pluginId = PluginId.getId("com.github.bellini666.pytest-language-server")
+        val pluginDescriptor = PluginManagerCore.getPlugin(pluginId)
+        if (pluginDescriptor == null) {
+            LOG.error("Failed to find plugin descriptor")
+            return null
         }
 
+        val pluginPath = pluginDescriptor.pluginPath
+        LOG.info("Plugin path: $pluginPath")
+
+        // Try multiple possible locations for the binary
+        val possibleLocations = listOf(
+            pluginPath.resolve("lib/bin/$binaryName"),      // Inside plugin lib
+            pluginPath.resolve("bin/$binaryName"),           // Direct bin directory
+            pluginPath.resolve("pytest-language-server/lib/bin/$binaryName")  // Nested structure
+        )
+
+        for (location in possibleLocations) {
+            val bundledBinary = location.toFile()
+            LOG.info("Checking for binary at: ${bundledBinary.absolutePath}")
+            if (bundledBinary.exists()) {
+                // Ensure executable permissions on Unix-like systems
+                if (!SystemInfo.isWindows) {
+                    bundledBinary.setExecutable(true)
+                }
+                LOG.info("Found bundled binary at: ${bundledBinary.absolutePath}")
+                return bundledBinary.absolutePath
+            }
+        }
+
+        LOG.error("Bundled binary '$binaryName' not found in any of the expected locations: ${possibleLocations.map { it.toFile().absolutePath }}")
         return null
     }
 

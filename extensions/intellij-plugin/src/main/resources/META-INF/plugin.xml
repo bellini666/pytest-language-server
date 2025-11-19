@@ -27,13 +27,14 @@
     <category>Code editing</category>
     <url>https://github.com/bellini666/pytest-language-server</url>
 
-    <idea-version since-build="223"/>
+    <idea-version since-build="233"/>
 
     <depends>com.intellij.modules.platform</depends>
     <depends optional="true" config-file="python-support.xml">com.intellij.modules.python</depends>
 
     <extensions defaultExtensionNs="com.intellij">
         <projectService serviceImplementation="com.github.bellini666.pytestlsp.PytestLanguageServerService"/>
+        <notificationGroup id="pytest Language Server" displayType="BALLOON"/>
     </extensions>
 
     <applicationListeners>

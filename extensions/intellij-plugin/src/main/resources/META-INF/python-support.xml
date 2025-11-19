@@ -1,0 +1,12 @@
+<idea-plugin>
+    <!-- Python-specific configuration -->
+    <!-- This file is loaded only when Python support is available -->
+
+    <!-- LSP4IJ Extension Points for Python -->
+    <extensions defaultExtensionNs="com.redhat.devtools.lsp4ij">
+        <!-- Map Python files to pytest Language Server -->
+        <languageMapping language="Python"
+                         serverId="pytestLanguageServer"
+                         fileNamePattern="**/test_*.py;**/*_test.py;**/conftest.py"/>
+    </extensions>
+</idea-plugin>

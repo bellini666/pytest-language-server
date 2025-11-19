@@ -2,19 +2,19 @@ package com.github.bellini666.pytestlsp
 
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.project.ProjectManagerListener
+import com.intellij.openapi.startup.ProjectActivity
 
 /**
- * Listener for project lifecycle events.
+ * Startup activity for project lifecycle events.
  *
  * Note: LSP4IJ handles the actual language server lifecycle automatically.
- * This listener is only for logging and diagnostics.
+ * This activity is only for logging and diagnostics.
  */
-class PytestLanguageServerListener : ProjectManagerListener {
+class PytestLanguageServerListener : ProjectActivity {
 
     private val LOG = Logger.getInstance(PytestLanguageServerListener::class.java)
 
-    override fun projectOpened(project: Project) {
+    override suspend fun execute(project: Project) {
         LOG.info("pytest Language Server plugin activated for project: ${project.name}")
 
         // Verify that the executable can be found

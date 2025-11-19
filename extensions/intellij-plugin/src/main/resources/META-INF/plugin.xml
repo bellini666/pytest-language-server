@@ -37,7 +37,8 @@
     <!-- Required dependencies -->
     <depends>com.intellij.modules.platform</depends>
     <depends>com.redhat.devtools.lsp4ij</depends>
-    <depends>com.intellij.modules.python</depends>
+    <!-- Python support is optional - works with PyCharm or IntelliJ IDEA + Python plugin -->
+    <depends optional="true" config-file="python-support.xml">com.intellij.modules.python</depends>
 
     <!-- LSP4IJ Extension Points -->
     <extensions defaultExtensionNs="com.redhat.devtools.lsp4ij">
@@ -50,11 +51,6 @@
                 and code actions for pytest fixtures.
             ]]></description>
         </server>
-
-        <!-- Map Python files to pytest Language Server -->
-        <languageMapping language="Python"
-                         serverId="pytestLanguageServer"
-                         fileNamePattern="**/test_*.py;**/*_test.py;**/conftest.py"/>
     </extensions>
 
     <!-- IntelliJ Platform Extensions -->
@@ -63,9 +59,8 @@
         <notificationGroup id="pytest Language Server" displayType="BALLOON"/>
     </extensions>
 
-    <!-- Project lifecycle listener for logging and diagnostics -->
-    <projectListeners>
-        <listener class="com.github.bellini666.pytestlsp.PytestLanguageServerListener"
-                  topic="com.intellij.openapi.project.ProjectManagerListener"/>
-    </projectListeners>
+    <!-- Startup activity for logging and diagnostics -->
+    <extensions defaultExtensionNs="com.intellij">
+        <postStartupActivity implementation="com.github.bellini666.pytestlsp.PytestLanguageServerListener"/>
+    </extensions>
 </idea-plugin>

@@ -85,14 +85,14 @@ class PytestLanguageServerService(private val project: Project) {
         val binaryName = when {
             SystemInfo.isWindows -> "pytest-language-server.exe"
             SystemInfo.isMac -> {
-                if (SystemInfo.isAarch64) {
+                if (SystemInfo.isArm64) {
                     "pytest-language-server-aarch64-apple-darwin"
                 } else {
                     "pytest-language-server-x86_64-apple-darwin"
                 }
             }
             SystemInfo.isLinux -> {
-                if (SystemInfo.isAarch64) {
+                if (SystemInfo.isArm64) {
                     "pytest-language-server-aarch64-unknown-linux-gnu"
                 } else {
                     "pytest-language-server-x86_64-unknown-linux-gnu"

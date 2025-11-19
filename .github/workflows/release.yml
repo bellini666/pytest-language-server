@@ -407,22 +407,20 @@ jobs:
             fi
           fi
 
-  # publish-zed:
-  #   name: Publish Zed extension
-  #   runs-on: ubuntu-latest
-  #   if: startsWith(github.ref, 'refs/tags/')
-  #   steps:
-  #     - name: Bump Zed extension version
-  #       uses: huacnlee/zed-extension-action@v1
-  #       with:
-  #         extension-name: pytest-language-server
-  #         extension-path: extensions/zed-extension
-  #         push-to: bellini666/extensions
-  #       env:
-  #         # Personal access token with "repo" & "workflow" scopes
-  #         # Create at: https://github.com/settings/tokens
-  #         COMMITTER_TOKEN: ${{ secrets.COMMITTER_TOKEN }}
-  #
-  # NOTE: Zed extension auto-publishing is disabled due to a bug in huacnlee/zed-extension-action
-  # The regex doesn't handle multiline TOML correctly. Manually update the version in
-  # bellini666/extensions repository after each release.
+  publish-zed:
+    name: Publish Zed extension
+    runs-on: ubuntu-latest
+    # Disabled due to bug in huacnlee/zed-extension-action - regex doesn't handle multiline TOML
+    # Manually update version in bellini666/extensions repository after each release
+    if: false
+    steps:
+      - name: Bump Zed extension version
+        uses: huacnlee/zed-extension-action@v1
+        with:
+          extension-name: pytest-language-server
+          extension-path: extensions/zed-extension
+          push-to: bellini666/extensions
+        env:
+          # Personal access token with "repo" & "workflow" scopes
+          # Create at: https://github.com/settings/tokens
+          COMMITTER_TOKEN: ${{ secrets.COMMITTER_TOKEN }}

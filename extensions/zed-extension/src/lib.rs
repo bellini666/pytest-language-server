@@ -21,7 +21,7 @@ impl zed::Extension for PytestLspExtension {
 
     fn language_server_command(
         &mut self,
-        _language_server_id: &zed::LanguageServerId,
+        language_server_id: &zed::LanguageServerId,
         worktree: &zed::Worktree,
     ) -> Result<zed::Command> {
         let (platform, arch) = zed::current_platform();
@@ -36,7 +36,7 @@ impl zed::Extension for PytestLspExtension {
         let binary_path = if let Some(ref cached) = self.cached_binary_path {
             cached.clone()
         } else {
-            self.get_binary_path(platform, arch, worktree)?
+            self.get_binary_path(platform, arch, worktree, language_server_id)?
         };
 
         Ok(zed::Command {
@@ -65,6 +65,7 @@ impl PytestLspExtension {
         platform: zed::Os,
         arch: zed::Architecture,
         worktree: &zed::Worktree,
+        language_server_id: &LanguageServerId,
     ) -> Result<String> {
         // Priority 1: Try PATH first (user may have installed via pip/cargo/brew)
         if let Some(path) = worktree.which("pytest-language-server") {
@@ -84,10 +85,8 @@ impl PytestLspExtension {
         }
 
         // Download from GitHub release
-        let language_server_id = LanguageServerId("pytest-language-server".to_string());
-
         zed::set_language_server_installation_status(
-            &language_server_id,
+            language_server_id,
             &LanguageServerInstallationStatus::Downloading,
         );
 
@@ -124,9 +123,10 @@ impl PytestLspExtension {
 
         zed::make_file_executable(&binary_path)?;
 
+        // Clear installation status (download complete)
         zed::set_language_server_installation_status(
-            &language_server_id,
-            &LanguageServerInstallationStatus::Downloaded,
+            language_server_id,
+            &LanguageServerInstallationStatus::None,
         );
 
         self.cached_binary_path = Some(binary_path.clone());

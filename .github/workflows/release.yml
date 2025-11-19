@@ -416,6 +416,7 @@ jobs:
         uses: huacnlee/zed-extension-action@v1
         with:
           extension-name: pytest-language-server
+          extension-path: extensions/zed-extension
           push-to: bellini666/extensions
         env:
           # Personal access token with "repo" & "workflow" scopes

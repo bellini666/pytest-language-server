@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python Version](https://img.shields.io/pypi/pyversions/pytest-language-server.svg)](https://pypi.org/project/pytest-language-server/)
 
-A blazingly fast Language Server Protocol (LSP) implementation for pytest, built with Rust. Provides IDE features like go-to-definition, find-references, hover documentation, and code actions for pytest fixtures using [Ruff's Python parser](https://github.com/astral-sh/ruff).
+A blazingly fast Language Server Protocol (LSP) implementation for pytest, built with Rust.
 
 ## Demo
 
@@ -103,7 +103,7 @@ def test_broken():  # ⚠️ Warning: 'user_db' used but not declared
 ### ⚡️ Performance
 Built with Rust for maximum performance:
 - Fast workspace scanning with concurrent file processing
-- Efficient AST parsing using [Ruff's Python parser](https://github.com/astral-sh/ruff)
+- Efficient AST parsing using rustpython-parser
 - Lock-free data structures with DashMap
 - Minimal memory footprint
 
@@ -343,7 +343,7 @@ Automatically discovers fixtures from popular pytest plugins:
 
 - **Language**: Rust 🦀
 - **LSP Framework**: tower-lsp
-- **Parser**: [Ruff's Python parser](https://github.com/astral-sh/ruff)
+- **Parser**: rustpython-parser
 - **Concurrency**: tokio async runtime
 - **Data Structures**: DashMap for lock-free concurrent access
 
@@ -409,10 +409,10 @@ MIT License - see LICENSE file for details.
 
 Built with:
 - [tower-lsp](https://github.com/ebkalderon/tower-lsp) - LSP framework
-- [Ruff's Python parser](https://github.com/astral-sh/ruff) - Fast Python AST parsing
+- [rustpython-parser](https://github.com/RustPython/RustPython) - Python AST parsing
 - [tokio](https://tokio.rs/) - Async runtime
 
-Special thanks to the pytest team for creating such an amazing testing framework, and to the Ruff team for their blazingly fast Python parser.
+Special thanks to the pytest team for creating such an amazing testing framework.
 
 ---
 

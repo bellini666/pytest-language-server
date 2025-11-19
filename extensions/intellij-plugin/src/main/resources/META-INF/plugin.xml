@@ -12,6 +12,7 @@
         <b>Features:</b>
         <ul>
             <li>Go to Definition: Jump to fixture definitions from usage</li>
+            <li>Code Completion: Smart auto-completion for pytest fixtures with context-aware suggestions</li>
             <li>Find References: Find all usages of a fixture</li>
             <li>Hover Documentation: View fixture signatures and docstrings</li>
             <li>Diagnostics: Warnings for undeclared fixtures used in function bodies</li>
@@ -46,8 +47,8 @@
                 factoryClass="com.github.bellini666.pytestlsp.PytestLanguageServerFactory">
             <description><![CDATA[
                 A blazingly fast Language Server Protocol implementation for pytest fixtures, written in Rust.
-                Provides go-to-definition, find-references, hover documentation, diagnostics, and code actions
-                for pytest fixtures.
+                Provides go-to-definition, code completion, find-references, hover documentation, diagnostics,
+                and code actions for pytest fixtures.
             ]]></description>
         </server>
 

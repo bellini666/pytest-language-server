@@ -22,6 +22,16 @@ This guide explains how to publish the pytest-language-server extension to the Z
    git submodule update
    ```
 
+## How Binary Distribution Works
+
+The extension automatically downloads platform-specific binaries from GitHub Releases when first used. The extension code:
+
+1. Checks if `pytest-language-server` is in the user's PATH (prioritizes user installations)
+2. If not found, downloads the appropriate binary from the latest GitHub Release
+3. Caches the binary for future use
+
+**No binaries are committed to the extension repository.** Users get binaries from GitHub Releases automatically.
+
 ## Publishing Steps
 
 ### 1. Add Extension as Submodule
@@ -42,11 +52,11 @@ Add this entry to the `extensions.toml` file in the root of the extensions repos
 ```toml
 [pytest-language-server]
 submodule = "extensions/pytest-language-server"
-path = "zed-extension"
+path = "extensions/zed-extension"
 version = "0.7.2"
 ```
 
-**Important:** The `path` field is required because the extension files are in a subdirectory (`zed-extension`) within the repository.
+**Important:** The `path` field is required because the extension files are in a subdirectory (`extensions/zed-extension`) within the repository.
 
 ### 3. Sort Extensions
 
@@ -79,18 +89,20 @@ The Zed team will review your PR. Once merged, the extension will be automatical
 
 To release an update:
 
-1. Update the version in `zed-extension/extension.toml`
-2. Create and push a new tag in the pytest-language-server repository
+1. Update the version in `extensions/zed-extension/extension.toml` in the pytest-language-server repository
+2. Create and push a new tag/release with pre-built binaries on GitHub
 3. Create a PR to the extensions repository:
    ```bash
    cd extensions/pytest-language-server
    git pull origin main
-   git checkout v0.7.2  # or whatever the new version is
+   git checkout v0.7.3  # or whatever the new version is
    cd ../..
    ```
-4. Update the version in `extensions.toml`
+4. Update the version in `extensions.toml` to match
 5. Run `pnpm sort-extensions`
 6. Commit and create a PR
+
+The extension will automatically download the new binaries from the latest GitHub Release when users update.
 
 ## Testing Locally
 
@@ -98,8 +110,9 @@ Before publishing, test the extension locally:
 
 1. Open Zed
 2. Run command: "zed: install dev extension"
-3. Select the `zed-extension` directory from this repository
+3. Select the `extensions/zed-extension` directory from this repository
 4. Test all features in a Python project with pytest
+5. Verify that binaries are downloaded automatically on first use
 
 ## License Requirement
 

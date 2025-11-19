@@ -5,35 +5,16 @@ This is a [Zed](https://zed.dev) extension that provides support for the [pytest
 ## Features
 
 - **Go to Definition**: Jump directly to fixture definitions from anywhere they're used
+- **Code Completion**: Smart auto-completion for pytest fixtures with context-aware suggestions
 - **Find References**: Find all usages of a fixture across your entire test suite
 - **Hover Documentation**: View fixture information including signature, location, and docstring
+- **Diagnostics**: Warnings for undeclared fixtures used in function bodies
+- **Code Actions**: Quick fixes to add missing fixture parameters
+- **Fixture Priority**: Correctly handles pytest's fixture shadowing rules
 - **Simple Setup**: Uses your existing pytest-language-server installation
 - **Cross-platform**: Works on macOS, Linux, and Windows
 
 ## Installation
-
-### Prerequisites
-
-First, install the pytest-language-server binary using one of these methods:
-
-```bash
-# Using uv (recommended)
-uv tool install pytest-language-server
-
-# Or with pip
-pip install pytest-language-server
-
-# Or with pipx (isolated environment)
-pipx install pytest-language-server
-
-# Or with Homebrew (macOS/Linux)
-brew install bellini666/tap/pytest-language-server
-
-# Or with Cargo
-cargo install pytest-language-server
-```
-
-### Install the Extension
 
 1. Open Zed
 2. Open the command palette (Cmd+Shift+P / Ctrl+Shift+P)
@@ -41,15 +22,28 @@ cargo install pytest-language-server
 4. Search for "pytest Language Server"
 5. Click "Install"
 
-## Configuration
+**That's it!** The extension automatically downloads the appropriate binary for your platform on first use.
 
-The extension automatically detects `pytest-language-server` if it's in your PATH.
+## How It Works
+
+The extension intelligently handles the language server binary:
+
+1. **Check PATH**: First, it looks for `pytest-language-server` in your PATH (if you installed via pip, cargo, or brew)
+2. **Auto-Download**: If not found, it automatically downloads the pre-built binary from GitHub Releases for your platform
+3. **Cache**: Downloaded binaries are cached in the extension directory for future use
+
+This means you can either:
+- **Do nothing** - the extension handles everything automatically
+- **Install manually** (via pip/cargo/brew) - the extension will use your installation
+
+## Configuration
 
 ### Tips
 
-- **Virtual Environments**: The extension respects your Python virtual environment, so install pytest-language-server in the same venv as your project
-- **Multiple Python Versions**: The extension uses whichever `pytest-language-server` is first in your PATH
-- **Logging**: Set the `RUST_LOG` environment variable before starting Zed to enable debug logging from the language server
+- **Custom Binary**: If you have `pytest-language-server` in your PATH, the extension will prioritize that over the auto-downloaded binary
+- **Offline Use**: Download the binary once while online, and it will be cached for offline use
+- **Manual Installation**: Install via `pip install pytest-language-server`, `cargo install pytest-language-server`, or `brew install pytest-language-server`
+- **Logging**: Set the `RUST_LOG` environment variable to enable debug logging from the language server
 
 ### Environment Variables
 

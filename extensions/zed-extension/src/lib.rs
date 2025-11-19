@@ -1,9 +1,16 @@
+use std::fs;
 use zed::settings::LspSettings;
-use zed_extension_api::{self as zed, Result};
+use zed_extension_api::{
+    self as zed, DownloadedFileType, GithubReleaseOptions, LanguageServerId,
+    LanguageServerInstallationStatus, Result,
+};
 
 struct PytestLspExtension {
     cached_binary_path: Option<String>,
 }
+
+const OWNER: &str = "bellini666";
+const REPO: &str = "pytest-language-server";
 
 impl zed::Extension for PytestLspExtension {
     fn new() -> Self {
@@ -59,14 +66,75 @@ impl PytestLspExtension {
         arch: zed::Architecture,
         worktree: &zed::Worktree,
     ) -> Result<String> {
-        // Priority 1: Try PATH first (user may have installed via pip)
+        // Priority 1: Try PATH first (user may have installed via pip/cargo/brew)
         if let Some(path) = worktree.which("pytest-language-server") {
             self.cached_binary_path = Some(path.clone());
             return Ok(path);
         }
 
-        // Priority 2: Use bundled binary
-        let binary_name = match platform {
+        // Priority 2: Download binary from GitHub releases
+        let binary_name = self.get_binary_name(platform, arch)?;
+        let binary_path = format!("bin/{}", binary_name);
+
+        // Check if already downloaded
+        if fs::metadata(&binary_path).is_ok() {
+            zed::make_file_executable(&binary_path)?;
+            self.cached_binary_path = Some(binary_path.clone());
+            return Ok(binary_path);
+        }
+
+        // Download from GitHub release
+        let language_server_id = LanguageServerId("pytest-language-server".to_string());
+
+        zed::set_language_server_installation_status(
+            &language_server_id,
+            &LanguageServerInstallationStatus::Downloading,
+        );
+
+        let repo = format!("{}/{}", OWNER, REPO);
+        let release = zed::latest_github_release(
+            &repo,
+            GithubReleaseOptions {
+                require_assets: true,
+                pre_release: false,
+            },
+        )?;
+
+        let asset_name = binary_name;
+        let asset = release
+            .assets
+            .iter()
+            .find(|asset| asset.name == asset_name)
+            .ok_or_else(|| {
+                format!(
+                    "no asset found matching {:?} in release {}",
+                    asset_name, release.version
+                )
+            })?;
+
+        // Create bin directory if it doesn't exist
+        fs::create_dir_all("bin").map_err(|e| format!("failed to create bin directory: {}", e))?;
+
+        zed::download_file(
+            &asset.download_url,
+            &binary_path,
+            DownloadedFileType::Uncompressed,
+        )
+        .map_err(|e| format!("failed to download file: {}", e))?;
+
+        zed::make_file_executable(&binary_path)?;
+
+        zed::set_language_server_installation_status(
+            &language_server_id,
+            &LanguageServerInstallationStatus::Downloaded,
+        );
+
+        self.cached_binary_path = Some(binary_path.clone());
+        Ok(binary_path)
+    }
+
+    fn get_binary_name(&self, platform: zed::Os, arch: zed::Architecture) -> Result<String> {
+        Ok(match platform {
             zed::Os::Mac => match arch {
                 zed::Architecture::Aarch64 => "pytest-language-server-aarch64-apple-darwin",
                 zed::Architecture::X8664 => "pytest-language-server-x86_64-apple-darwin",
@@ -78,15 +146,8 @@ impl PytestLspExtension {
                 _ => return Err("Unsupported Linux architecture".to_string()),
             },
             zed::Os::Windows => "pytest-language-server.exe",
-        };
-
-        let bundled_path = format!("bin/{}", binary_name);
-
-        // Ensure the bundled binary is executable (no-op on Windows)
-        zed::make_file_executable(&bundled_path)?;
-
-        self.cached_binary_path = Some(bundled_path.clone());
-        Ok(bundled_path)
+        }
+        .to_string())
     }
 }
 

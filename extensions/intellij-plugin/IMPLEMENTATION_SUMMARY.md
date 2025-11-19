@@ -10,11 +10,11 @@ Successfully implemented proper LSP integration for the pytest-language-server I
 
 **File: `build.gradle.kts`**
 
-- ✅ Upgraded to IntelliJ Platform Gradle Plugin 2.2.1 (from old 1.17.2)
+- ✅ Upgraded to IntelliJ Platform Gradle Plugin 2.10.4 (from old 1.17.2)
 - ✅ Upgraded Gradle wrapper from 8.2 to 8.10
-- ✅ Added LSP4IJ 0.7.0 dependency from JetBrains Marketplace
+- ✅ Added LSP4IJ 0.18.0 dependency from JetBrains Marketplace
 - ✅ Updated Kotlin compiler options to use modern `compilerOptions` DSL
-- ✅ Set Kotlin language version to 1.9 (required by PyCharm 2023.3)
+- ✅ Set Kotlin language version to 1.9 (required by PyCharm 2024.2+)
 - ✅ Removed deprecated `instrumentationTools()` call
 - ✅ Fixed file permissions using modern `filePermissions` API
 - ✅ Maintained forward compatibility: `untilBuild=""` for all future versions
@@ -137,8 +137,8 @@ Comprehensive rewrite including:
 
 ✅ **Build Successful**: Plugin compiles and builds correctly
 ✅ **Plugin ZIP Created**: `build/distributions/pytest-language-server-0.7.2.zip`
-✅ **Dependencies Resolved**: LSP4IJ 0.7.0 downloaded from JetBrains Marketplace
-✅ **Forward Compatible**: `sinceBuild="233"`, `untilBuild=""` (supports all future versions)
+✅ **Dependencies Resolved**: LSP4IJ 0.18.0 downloaded from JetBrains Marketplace
+✅ **Forward Compatible**: `sinceBuild="242"`, `untilBuild=""` (supports all future versions)
 
 ## Testing Status
 
@@ -173,7 +173,7 @@ Note: Binary bundling is handled by CI/CD. For local testing, use:
 
 ## Compatibility
 
-- **Minimum Version**: PyCharm 2023.3 (build 233)
+- **Minimum Version**: PyCharm 2024.2 (build 242)
 - **Maximum Version**: No limit (all future versions)
 - **Supported IDEs**: PyCharm Community, PyCharm Professional, IntelliJ IDEA Ultimate (with Python plugin)
 - **Supported Platforms**: macOS, Linux, Windows (via bundled binaries)

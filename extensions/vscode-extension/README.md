@@ -5,6 +5,7 @@ A blazingly fast Language Server Protocol implementation for pytest fixtures, wr
 ## Features
 
 - **Go to Definition**: Jump to fixture definitions from usage
+- **Code Completion**: Smart auto-completion for pytest fixtures with context-aware suggestions
 - **Find References**: Find all usages of a fixture
 - **Hover Documentation**: View fixture signatures and docstrings
 - **Diagnostics**: Warnings for undeclared fixtures used in function bodies

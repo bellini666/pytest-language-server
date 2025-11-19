@@ -185,7 +185,7 @@ require'lspconfig'.pytest_lsp.setup{
 
 ### Zed
 
-Install the extension from the extensions marketplace:
+Install from the extensions marketplace:
 
 1. Open Zed
 2. Open the command palette (Cmd+Shift+P / Ctrl+Shift+P)
@@ -193,18 +193,33 @@ Install the extension from the extensions marketplace:
 4. Search for "pytest Language Server"
 5. Click "Install"
 
-The extension will automatically detect `pytest-language-server` if it's in your PATH.
+The extension downloads platform-specific binaries from GitHub Releases. If you prefer to use your own installation (via pip, cargo, or brew), place `pytest-language-server` in your PATH.
 
 ### VS Code
 
-Install the extension from the marketplace (coming soon) or configure manually:
+**The extension includes pre-built binaries - no separate installation required!**
 
-```json
-{
-  "pytest-language-server.enable": true,
-  "pytest-language-server.path": "pytest-language-server"
-}
-```
+Install from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=bellini666.pytest-language-server):
+
+1. Open VS Code
+2. Go to Extensions (Cmd+Shift+X / Ctrl+Shift+X)
+3. Search for "pytest Language Server"
+4. Click "Install"
+
+Works out of the box with zero configuration!
+
+### IntelliJ IDEA / PyCharm
+
+**The plugin includes pre-built binaries - no separate installation required!**
+
+Install from the [JetBrains Marketplace](https://plugins.jetbrains.com/):
+
+1. Open PyCharm or IntelliJ IDEA
+2. Go to Settings/Preferences → Plugins
+3. Search for "pytest Language Server"
+4. Click "Install"
+
+Requires PyCharm 2024.2+ or IntelliJ IDEA 2024.2+ with Python plugin.
 
 ### Other Editors
 

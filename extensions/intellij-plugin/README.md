@@ -5,6 +5,7 @@ A blazingly fast Language Server Protocol implementation for pytest fixtures, wr
 ## Features
 
 - **Go to Definition**: Jump to fixture definitions from usage
+- **Code Completion**: Smart auto-completion for pytest fixtures with context-aware suggestions
 - **Find References**: Find all usages of a fixture
 - **Hover Documentation**: View fixture signatures and docstrings
 - **Diagnostics**: Warnings for undeclared fixtures used in function bodies
@@ -178,7 +179,7 @@ src/main/resources/
 - `ProcessStreamConnectionProvider` handles stdio communication
 
 **Forward Compatibility:**
-- `sinceBuild="233"` (PyCharm 2023.3+)
+- `sinceBuild="242"` (PyCharm 2024.2+)
 - `untilBuild=""` (all future versions)
 - LSP4IJ provides stable API across IntelliJ versions
 
@@ -211,7 +212,7 @@ src/main/resources/
 
 - **Gradle version:** Ensure Gradle 8.10+ (check with `./gradlew --version`)
 - **Java version:** Ensure Java 17+ (check with `java -version`)
-- **LSP4IJ dependency:** Uses version 0.7.0 for PyCharm 2023.3+ compatibility
+- **LSP4IJ dependency:** Uses version 0.18.0 for PyCharm 2024.2+ compatibility
 
 ## CI/CD and Releases
 

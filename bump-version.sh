@@ -45,6 +45,11 @@ if [ -f "extensions/intellij-plugin/src/main/resources/META-INF/plugin.xml" ]; t
     echo "  - extensions/intellij-plugin/src/main/resources/META-INF/plugin.xml"
 fi
 
+if [ -f "extensions/intellij-plugin/build.gradle.kts" ]; then
+    sed -i.bak "s/^version = \".*\"/version = \"$NEW_VERSION\"/" extensions/intellij-plugin/build.gradle.kts && rm extensions/intellij-plugin/build.gradle.kts.bak
+    echo "  - extensions/intellij-plugin/build.gradle.kts"
+fi
+
 # Update Cargo.lock
 cargo update -p pytest-language-server
 

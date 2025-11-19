@@ -1,5 +1,6 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
+import * as fs from 'fs';
 import {
   LanguageClient,
   LanguageClientOptions,
@@ -50,7 +51,6 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Check if the binary exists and is executable
   try {
-    const fs = require('fs');
     if (!fs.existsSync(command)) {
       vscode.window.showErrorMessage(
         `pytest-language-server binary not found at: ${command}. Please install pytest-language-server or configure the executable path.`

@@ -6,7 +6,8 @@ src/**
 webpack.config.js
 **/tsconfig.json
 **/.eslintrc.json
-**/*.map
+out/**/*.map
+src/**/*.map
 **/*.ts
 node_modules/**
 out/**

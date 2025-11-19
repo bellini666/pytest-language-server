@@ -43,7 +43,7 @@ Add this entry to the `extensions.toml` file in the root of the extensions repos
 [pytest-language-server]
 submodule = "extensions/pytest-language-server"
 path = "zed-extension"
-version = "0.3.0"
+version = "0.7.2"
 ```
 
 **Important:** The `path` field is required because the extension files are in a subdirectory (`zed-extension`) within the repository.
@@ -83,10 +83,10 @@ To release an update:
 2. Create and push a new tag in the pytest-language-server repository
 3. Create a PR to the extensions repository:
    ```bash
-   cd extensions/extensions/pytest-lsp
+   cd extensions/pytest-language-server
    git pull origin main
-   git checkout v0.4.0  # or whatever the new version is
-   cd ../../..
+   git checkout v0.7.2  # or whatever the new version is
+   cd ../..
    ```
 4. Update the version in `extensions.toml`
 5. Run `pnpm sort-extensions`

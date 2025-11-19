@@ -20,14 +20,35 @@
   },
   "categories": [
     "Programming Languages",
-    "Linters"
+    "Linters",
+    "Testing"
   ],
   "keywords": [
     "python",
     "pytest",
     "fixtures",
     "lsp",
-    "language-server"
+    "language-server",
+    "testing",
+    "test",
+    "code-navigation"
+  ],
+  "galleryBanner": {
+    "color": "#0c4b33",
+    "theme": "dark"
+  },
+  "qna": "https://github.com/bellini666/pytest-language-server/issues",
+  "badges": [
+    {
+      "url": "https://img.shields.io/visual-studio-marketplace/v/bellini666.pytest-language-server",
+      "href": "https://marketplace.visualstudio.com/items?itemName=bellini666.pytest-language-server",
+      "description": "Visual Studio Marketplace Version"
+    },
+    {
+      "url": "https://img.shields.io/visual-studio-marketplace/i/bellini666.pytest-language-server",
+      "href": "https://marketplace.visualstudio.com/items?itemName=bellini666.pytest-language-server",
+      "description": "Visual Studio Marketplace Installs"
+    }
   ],
   "activationEvents": [
     "onLanguage:python"

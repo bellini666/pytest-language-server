@@ -19,15 +19,15 @@
     ]]></description>
 
     <change-notes><![CDATA[
-        <b>0.5.1</b>
-        <ul>
-            <li>Critical fix for deterministic fixture resolution</li>
-            <li>Path canonicalization improvements</li>
-            <li>Performance optimizations</li>
-        </ul>
+        For detailed release notes and changelog, please visit:
+        <br/>
+        <a href="https://github.com/bellini666/pytest-language-server/releases">GitHub Releases</a>
     ]]></change-notes>
 
-    <idea-version since-build="223" until-build="242.*"/>
+    <category>Code editing</category>
+    <url>https://github.com/bellini666/pytest-language-server</url>
+
+    <idea-version since-build="223"/>
 
     <depends>com.intellij.modules.platform</depends>
     <depends optional="true" config-file="python-support.xml">com.intellij.modules.python</depends>

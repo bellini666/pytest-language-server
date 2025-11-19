@@ -2,7 +2,7 @@
 name = "pytest-language-server"
 version = "0.7.2"
 edition = "2021"
-rust-version = "1.83"
+rust-version = "1.89"
 authors = ["Thiago Bellini Ribeiro <hackedbellini@gmail.com>"]
 license = "MIT"
 description = "A blazingly fast Language Server Protocol implementation for pytest"

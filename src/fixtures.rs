@@ -1,6 +1,7 @@
 use dashmap::DashMap;
-use rustpython_parser::ast::{Expr, Stmt};
-use rustpython_parser::{parse, Mode};
+use ruff_python_ast::{Decorator, Expr, Stmt};
+use ruff_python_parser::parse_module;
+use ruff_text_size::Ranged;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -293,7 +294,7 @@ impl FixtureDatabase {
             .insert(file_path.clone(), Arc::new(content.to_string()));
 
         // Parse the Python code
-        let parsed = match parse(content, Mode::Module, "") {
+        let parsed = match parse_module(content) {
             Ok(ast) => ast,
             Err(e) => {
                 warn!("Failed to parse {:?}: {:?}", file_path, e);
@@ -326,20 +327,19 @@ impl FixtureDatabase {
         debug!("is_conftest: {}", is_conftest);
 
         // Process each statement in the module
-        if let rustpython_parser::ast::Mod::Module(module) = parsed {
-            debug!("Module has {} statements", module.body.len());
+        let module = parsed.into_syntax();
+        debug!("Module has {} statements", module.body.len());
 
-            // First pass: collect all module-level names (imports, assignments, function/class defs)
-            let mut module_level_names = std::collections::HashSet::new();
-            for stmt in &module.body {
-                self.collect_module_level_names(stmt, &mut module_level_names);
-            }
-            self.imports.insert(file_path.clone(), module_level_names);
+        // First pass: collect all module-level names (imports, assignments, function/class defs)
+        let mut module_level_names = std::collections::HashSet::new();
+        for stmt in &module.body {
+            self.collect_module_level_names(stmt, &mut module_level_names);
+        }
+        self.imports.insert(file_path.clone(), module_level_names);
 
-            // Second pass: analyze fixtures and tests
-            for stmt in &module.body {
-                self.visit_stmt(stmt, &file_path, is_conftest, content);
-            }
+        // Second pass: analyze fixtures and tests
+        for stmt in &module.body {
+            self.visit_stmt(stmt, &file_path, is_conftest, content);
         }
 
         debug!("Analysis complete for {:?}", file_path);
@@ -356,16 +356,8 @@ impl FixtureDatabase {
             Stmt::FunctionDef(func_def) => (
                 func_def.name.as_str(),
                 &func_def.decorator_list,
-                &func_def.args,
-                func_def.range,
-                &func_def.body,
-                &func_def.returns,
-            ),
-            Stmt::AsyncFunctionDef(func_def) => (
-                func_def.name.as_str(),
-                &func_def.decorator_list,
-                &func_def.args,
-                func_def.range,
+                &func_def.parameters,
+                func_def.range(),
                 &func_def.body,
                 &func_def.returns,
             ),
@@ -389,8 +381,14 @@ impl FixtureDatabase {
         });
 
         if is_fixture {
-            // Calculate line number from the range start
-            let line = self.get_line_from_offset(range.start().to_usize(), content);
+            // Calculate line number from the function name position
+            // In ruff, the function definition range includes decorators,
+            // but the name identifier has its own range that points to the actual function name
+            let name_range = match stmt {
+                Stmt::FunctionDef(func_def) => func_def.name.range(),
+                _ => range,
+            };
+            let line = self.get_line_from_offset(name_range.start().to_usize(), content);
 
             // Extract docstring if present
             let docstring = self.extract_docstring(body);
@@ -430,18 +428,22 @@ impl FixtureDatabase {
             declared_params.insert(func_name.to_string()); // Exclude function name itself
 
             for arg in &args.args {
-                let arg_name = arg.def.arg.as_str();
+                let arg_name = arg.parameter.name.as_str();
                 declared_params.insert(arg_name.to_string());
 
                 if arg_name != "self" && arg_name != "request" {
                     // Get the actual line where this parameter appears
-                    // arg.def.range contains the location of the parameter name
-                    let arg_line =
-                        self.get_line_from_offset(arg.def.range.start().to_usize(), content);
-                    let start_char = self
-                        .get_char_position_from_offset(arg.def.range.start().to_usize(), content);
-                    let end_char =
-                        self.get_char_position_from_offset(arg.def.range.end().to_usize(), content);
+                    // arg.parameter.range() contains the location of the parameter name
+                    let arg_line = self
+                        .get_line_from_offset(arg.parameter.range().start().to_usize(), content);
+                    let start_char = self.get_char_position_from_offset(
+                        arg.parameter.range().start().to_usize(),
+                        content,
+                    );
+                    let end_char = self.get_char_position_from_offset(
+                        arg.parameter.range().end().to_usize(),
+                        content,
+                    );
 
                     info!(
                         "Found fixture dependency: {} at {:?}:{}:{}",
@@ -489,18 +491,20 @@ impl FixtureDatabase {
 
             // Extract fixture usages from function parameters
             for arg in &args.args {
-                let arg_name = arg.def.arg.as_str();
+                let arg_name = arg.parameter.name.as_str();
                 declared_params.insert(arg_name.to_string());
 
                 if arg_name != "self" {
                     // Get the actual line where this parameter appears
                     // This handles multiline function signatures correctly
-                    // arg.def.range contains the location of the parameter name
-                    let arg_offset = arg.def.range.start().to_usize();
+                    // arg.parameter.range() contains the location of the parameter name
+                    let arg_offset = arg.parameter.range().start().to_usize();
                     let arg_line = self.get_line_from_offset(arg_offset, content);
                     let start_char = self.get_char_position_from_offset(arg_offset, content);
-                    let end_char =
-                        self.get_char_position_from_offset(arg.def.range.end().to_usize(), content);
+                    let end_char = self.get_char_position_from_offset(
+                        arg.parameter.range().end().to_usize(),
+                        content,
+                    );
 
                     debug!(
                         "Parameter {} at offset {}, calculated line {}, char {}",
@@ -542,7 +546,7 @@ impl FixtureDatabase {
 
     fn visit_assignment_fixture(
         &self,
-        assign: &rustpython_parser::ast::StmtAssign,
+        assign: &ruff_python_ast::StmtAssign,
         file_path: &PathBuf,
         content: &str,
     ) {
@@ -552,14 +556,14 @@ impl FixtureDatabase {
         if let Expr::Call(outer_call) = &*assign.value {
             // Check if outer_call.func is pytest.fixture() or fixture()
             if let Expr::Call(inner_call) = &*outer_call.func {
-                if Self::is_fixture_decorator(&inner_call.func) {
+                if Self::is_fixture_expr(&inner_call.func) {
                     // This is pytest.fixture()(something)
                     // Get the fixture name from the assignment target
                     for target in &assign.targets {
                         if let Expr::Name(name) = target {
                             let fixture_name = name.id.as_str();
-                            let line =
-                                self.get_line_from_offset(assign.range.start().to_usize(), content);
+                            let line = self
+                                .get_line_from_offset(assign.range().start().to_usize(), content);
 
                             info!(
                                 "Found fixture assignment: {} at {:?}:{}",
@@ -586,7 +590,12 @@ impl FixtureDatabase {
         }
     }
 
-    fn is_fixture_decorator(expr: &Expr) -> bool {
+    fn is_fixture_decorator(decorator: &Decorator) -> bool {
+        let expr = &decorator.expression;
+        Self::is_fixture_expr(expr)
+    }
+
+    fn is_fixture_expr(expr: &Expr) -> bool {
         match expr {
             Expr::Name(name) => name.id.as_str() == "fixture",
             Expr::Attribute(attr) => {
@@ -599,7 +608,8 @@ impl FixtureDatabase {
             }
             Expr::Call(call) => {
                 // Handle @pytest.fixture() or @fixture() with parentheses
-                Self::is_fixture_decorator(&call.func)
+                // Recursively check the function being called
+                Self::is_fixture_expr(&call.func)
             }
             _ => false,
         }
@@ -661,19 +671,9 @@ impl FixtureDatabase {
                     names.insert(name.to_string());
                 }
             }
-            // Regular function definitions (not fixtures)
+            // Function definitions (both regular and async, not fixtures)
             Stmt::FunctionDef(func_def) => {
                 // Check if this is NOT a fixture
-                let is_fixture = func_def
-                    .decorator_list
-                    .iter()
-                    .any(Self::is_fixture_decorator);
-                if !is_fixture {
-                    names.insert(func_def.name.to_string());
-                }
-            }
-            // Async function definitions (not fixtures)
-            Stmt::AsyncFunctionDef(func_def) => {
                 let is_fixture = func_def
                     .decorator_list
                     .iter()
@@ -709,7 +709,8 @@ impl FixtureDatabase {
             match stmt {
                 Stmt::Assign(assign) => {
                     // Collect variable names from left-hand side with their line numbers
-                    let line = self.get_line_from_offset(assign.range.start().to_usize(), content);
+                    let line =
+                        self.get_line_from_offset(assign.range().start().to_usize(), content);
                     let mut temp_names = std::collections::HashSet::new();
                     for target in &assign.targets {
                         self.collect_names_from_expr(target, &mut temp_names);
@@ -721,7 +722,7 @@ impl FixtureDatabase {
                 Stmt::AnnAssign(ann_assign) => {
                     // Collect annotated assignment targets with their line numbers
                     let line =
-                        self.get_line_from_offset(ann_assign.range.start().to_usize(), content);
+                        self.get_line_from_offset(ann_assign.range().start().to_usize(), content);
                     let mut temp_names = std::collections::HashSet::new();
                     self.collect_names_from_expr(&ann_assign.target, &mut temp_names);
                     for name in temp_names {
@@ -731,7 +732,7 @@ impl FixtureDatabase {
                 Stmt::AugAssign(aug_assign) => {
                     // Collect augmented assignment targets (+=, -=, etc.)
                     let line =
-                        self.get_line_from_offset(aug_assign.range.start().to_usize(), content);
+                        self.get_line_from_offset(aug_assign.range().start().to_usize(), content);
                     let mut temp_names = std::collections::HashSet::new();
                     self.collect_names_from_expr(&aug_assign.target, &mut temp_names);
                     for name in temp_names {
@@ -739,9 +740,9 @@ impl FixtureDatabase {
                     }
                 }
                 Stmt::For(for_stmt) => {
-                    // Collect loop variable with its line number
+                    // Collect loop variable with its line number (handles both sync and async for)
                     let line =
-                        self.get_line_from_offset(for_stmt.range.start().to_usize(), content);
+                        self.get_line_from_offset(for_stmt.range().start().to_usize(), content);
                     let mut temp_names = std::collections::HashSet::new();
                     self.collect_names_from_expr(&for_stmt.target, &mut temp_names);
                     for name in temp_names {
@@ -750,41 +751,20 @@ impl FixtureDatabase {
                     // Recursively collect from body
                     self.collect_local_variables(&for_stmt.body, content, local_vars);
                 }
-                Stmt::AsyncFor(for_stmt) => {
-                    let line =
-                        self.get_line_from_offset(for_stmt.range.start().to_usize(), content);
-                    let mut temp_names = std::collections::HashSet::new();
-                    self.collect_names_from_expr(&for_stmt.target, &mut temp_names);
-                    for name in temp_names {
-                        local_vars.insert(name, line);
-                    }
-                    self.collect_local_variables(&for_stmt.body, content, local_vars);
-                }
                 Stmt::While(while_stmt) => {
                     self.collect_local_variables(&while_stmt.body, content, local_vars);
                 }
                 Stmt::If(if_stmt) => {
                     self.collect_local_variables(&if_stmt.body, content, local_vars);
-                    self.collect_local_variables(&if_stmt.orelse, content, local_vars);
+                    // Handle elif/else clauses
+                    for clause in &if_stmt.elif_else_clauses {
+                        self.collect_local_variables(&clause.body, content, local_vars);
+                    }
                 }
                 Stmt::With(with_stmt) => {
-                    // Collect context manager variables with their line numbers
+                    // Collect context manager variables with their line numbers (handles both sync and async with)
                     let line =
-                        self.get_line_from_offset(with_stmt.range.start().to_usize(), content);
-                    for item in &with_stmt.items {
-                        if let Some(ref optional_vars) = item.optional_vars {
-                            let mut temp_names = std::collections::HashSet::new();
-                            self.collect_names_from_expr(optional_vars, &mut temp_names);
-                            for name in temp_names {
-                                local_vars.insert(name, line);
-                            }
-                        }
-                    }
-                    self.collect_local_variables(&with_stmt.body, content, local_vars);
-                }
-                Stmt::AsyncWith(with_stmt) => {
-                    let line =
-                        self.get_line_from_offset(with_stmt.range.start().to_usize(), content);
+                        self.get_line_from_offset(with_stmt.range().start().to_usize(), content);
                     for item in &with_stmt.items {
                         if let Some(ref optional_vars) = item.optional_vars {
                             let mut temp_names = std::collections::HashSet::new();
@@ -907,16 +887,31 @@ impl FixtureDatabase {
                         function_line,
                     );
                 }
-                for stmt in &if_stmt.orelse {
-                    self.visit_stmt_for_names(
-                        stmt,
-                        file_path,
-                        content,
-                        declared_params,
-                        local_vars,
-                        function_name,
-                        function_line,
-                    );
+                // Handle elif/else clauses
+                for clause in &if_stmt.elif_else_clauses {
+                    // Check test expression for elif clauses (else clauses have test = None)
+                    if let Some(ref test) = clause.test {
+                        self.visit_expr_for_names(
+                            test,
+                            file_path,
+                            content,
+                            declared_params,
+                            local_vars,
+                            function_name,
+                            function_line,
+                        );
+                    }
+                    for stmt in &clause.body {
+                        self.visit_stmt_for_names(
+                            stmt,
+                            file_path,
+                            content,
+                            declared_params,
+                            local_vars,
+                            function_name,
+                            function_line,
+                        );
+                    }
                 }
             }
             Stmt::While(while_stmt) => {
@@ -942,6 +937,7 @@ impl FixtureDatabase {
                 }
             }
             Stmt::For(for_stmt) => {
+                // Handles both sync and async for loops
                 self.visit_expr_for_names(
                     &for_stmt.iter,
                     file_path,
@@ -964,52 +960,7 @@ impl FixtureDatabase {
                 }
             }
             Stmt::With(with_stmt) => {
-                for item in &with_stmt.items {
-                    self.visit_expr_for_names(
-                        &item.context_expr,
-                        file_path,
-                        content,
-                        declared_params,
-                        local_vars,
-                        function_name,
-                        function_line,
-                    );
-                }
-                for stmt in &with_stmt.body {
-                    self.visit_stmt_for_names(
-                        stmt,
-                        file_path,
-                        content,
-                        declared_params,
-                        local_vars,
-                        function_name,
-                        function_line,
-                    );
-                }
-            }
-            Stmt::AsyncFor(for_stmt) => {
-                self.visit_expr_for_names(
-                    &for_stmt.iter,
-                    file_path,
-                    content,
-                    declared_params,
-                    local_vars,
-                    function_name,
-                    function_line,
-                );
-                for stmt in &for_stmt.body {
-                    self.visit_stmt_for_names(
-                        stmt,
-                        file_path,
-                        content,
-                        declared_params,
-                        local_vars,
-                        function_name,
-                        function_line,
-                    );
-                }
-            }
-            Stmt::AsyncWith(with_stmt) => {
+                // Handles both sync and async with statements
                 for item in &with_stmt.items {
                     self.visit_expr_for_names(
                         &item.context_expr,
@@ -1073,7 +1024,7 @@ impl FixtureDatabase {
         match expr {
             Expr::Name(name) => {
                 let name_str = name.id.as_str();
-                let line = self.get_line_from_offset(name.range.start().to_usize(), content);
+                let line = self.get_line_from_offset(name.range().start().to_usize(), content);
 
                 // Check if this name is a known fixture and not a declared parameter
                 // For local variables, only exclude them if they're defined BEFORE the current line
@@ -1087,10 +1038,10 @@ impl FixtureDatabase {
                     && !is_local_var_in_scope
                     && self.is_available_fixture(file_path, name_str)
                 {
-                    let start_char =
-                        self.get_char_position_from_offset(name.range.start().to_usize(), content);
+                    let start_char = self
+                        .get_char_position_from_offset(name.range().start().to_usize(), content);
                     let end_char =
-                        self.get_char_position_from_offset(name.range.end().to_usize(), content);
+                        self.get_char_position_from_offset(name.range().end().to_usize(), content);
 
                     info!(
                         "Found undeclared fixture usage: {} at {:?}:{}:{} in function {}",
@@ -1123,7 +1074,7 @@ impl FixtureDatabase {
                     function_name,
                     function_line,
                 );
-                for arg in &call.args {
+                for arg in &call.arguments.args {
                     self.visit_expr_for_names(
                         arg,
                         file_path,
@@ -1246,20 +1197,20 @@ impl FixtureDatabase {
                 }
             }
             Expr::Dict(dict) => {
-                for k in dict.keys.iter().flatten() {
+                for item in &dict.items {
+                    if let Some(ref k) = item.key {
+                        self.visit_expr_for_names(
+                            k,
+                            file_path,
+                            content,
+                            declared_params,
+                            local_vars,
+                            function_name,
+                            function_line,
+                        );
+                    }
                     self.visit_expr_for_names(
-                        k,
-                        file_path,
-                        content,
-                        declared_params,
-                        local_vars,
-                        function_name,
-                        function_line,
-                    );
-                }
-                for value in &dict.values {
-                    self.visit_expr_for_names(
-                        value,
+                        &item.value,
                         file_path,
                         content,
                         declared_params,
@@ -1314,11 +1265,9 @@ impl FixtureDatabase {
     fn extract_docstring(&self, body: &[Stmt]) -> Option<String> {
         // Python docstrings are the first statement in a function if it's an Expr containing a Constant string
         if let Some(Stmt::Expr(expr_stmt)) = body.first() {
-            if let Expr::Constant(constant) = &*expr_stmt.value {
+            if let Expr::StringLiteral(string_lit) = &*expr_stmt.value {
                 // Check if the constant is a string
-                if let rustpython_parser::ast::Constant::Str(s) = &constant.value {
-                    return Some(self.format_docstring(s.to_string()));
-                }
+                return Some(self.format_docstring(string_lit.value.to_string()));
             }
         }
         None
@@ -1395,7 +1344,7 @@ impl FixtureDatabase {
 
     fn extract_return_type(
         &self,
-        returns: &Option<Box<rustpython_parser::ast::Expr>>,
+        returns: &Option<Box<Expr>>,
         body: &[Stmt],
         content: &str,
     ) -> Option<String> {
@@ -1425,8 +1374,14 @@ impl FixtureDatabase {
                     }
                 }
                 Stmt::If(if_stmt) => {
-                    if self.contains_yield(&if_stmt.body) || self.contains_yield(&if_stmt.orelse) {
+                    if self.contains_yield(&if_stmt.body) {
                         return true;
+                    }
+                    // Check elif/else clauses
+                    for clause in &if_stmt.elif_else_clauses {
+                        if self.contains_yield(&clause.body) {
+                            return true;
+                        }
                     }
                 }
                 Stmt::For(for_stmt) => {
@@ -1463,11 +1418,7 @@ impl FixtureDatabase {
         false
     }
 
-    fn extract_yielded_type(
-        &self,
-        expr: &rustpython_parser::ast::Expr,
-        content: &str,
-    ) -> Option<String> {
+    fn extract_yielded_type(&self, expr: &Expr, content: &str) -> Option<String> {
         // Handle Generator[YieldType, SendType, ReturnType] -> extract YieldType
         // Handle Iterator[YieldType] -> extract YieldType
         // Handle Iterable[YieldType] -> extract YieldType
@@ -1491,7 +1442,7 @@ impl FixtureDatabase {
     }
 
     #[allow(clippy::only_used_in_recursion)]
-    fn expr_to_string(&self, expr: &rustpython_parser::ast::Expr, _content: &str) -> String {
+    fn expr_to_string(&self, expr: &Expr, _content: &str) -> String {
         match expr {
             Expr::Name(name) => name.id.to_string(),
             Expr::Attribute(attr) => {
@@ -1514,10 +1465,24 @@ impl FixtureDatabase {
                     .collect();
                 elements.join(", ")
             }
-            Expr::Constant(constant) => {
-                format!("{:?}", constant.value)
-            }
-            Expr::BinOp(binop) if matches!(binop.op, rustpython_parser::ast::Operator::BitOr) => {
+            // Ruff has different literal types instead of Constant
+            Expr::NumberLiteral(num) => match &num.value {
+                ruff_python_ast::Number::Int(i) => i.to_string(),
+                ruff_python_ast::Number::Float(f) => f.to_string(),
+                ruff_python_ast::Number::Complex { real, imag } => {
+                    if *imag >= 0.0 {
+                        format!("{}+{}j", real, imag)
+                    } else {
+                        format!("{}{}j", real, imag)
+                    }
+                }
+            },
+            Expr::StringLiteral(s) => s.value.to_string(),
+            Expr::BytesLiteral(b) => format!("b{:?}", b.value.as_slice()),
+            Expr::BooleanLiteral(b) => b.value.to_string(),
+            Expr::NoneLiteral(_) => "None".to_string(),
+            Expr::EllipsisLiteral(_) => "...".to_string(),
+            Expr::BinOp(binop) if matches!(binop.op, ruff_python_ast::Operator::BitOr) => {
                 // Handle union types like str | int
                 format!(
                     "{} | {}",
@@ -2162,18 +2127,10 @@ impl FixtureDatabase {
         let target_line = (line + 1) as usize; // Convert to 1-based
 
         // Parse the file
-        let parsed = parse(&content, Mode::Module, "").ok()?;
+        let parsed = parse_module(&content).ok()?;
+        let module = parsed.into_syntax();
 
-        if let rustpython_parser::ast::Mod::Module(module) = parsed {
-            return self.find_enclosing_function(
-                &module.body,
-                &content,
-                target_line,
-                character as usize,
-            );
-        }
-
-        None
+        self.find_enclosing_function(&module.body, &content, target_line, character as usize)
     }
 
     fn find_enclosing_function(
@@ -2184,68 +2141,36 @@ impl FixtureDatabase {
         _target_char: usize,
     ) -> Option<(String, bool, Vec<String>)> {
         for stmt in stmts {
-            match stmt {
-                Stmt::FunctionDef(func_def) => {
-                    let func_start_line = content[..func_def.range.start().to_usize()]
-                        .matches('\n')
-                        .count()
-                        + 1;
-                    let func_end_line = content[..func_def.range.end().to_usize()]
-                        .matches('\n')
-                        .count()
-                        + 1;
+            if let Stmt::FunctionDef(func_def) = stmt {
+                let func_start_line = content[..func_def.range().start().to_usize()]
+                    .matches('\n')
+                    .count()
+                    + 1;
+                let func_end_line = content[..func_def.range().end().to_usize()]
+                    .matches('\n')
+                    .count()
+                    + 1;
 
-                    // Check if target is within this function's range
-                    if target_line >= func_start_line && target_line <= func_end_line {
-                        let is_fixture = func_def
-                            .decorator_list
+                // Check if target is within this function's range (handles both sync and async)
+                if target_line >= func_start_line && target_line <= func_end_line {
+                    let is_fixture = func_def
+                        .decorator_list
+                        .iter()
+                        .any(Self::is_fixture_decorator);
+                    let is_test = func_def.name.as_str().starts_with("test_");
+
+                    // Only return if it's a test or fixture
+                    if is_test || is_fixture {
+                        let params: Vec<String> = func_def
+                            .parameters
+                            .args
                             .iter()
-                            .any(Self::is_fixture_decorator);
-                        let is_test = func_def.name.starts_with("test_");
+                            .map(|arg| arg.parameter.name.to_string())
+                            .collect();
 
-                        // Only return if it's a test or fixture
-                        if is_test || is_fixture {
-                            let params: Vec<String> = func_def
-                                .args
-                                .args
-                                .iter()
-                                .map(|arg| arg.def.arg.to_string())
-                                .collect();
-
-                            return Some((func_def.name.to_string(), is_fixture, params));
-                        }
+                        return Some((func_def.name.to_string(), is_fixture, params));
                     }
                 }
-                Stmt::AsyncFunctionDef(func_def) => {
-                    let func_start_line = content[..func_def.range.start().to_usize()]
-                        .matches('\n')
-                        .count()
-                        + 1;
-                    let func_end_line = content[..func_def.range.end().to_usize()]
-                        .matches('\n')
-                        .count()
-                        + 1;
-
-                    if target_line >= func_start_line && target_line <= func_end_line {
-                        let is_fixture = func_def
-                            .decorator_list
-                            .iter()
-                            .any(Self::is_fixture_decorator);
-                        let is_test = func_def.name.starts_with("test_");
-
-                        if is_test || is_fixture {
-                            let params: Vec<String> = func_def
-                                .args
-                                .args
-                                .iter()
-                                .map(|arg| arg.def.arg.to_string())
-                                .collect();
-
-                            return Some((func_def.name.to_string(), is_fixture, params));
-                        }
-                    }
-                }
-                _ => {}
             }
         }
 

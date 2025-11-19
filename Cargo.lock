@@ -753,7 +753,7 @@ dependencies = [
 
 [[package]]
 name = "pytest-language-server"
-version = "0.8.2"
+version = "0.8.4"
 dependencies = [
  "dashmap 6.1.0",
  "rustpython-parser",

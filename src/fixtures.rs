@@ -357,7 +357,7 @@ impl FixtureDatabase {
                 func_def.name.as_str(),
                 &func_def.decorator_list,
                 &func_def.parameters,
-                func_def.range,
+                func_def.range(),
                 &func_def.body,
                 &func_def.returns,
             ),
@@ -385,8 +385,8 @@ impl FixtureDatabase {
             // In ruff, the function definition range includes decorators,
             // but the name identifier has its own range that points to the actual function name
             let name_range = match stmt {
-                Stmt::FunctionDef(func_def) => func_def.name.range,
-                _ => range, // Fallback, shouldn't happen
+                Stmt::FunctionDef(func_def) => func_def.name.range(),
+                _ => range,
             };
             let line = self.get_line_from_offset(name_range.start().to_usize(), content);
 
@@ -889,6 +889,18 @@ impl FixtureDatabase {
                 }
                 // Handle elif/else clauses
                 for clause in &if_stmt.elif_else_clauses {
+                    // Check test expression for elif clauses (else clauses have test = None)
+                    if let Some(ref test) = clause.test {
+                        self.visit_expr_for_names(
+                            test,
+                            file_path,
+                            content,
+                            declared_params,
+                            local_vars,
+                            function_name,
+                            function_line,
+                        );
+                    }
                     for stmt in &clause.body {
                         self.visit_stmt_for_names(
                             stmt,
@@ -1458,7 +1470,11 @@ impl FixtureDatabase {
                 ruff_python_ast::Number::Int(i) => i.to_string(),
                 ruff_python_ast::Number::Float(f) => f.to_string(),
                 ruff_python_ast::Number::Complex { real, imag } => {
-                    format!("{}+{}j", real, imag)
+                    if *imag >= 0.0 {
+                        format!("{}+{}j", real, imag)
+                    } else {
+                        format!("{}{}j", real, imag)
+                    }
                 }
             },
             Expr::StringLiteral(s) => s.value.to_string(),
@@ -2141,7 +2157,7 @@ impl FixtureDatabase {
                         .decorator_list
                         .iter()
                         .any(Self::is_fixture_decorator);
-                    let is_test = func_def.name.starts_with("test_");
+                    let is_test = func_def.name.as_str().starts_with("test_");
 
                     // Only return if it's a test or fixture
                     if is_test || is_fixture {

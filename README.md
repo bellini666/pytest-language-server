@@ -8,20 +8,20 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python Version](https://img.shields.io/pypi/pyversions/pytest-language-server.svg)](https://pypi.org/project/pytest-language-server/)
 
-> **Shamelessly vibed into existence** 🤖✨
->
-> This entire LSP implementation was built from scratch in a single AI-assisted coding session.
-> No template. No boilerplate. Just pure vibes and Rust. That's right - a complete, working
-> Language Server Protocol implementation for pytest, vibed into reality through the power of
-> modern AI tooling. Even this message about vibing was vibed into existence.
-
-A blazingly fast Language Server Protocol (LSP) implementation for pytest, built with Rust.
+A blazingly fast Language Server Protocol (LSP) implementation for pytest, built with Rust. Provides IDE features like go-to-definition, find-references, hover documentation, and code actions for pytest fixtures using [Ruff's Python parser](https://github.com/astral-sh/ruff).
 
 ## Demo
 
 ![pytest-language-server demo](demo.gif)
 
 *Showcasing go-to-definition, code completion, hover documentation, and code actions. Demo also vibed into existence.* ✨
+
+> **Shamelessly vibed into existence** 🤖✨
+>
+> This entire LSP implementation was built from scratch in a single AI-assisted coding session.
+> No template. No boilerplate. Just pure vibes and Rust. That's right - a complete, working
+> Language Server Protocol implementation for pytest, vibed into reality through the power of
+> modern AI tooling. Even this message about vibing was vibed into existence.
 
 ## Features
 
@@ -103,7 +103,7 @@ def test_broken():  # ⚠️ Warning: 'user_db' used but not declared
 ### ⚡️ Performance
 Built with Rust for maximum performance:
 - Fast workspace scanning with concurrent file processing
-- Efficient AST parsing using rustpython-parser
+- Efficient AST parsing using [Ruff's Python parser](https://github.com/astral-sh/ruff)
 - Lock-free data structures with DashMap
 - Minimal memory footprint
 
@@ -343,7 +343,7 @@ Automatically discovers fixtures from popular pytest plugins:
 
 - **Language**: Rust 🦀
 - **LSP Framework**: tower-lsp
-- **Parser**: rustpython-parser
+- **Parser**: [Ruff's Python parser](https://github.com/astral-sh/ruff)
 - **Concurrency**: tokio async runtime
 - **Data Structures**: DashMap for lock-free concurrent access
 
@@ -409,10 +409,10 @@ MIT License - see LICENSE file for details.
 
 Built with:
 - [tower-lsp](https://github.com/ebkalderon/tower-lsp) - LSP framework
-- [rustpython-parser](https://github.com/RustPython/RustPython) - Python AST parsing
+- [Ruff's Python parser](https://github.com/astral-sh/ruff) - Fast Python AST parsing
 - [tokio](https://tokio.rs/) - Async runtime
 
-Special thanks to the pytest team for creating such an amazing testing framework.
+Special thanks to the pytest team for creating such an amazing testing framework, and to the Ruff team for their blazingly fast Python parser.
 
 ---
 

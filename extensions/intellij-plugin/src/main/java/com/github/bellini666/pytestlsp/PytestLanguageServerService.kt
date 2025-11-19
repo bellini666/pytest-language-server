@@ -6,6 +6,7 @@ import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.extensions.PluginId
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.SystemInfo
+import com.intellij.util.system.CpuArch
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
@@ -85,14 +86,14 @@ class PytestLanguageServerService(private val project: Project) {
         val binaryName = when {
             SystemInfo.isWindows -> "pytest-language-server.exe"
             SystemInfo.isMac -> {
-                if (SystemInfo.isArm64) {
+                if (CpuArch.isArm64()) {
                     "pytest-language-server-aarch64-apple-darwin"
                 } else {
                     "pytest-language-server-x86_64-apple-darwin"
                 }
             }
             SystemInfo.isLinux -> {
-                if (SystemInfo.isArm64) {
+                if (CpuArch.isArm64()) {
                     "pytest-language-server-aarch64-unknown-linux-gnu"
                 } else {
                     "pytest-language-server-x86_64-unknown-linux-gnu"

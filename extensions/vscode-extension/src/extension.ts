@@ -87,6 +87,15 @@ export async function activate(context: vscode.ExtensionContext) {
     clientOptions
   );
 
+  // Register restart command
+  context.subscriptions.push(
+    vscode.commands.registerCommand('pytest-language-server.restart', async () => {
+      if (client) {
+        await client.restart();
+      }
+    })
+  );
+
   await client.start();
 }
 

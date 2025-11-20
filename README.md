@@ -265,6 +265,57 @@ Code actions are automatically available on diagnostic warnings. If code actions
 
 For detailed troubleshooting, see [CODE_ACTION_TESTING.md](CODE_ACTION_TESTING.md).
 
+## CLI Commands
+
+In addition to the LSP server mode, pytest-language-server provides useful command-line tools:
+
+### Fixtures List
+
+View all fixtures in your test suite with a hierarchical tree view:
+
+```bash
+# List all fixtures
+pytest-language-server fixtures list tests/
+
+# Skip unused fixtures
+pytest-language-server fixtures list tests/ --skip-unused
+
+# Show only unused fixtures
+pytest-language-server fixtures list tests/ --only-unused
+```
+
+The output includes:
+- **Color-coded display**: Files in cyan, directories in blue, used fixtures in green, unused in gray
+- **Usage statistics**: Shows how many times each fixture is used
+- **Smart filtering**: Hides files and directories with no matching fixtures
+- **Hierarchical structure**: Visualizes fixture organization across conftest.py files
+
+Example output:
+```
+Fixtures tree for: /path/to/tests
+
+conftest.py (7 fixtures)
+├── another_fixture (used 2 times)
+├── cli_runner (used 7 times)
+├── database (used 6 times)
+├── generator_fixture (used 1 time)
+├── iterator_fixture (unused)
+├── sample_fixture (used 7 times)
+└── shared_resource (used 5 times)
+subdir/
+└── conftest.py (4 fixtures)
+    ├── cli_runner (used 7 times)
+    ├── database (used 6 times)
+    ├── local_fixture (used 4 times)
+    └── sample_fixture (used 7 times)
+```
+
+This command is useful for:
+- **Auditing fixture usage** across your test suite
+- **Finding unused fixtures** that can be removed
+- **Understanding fixture organization** and hierarchy
+- **Documentation** - visualizing available fixtures for developers
+
 ## Supported Fixture Patterns
 
 ### Decorator Style

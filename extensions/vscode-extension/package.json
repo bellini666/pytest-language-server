@@ -75,7 +75,14 @@
           "description": "Traces the communication between VS Code and the language server."
         }
       }
-    }
+    },
+    "commands": [
+      {
+        "command": "pytest-language-server.restart",
+        "title": "Restart pytest Language Server",
+        "category": "pytest"
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run package",

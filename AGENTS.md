@@ -22,9 +22,9 @@ This ensures the user maintains full control over their git workflow.
 **pytest-language-server** is a Language Server Protocol (LSP) implementation for pytest fixtures, written in Rust. It provides IDE features like go-to-definition, find-references, and hover documentation for pytest fixtures.
 
 - **Language**: Rust (Edition 2021, MSRV 1.83)
-- **Lines of Code**: ~3,050 lines (2,254 in fixtures.rs, 792 in main.rs)
-- **Architecture**: Async LSP server using tower-lsp
-- **Key Features**: Fixture go-to-definition, find-references, hover docs, fixture overriding, undeclared fixture diagnostics
+- **Lines of Code**: ~3,120 lines (2,254 in fixtures.rs, 861 in main.rs)
+- **Architecture**: Async LSP server using tower-lsp with CLI support via clap
+- **Key Features**: Fixture go-to-definition, find-references, hover docs, fixture overriding, undeclared fixture diagnostics, CLI commands
 
 ## Core Architecture
 
@@ -33,7 +33,7 @@ This ensures the user maintains full control over their git workflow.
 ```
 src/
 ├── lib.rs          # Library exports (3 lines)
-├── main.rs         # LSP server implementation (794 lines)
+├── main.rs         # LSP server implementation + CLI (861 lines)
 └── fixtures.rs     # Fixture analysis engine (2,256 lines)
 ```
 
@@ -162,7 +162,7 @@ This is handled by `start_char` and `end_char` in `FixtureUsage`.
 ```
 src/
 ├── fixtures.rs           # Main code (2,254 lines)
-└── main.rs              # LSP server (792 lines)
+└── main.rs              # LSP server (861 lines)
 
 tests/
 ├── test_fixtures.rs     # FixtureDatabase integration tests (60 tests, 2,950 lines)
@@ -230,6 +230,59 @@ cargo clippy
 # Security audit
 cargo audit
 ```
+
+### CLI Commands
+
+The server supports both LSP mode and standalone CLI commands using `clap` for argument parsing.
+
+**LSP Server Mode (default)**:
+```bash
+# Start LSP server (reads from stdin, writes to stdout)
+pytest-language-server
+```
+
+**Fixtures Commands**:
+```bash
+# List all fixtures in a hierarchical tree view with color-coded output
+pytest-language-server fixtures list <path>
+
+# Skip unused fixtures from the output
+pytest-language-server fixtures list <path> --skip-unused
+
+# Show only unused fixtures
+pytest-language-server fixtures list <path> --only-unused
+
+# Example
+pytest-language-server fixtures list tests/test_project
+pytest-language-server fixtures list tests/test_project --skip-unused
+```
+
+The `fixtures list` command displays:
+- File names in **cyan/bold**
+- Directory names in **blue/bold**
+- Used fixtures in **green** with usage count in **yellow**
+- Unused fixtures in **gray/dimmed** with "unused" label
+- No indentation for root-level items
+
+Options:
+- `--skip-unused`: Filter out unused fixtures from the output
+- `--only-unused`: Show only unused fixtures (conflicts with --skip-unused)
+
+**Other Commands**:
+```bash
+# Show version
+pytest-language-server --version
+
+# Show help
+pytest-language-server --help
+pytest-language-server fixtures --help
+pytest-language-server fixtures list --help
+```
+
+The CLI uses a subcommand structure to support future expansion:
+- `fixtures` namespace - contains fixture-related commands
+  - `list` - displays fixtures in tree format
+- More namespaces can be added (e.g., `config`, `analyze`, etc.)
 
 ### Version Bumping
 
@@ -310,6 +363,8 @@ Core dependencies (from `Cargo.toml`):
 - **dashmap** (6.1) - Concurrent hash map
 - **walkdir** (2.5) - Directory traversal
 - **tracing** (0.1) - Logging framework
+- **clap** (4.5.53) - Command line argument parsing
+- **colored** (2.1) - Terminal color output
 
 ## File Naming Conventions
 
@@ -416,17 +471,17 @@ The project includes extensions for three major editors/IDEs:
 - **Language**: Rust (WASM)
 - **Build**: Cargo build to WASM
 - **Publishing**: Manual submission to Zed extensions repository
-- **Binaries**: Users install pytest-language-server separately (pip/cargo/brew)
+- **Binaries**: Checks PATH first, then auto-downloads from GitHub Releases
 - **Key files**: `extension.toml`, `Cargo.toml`, `src/lib.rs`, `PUBLISHING.md`
 
 ### IntelliJ Plugin (`extensions/intellij-plugin/`)
-- **Status**: ⚠️ Work in progress (LSP integration incomplete)
+- **Status**: ✅ Production-ready (LSP4IJ Integration)
 - **Language**: Kotlin
-- **Build**: Custom build.sh script (needs Gradle migration)
+- **Build**: Gradle (Modernized)
 - **Publishing**: Automated via GitHub Actions to JetBrains Marketplace
 - **Binaries**: Bundles platform-specific binaries in release
-- **Key files**: `plugin.xml`, Kotlin source files
-- **TODO**: Implement actual LSP client integration, migrate to Gradle
+- **Key files**: `plugin.xml`, `PytestLanguageServerFactory.kt`
+- **Features**: Full LSP support, Settings UI, Auto-download binaries
 
 ### Extension Development Notes
 - All extensions share the same version number (synchronized via `bump-version.sh`)

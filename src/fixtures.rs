@@ -1,6 +1,7 @@
 use dashmap::DashMap;
 use rustpython_parser::ast::{Expr, Stmt};
 use rustpython_parser::{parse, Mode};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -325,6 +326,9 @@ impl FixtureDatabase {
             .unwrap_or(false);
         debug!("is_conftest: {}", is_conftest);
 
+        // Build line index for O(1) line lookups
+        let line_index = Self::build_line_index(content);
+
         // Process each statement in the module
         if let rustpython_parser::ast::Mod::Module(module) = parsed {
             debug!("Module has {} statements", module.body.len());
@@ -338,17 +342,24 @@ impl FixtureDatabase {
 
             // Second pass: analyze fixtures and tests
             for stmt in &module.body {
-                self.visit_stmt(stmt, &file_path, is_conftest, content);
+                self.visit_stmt(stmt, &file_path, is_conftest, content, &line_index);
             }
         }
 
         debug!("Analysis complete for {:?}", file_path);
     }
 
-    fn visit_stmt(&self, stmt: &Stmt, file_path: &PathBuf, _is_conftest: bool, content: &str) {
+    fn visit_stmt(
+        &self,
+        stmt: &Stmt,
+        file_path: &PathBuf,
+        _is_conftest: bool,
+        content: &str,
+        line_index: &[usize],
+    ) {
         // First check for assignment-style fixtures: fixture_name = pytest.fixture()(func)
         if let Stmt::Assign(assign) = stmt {
-            self.visit_assignment_fixture(assign, file_path, content);
+            self.visit_assignment_fixture(assign, file_path, content, line_index);
         }
 
         // Handle both regular and async function definitions
@@ -390,7 +401,7 @@ impl FixtureDatabase {
 
         if is_fixture {
             // Calculate line number from the range start
-            let line = self.get_line_from_offset(range.start().to_usize(), content);
+            let line = self.get_line_from_offset(range.start().to_usize(), line_index);
 
             // Extract docstring if present
             let docstring = self.extract_docstring(body);
@@ -437,11 +448,13 @@ impl FixtureDatabase {
                     // Get the actual line where this parameter appears
                     // arg.def.range contains the location of the parameter name
                     let arg_line =
-                        self.get_line_from_offset(arg.def.range.start().to_usize(), content);
-                    let start_char = self
-                        .get_char_position_from_offset(arg.def.range.start().to_usize(), content);
-                    let end_char =
-                        self.get_char_position_from_offset(arg.def.range.end().to_usize(), content);
+                        self.get_line_from_offset(arg.def.range.start().to_usize(), line_index);
+                    let start_char = self.get_char_position_from_offset(
+                        arg.def.range.start().to_usize(),
+                        line_index,
+                    );
+                    let end_char = self
+                        .get_char_position_from_offset(arg.def.range.end().to_usize(), line_index);
 
                     info!(
                         "Found fixture dependency: {} at {:?}:{}:{}",
@@ -464,11 +477,12 @@ impl FixtureDatabase {
             }
 
             // Scan fixture body for undeclared fixture usages
-            let function_line = self.get_line_from_offset(range.start().to_usize(), content);
+            let function_line = self.get_line_from_offset(range.start().to_usize(), line_index);
             self.scan_function_body_for_undeclared_fixtures(
                 body,
                 file_path,
                 content,
+                line_index,
                 &declared_params,
                 func_name,
                 function_line,
@@ -497,10 +511,10 @@ impl FixtureDatabase {
                     // This handles multiline function signatures correctly
                     // arg.def.range contains the location of the parameter name
                     let arg_offset = arg.def.range.start().to_usize();
-                    let arg_line = self.get_line_from_offset(arg_offset, content);
-                    let start_char = self.get_char_position_from_offset(arg_offset, content);
-                    let end_char =
-                        self.get_char_position_from_offset(arg.def.range.end().to_usize(), content);
+                    let arg_line = self.get_line_from_offset(arg_offset, line_index);
+                    let start_char = self.get_char_position_from_offset(arg_offset, line_index);
+                    let end_char = self
+                        .get_char_position_from_offset(arg.def.range.end().to_usize(), line_index);
 
                     debug!(
                         "Parameter {} at offset {}, calculated line {}, char {}",
@@ -528,11 +542,12 @@ impl FixtureDatabase {
             }
 
             // Now scan the function body for undeclared fixture usages
-            let function_line = self.get_line_from_offset(range.start().to_usize(), content);
+            let function_line = self.get_line_from_offset(range.start().to_usize(), line_index);
             self.scan_function_body_for_undeclared_fixtures(
                 body,
                 file_path,
                 content,
+                line_index,
                 &declared_params,
                 func_name,
                 function_line,
@@ -544,7 +559,8 @@ impl FixtureDatabase {
         &self,
         assign: &rustpython_parser::ast::StmtAssign,
         file_path: &PathBuf,
-        content: &str,
+        _content: &str,
+        line_index: &[usize],
     ) {
         // Check for pattern: fixture_name = pytest.fixture()(func)
         // The value should be a Call expression where the func is a Call to pytest.fixture()
@@ -558,8 +574,8 @@ impl FixtureDatabase {
                     for target in &assign.targets {
                         if let Expr::Name(name) = target {
                             let fixture_name = name.id.as_str();
-                            let line =
-                                self.get_line_from_offset(assign.range.start().to_usize(), content);
+                            let line = self
+                                .get_line_from_offset(assign.range.start().to_usize(), line_index);
 
                             info!(
                                 "Found fixture assignment: {} at {:?}:{}",
@@ -605,18 +621,20 @@ impl FixtureDatabase {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn scan_function_body_for_undeclared_fixtures(
         &self,
         body: &[Stmt],
         file_path: &PathBuf,
         content: &str,
+        line_index: &[usize],
         declared_params: &std::collections::HashSet<String>,
         function_name: &str,
         function_line: usize,
     ) {
         // First, collect all local variable names with their definition line numbers
         let mut local_vars = std::collections::HashMap::new();
-        self.collect_local_variables(body, content, &mut local_vars);
+        self.collect_local_variables(body, content, line_index, &mut local_vars);
 
         // Also add imported names to local_vars (they shouldn't be flagged as undeclared fixtures)
         // Set their line to 0 so they're always considered "in scope"
@@ -632,6 +650,7 @@ impl FixtureDatabase {
                 stmt,
                 file_path,
                 content,
+                line_index,
                 declared_params,
                 &local_vars,
                 function_name,
@@ -699,17 +718,20 @@ impl FixtureDatabase {
         }
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn collect_local_variables(
         &self,
         body: &[Stmt],
         content: &str,
+        line_index: &[usize],
         local_vars: &mut std::collections::HashMap<String, usize>,
     ) {
         for stmt in body {
             match stmt {
                 Stmt::Assign(assign) => {
                     // Collect variable names from left-hand side with their line numbers
-                    let line = self.get_line_from_offset(assign.range.start().to_usize(), content);
+                    let line =
+                        self.get_line_from_offset(assign.range.start().to_usize(), line_index);
                     let mut temp_names = std::collections::HashSet::new();
                     for target in &assign.targets {
                         self.collect_names_from_expr(target, &mut temp_names);
@@ -721,7 +743,7 @@ impl FixtureDatabase {
                 Stmt::AnnAssign(ann_assign) => {
                     // Collect annotated assignment targets with their line numbers
                     let line =
-                        self.get_line_from_offset(ann_assign.range.start().to_usize(), content);
+                        self.get_line_from_offset(ann_assign.range.start().to_usize(), line_index);
                     let mut temp_names = std::collections::HashSet::new();
                     self.collect_names_from_expr(&ann_assign.target, &mut temp_names);
                     for name in temp_names {
@@ -731,7 +753,7 @@ impl FixtureDatabase {
                 Stmt::AugAssign(aug_assign) => {
                     // Collect augmented assignment targets (+=, -=, etc.)
                     let line =
-                        self.get_line_from_offset(aug_assign.range.start().to_usize(), content);
+                        self.get_line_from_offset(aug_assign.range.start().to_usize(), line_index);
                     let mut temp_names = std::collections::HashSet::new();
                     self.collect_names_from_expr(&aug_assign.target, &mut temp_names);
                     for name in temp_names {
@@ -741,36 +763,36 @@ impl FixtureDatabase {
                 Stmt::For(for_stmt) => {
                     // Collect loop variable with its line number
                     let line =
-                        self.get_line_from_offset(for_stmt.range.start().to_usize(), content);
+                        self.get_line_from_offset(for_stmt.range.start().to_usize(), line_index);
                     let mut temp_names = std::collections::HashSet::new();
                     self.collect_names_from_expr(&for_stmt.target, &mut temp_names);
                     for name in temp_names {
                         local_vars.insert(name, line);
                     }
                     // Recursively collect from body
-                    self.collect_local_variables(&for_stmt.body, content, local_vars);
+                    self.collect_local_variables(&for_stmt.body, content, line_index, local_vars);
                 }
                 Stmt::AsyncFor(for_stmt) => {
                     let line =
-                        self.get_line_from_offset(for_stmt.range.start().to_usize(), content);
+                        self.get_line_from_offset(for_stmt.range.start().to_usize(), line_index);
                     let mut temp_names = std::collections::HashSet::new();
                     self.collect_names_from_expr(&for_stmt.target, &mut temp_names);
                     for name in temp_names {
                         local_vars.insert(name, line);
                     }
-                    self.collect_local_variables(&for_stmt.body, content, local_vars);
+                    self.collect_local_variables(&for_stmt.body, content, line_index, local_vars);
                 }
                 Stmt::While(while_stmt) => {
-                    self.collect_local_variables(&while_stmt.body, content, local_vars);
+                    self.collect_local_variables(&while_stmt.body, content, line_index, local_vars);
                 }
                 Stmt::If(if_stmt) => {
-                    self.collect_local_variables(&if_stmt.body, content, local_vars);
-                    self.collect_local_variables(&if_stmt.orelse, content, local_vars);
+                    self.collect_local_variables(&if_stmt.body, content, line_index, local_vars);
+                    self.collect_local_variables(&if_stmt.orelse, content, line_index, local_vars);
                 }
                 Stmt::With(with_stmt) => {
                     // Collect context manager variables with their line numbers
                     let line =
-                        self.get_line_from_offset(with_stmt.range.start().to_usize(), content);
+                        self.get_line_from_offset(with_stmt.range.start().to_usize(), line_index);
                     for item in &with_stmt.items {
                         if let Some(ref optional_vars) = item.optional_vars {
                             let mut temp_names = std::collections::HashSet::new();
@@ -780,11 +802,11 @@ impl FixtureDatabase {
                             }
                         }
                     }
-                    self.collect_local_variables(&with_stmt.body, content, local_vars);
+                    self.collect_local_variables(&with_stmt.body, content, line_index, local_vars);
                 }
                 Stmt::AsyncWith(with_stmt) => {
                     let line =
-                        self.get_line_from_offset(with_stmt.range.start().to_usize(), content);
+                        self.get_line_from_offset(with_stmt.range.start().to_usize(), line_index);
                     for item in &with_stmt.items {
                         if let Some(ref optional_vars) = item.optional_vars {
                             let mut temp_names = std::collections::HashSet::new();
@@ -794,14 +816,19 @@ impl FixtureDatabase {
                             }
                         }
                     }
-                    self.collect_local_variables(&with_stmt.body, content, local_vars);
+                    self.collect_local_variables(&with_stmt.body, content, line_index, local_vars);
                 }
                 Stmt::Try(try_stmt) => {
-                    self.collect_local_variables(&try_stmt.body, content, local_vars);
+                    self.collect_local_variables(&try_stmt.body, content, line_index, local_vars);
                     // Note: ExceptHandler struct doesn't expose name/body in current API
                     // This is a limitation of rustpython-parser 0.4.0
-                    self.collect_local_variables(&try_stmt.orelse, content, local_vars);
-                    self.collect_local_variables(&try_stmt.finalbody, content, local_vars);
+                    self.collect_local_variables(&try_stmt.orelse, content, line_index, local_vars);
+                    self.collect_local_variables(
+                        &try_stmt.finalbody,
+                        content,
+                        line_index,
+                        local_vars,
+                    );
                 }
                 _ => {}
             }
@@ -834,6 +861,7 @@ impl FixtureDatabase {
         stmt: &Stmt,
         file_path: &PathBuf,
         content: &str,
+        line_index: &[usize],
         declared_params: &std::collections::HashSet<String>,
         local_vars: &std::collections::HashMap<String, usize>,
         function_name: &str,
@@ -845,6 +873,7 @@ impl FixtureDatabase {
                     &expr_stmt.value,
                     file_path,
                     content,
+                    line_index,
                     declared_params,
                     local_vars,
                     function_name,
@@ -856,6 +885,7 @@ impl FixtureDatabase {
                     &assign.value,
                     file_path,
                     content,
+                    line_index,
                     declared_params,
                     local_vars,
                     function_name,
@@ -867,6 +897,7 @@ impl FixtureDatabase {
                     &aug_assign.value,
                     file_path,
                     content,
+                    line_index,
                     declared_params,
                     local_vars,
                     function_name,
@@ -879,6 +910,7 @@ impl FixtureDatabase {
                         value,
                         file_path,
                         content,
+                        line_index,
                         declared_params,
                         local_vars,
                         function_name,
@@ -891,6 +923,7 @@ impl FixtureDatabase {
                     &if_stmt.test,
                     file_path,
                     content,
+                    line_index,
                     declared_params,
                     local_vars,
                     function_name,
@@ -901,6 +934,7 @@ impl FixtureDatabase {
                         stmt,
                         file_path,
                         content,
+                        line_index,
                         declared_params,
                         local_vars,
                         function_name,
@@ -912,6 +946,7 @@ impl FixtureDatabase {
                         stmt,
                         file_path,
                         content,
+                        line_index,
                         declared_params,
                         local_vars,
                         function_name,
@@ -924,6 +959,7 @@ impl FixtureDatabase {
                     &while_stmt.test,
                     file_path,
                     content,
+                    line_index,
                     declared_params,
                     local_vars,
                     function_name,
@@ -934,6 +970,7 @@ impl FixtureDatabase {
                         stmt,
                         file_path,
                         content,
+                        line_index,
                         declared_params,
                         local_vars,
                         function_name,
@@ -946,6 +983,7 @@ impl FixtureDatabase {
                     &for_stmt.iter,
                     file_path,
                     content,
+                    line_index,
                     declared_params,
                     local_vars,
                     function_name,
@@ -956,6 +994,7 @@ impl FixtureDatabase {
                         stmt,
                         file_path,
                         content,
+                        line_index,
                         declared_params,
                         local_vars,
                         function_name,
@@ -969,6 +1008,7 @@ impl FixtureDatabase {
                         &item.context_expr,
                         file_path,
                         content,
+                        line_index,
                         declared_params,
                         local_vars,
                         function_name,
@@ -980,6 +1020,7 @@ impl FixtureDatabase {
                         stmt,
                         file_path,
                         content,
+                        line_index,
                         declared_params,
                         local_vars,
                         function_name,
@@ -992,6 +1033,7 @@ impl FixtureDatabase {
                     &for_stmt.iter,
                     file_path,
                     content,
+                    line_index,
                     declared_params,
                     local_vars,
                     function_name,
@@ -1002,6 +1044,7 @@ impl FixtureDatabase {
                         stmt,
                         file_path,
                         content,
+                        line_index,
                         declared_params,
                         local_vars,
                         function_name,
@@ -1015,6 +1058,7 @@ impl FixtureDatabase {
                         &item.context_expr,
                         file_path,
                         content,
+                        line_index,
                         declared_params,
                         local_vars,
                         function_name,
@@ -1026,6 +1070,7 @@ impl FixtureDatabase {
                         stmt,
                         file_path,
                         content,
+                        line_index,
                         declared_params,
                         local_vars,
                         function_name,
@@ -1038,6 +1083,7 @@ impl FixtureDatabase {
                     &assert_stmt.test,
                     file_path,
                     content,
+                    line_index,
                     declared_params,
                     local_vars,
                     function_name,
@@ -1048,6 +1094,7 @@ impl FixtureDatabase {
                         msg,
                         file_path,
                         content,
+                        line_index,
                         declared_params,
                         local_vars,
                         function_name,
@@ -1059,12 +1106,13 @@ impl FixtureDatabase {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::only_used_in_recursion)]
     fn visit_expr_for_names(
         &self,
         expr: &Expr,
         file_path: &PathBuf,
         content: &str,
+        line_index: &[usize],
         declared_params: &std::collections::HashSet<String>,
         local_vars: &std::collections::HashMap<String, usize>,
         function_name: &str,
@@ -1073,7 +1121,7 @@ impl FixtureDatabase {
         match expr {
             Expr::Name(name) => {
                 let name_str = name.id.as_str();
-                let line = self.get_line_from_offset(name.range.start().to_usize(), content);
+                let line = self.get_line_from_offset(name.range.start().to_usize(), line_index);
 
                 // Check if this name is a known fixture and not a declared parameter
                 // For local variables, only exclude them if they're defined BEFORE the current line
@@ -1087,10 +1135,10 @@ impl FixtureDatabase {
                     && !is_local_var_in_scope
                     && self.is_available_fixture(file_path, name_str)
                 {
-                    let start_char =
-                        self.get_char_position_from_offset(name.range.start().to_usize(), content);
+                    let start_char = self
+                        .get_char_position_from_offset(name.range.start().to_usize(), line_index);
                     let end_char =
-                        self.get_char_position_from_offset(name.range.end().to_usize(), content);
+                        self.get_char_position_from_offset(name.range.end().to_usize(), line_index);
 
                     info!(
                         "Found undeclared fixture usage: {} at {:?}:{}:{} in function {}",
@@ -1118,6 +1166,7 @@ impl FixtureDatabase {
                     &call.func,
                     file_path,
                     content,
+                    line_index,
                     declared_params,
                     local_vars,
                     function_name,
@@ -1128,6 +1177,7 @@ impl FixtureDatabase {
                         arg,
                         file_path,
                         content,
+                        line_index,
                         declared_params,
                         local_vars,
                         function_name,
@@ -1140,6 +1190,7 @@ impl FixtureDatabase {
                     &attr.value,
                     file_path,
                     content,
+                    line_index,
                     declared_params,
                     local_vars,
                     function_name,
@@ -1151,6 +1202,7 @@ impl FixtureDatabase {
                     &binop.left,
                     file_path,
                     content,
+                    line_index,
                     declared_params,
                     local_vars,
                     function_name,
@@ -1160,6 +1212,7 @@ impl FixtureDatabase {
                     &binop.right,
                     file_path,
                     content,
+                    line_index,
                     declared_params,
                     local_vars,
                     function_name,
@@ -1171,6 +1224,7 @@ impl FixtureDatabase {
                     &unaryop.operand,
                     file_path,
                     content,
+                    line_index,
                     declared_params,
                     local_vars,
                     function_name,
@@ -1182,6 +1236,7 @@ impl FixtureDatabase {
                     &compare.left,
                     file_path,
                     content,
+                    line_index,
                     declared_params,
                     local_vars,
                     function_name,
@@ -1192,6 +1247,7 @@ impl FixtureDatabase {
                         comparator,
                         file_path,
                         content,
+                        line_index,
                         declared_params,
                         local_vars,
                         function_name,
@@ -1204,6 +1260,7 @@ impl FixtureDatabase {
                     &subscript.value,
                     file_path,
                     content,
+                    line_index,
                     declared_params,
                     local_vars,
                     function_name,
@@ -1213,6 +1270,7 @@ impl FixtureDatabase {
                     &subscript.slice,
                     file_path,
                     content,
+                    line_index,
                     declared_params,
                     local_vars,
                     function_name,
@@ -1225,6 +1283,7 @@ impl FixtureDatabase {
                         elt,
                         file_path,
                         content,
+                        line_index,
                         declared_params,
                         local_vars,
                         function_name,
@@ -1238,6 +1297,7 @@ impl FixtureDatabase {
                         elt,
                         file_path,
                         content,
+                        line_index,
                         declared_params,
                         local_vars,
                         function_name,
@@ -1251,6 +1311,7 @@ impl FixtureDatabase {
                         k,
                         file_path,
                         content,
+                        line_index,
                         declared_params,
                         local_vars,
                         function_name,
@@ -1262,6 +1323,7 @@ impl FixtureDatabase {
                         value,
                         file_path,
                         content,
+                        line_index,
                         declared_params,
                         local_vars,
                         function_name,
@@ -1275,6 +1337,7 @@ impl FixtureDatabase {
                     &await_expr.value,
                     file_path,
                     content,
+                    line_index,
                     declared_params,
                     local_vars,
                     function_name,
@@ -1532,20 +1595,28 @@ impl FixtureDatabase {
         }
     }
 
-    fn get_line_from_offset(&self, offset: usize, content: &str) -> usize {
-        // Count newlines before this offset, then add 1 for 1-based line numbers
-        content[..offset].matches('\n').count() + 1
+    fn build_line_index(content: &str) -> Vec<usize> {
+        let mut line_index = Vec::with_capacity(content.len() / 30);
+        line_index.push(0);
+        for (i, c) in content.char_indices() {
+            if c == '\n' {
+                line_index.push(i + 1);
+            }
+        }
+        line_index
     }
 
-    fn get_char_position_from_offset(&self, offset: usize, content: &str) -> usize {
-        // Find the last newline before this offset
-        if let Some(line_start) = content[..offset].rfind('\n') {
-            // Character position is offset from start of line (after the newline)
-            offset - line_start - 1
-        } else {
-            // No newline found, we're on the first line
-            offset
+    fn get_line_from_offset(&self, offset: usize, line_index: &[usize]) -> usize {
+        match line_index.binary_search(&offset) {
+            Ok(line) => line + 1,
+            Err(line) => line,
         }
+    }
+
+    fn get_char_position_from_offset(&self, offset: usize, line_index: &[usize]) -> usize {
+        let line = self.get_line_from_offset(offset, line_index);
+        let line_start = line_index[line - 1];
+        offset.saturating_sub(line_start)
     }
 
     /// Find fixture definition for a given position in a file
@@ -2250,5 +2321,301 @@ impl FixtureDatabase {
         }
 
         None
+    }
+
+    /// Print fixtures as a tree structure
+    /// Shows directory hierarchy with fixtures defined in each file
+    pub fn print_fixtures_tree(&self, root_path: &Path, skip_unused: bool, only_unused: bool) {
+        // Collect all files that define fixtures
+        let mut file_fixtures: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
+
+        for entry in self.definitions.iter() {
+            let fixture_name = entry.key();
+            let definitions = entry.value();
+
+            for def in definitions {
+                file_fixtures
+                    .entry(def.file_path.clone())
+                    .or_default()
+                    .insert(fixture_name.clone());
+            }
+        }
+
+        // Count fixture usages
+        let mut fixture_usage_counts: HashMap<String, usize> = HashMap::new();
+        for entry in self.usages.iter() {
+            let usages = entry.value();
+            for usage in usages {
+                *fixture_usage_counts.entry(usage.name.clone()).or_insert(0) += 1;
+            }
+        }
+
+        // Build a tree structure from paths
+        let mut tree: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
+        let mut all_paths: BTreeSet<PathBuf> = BTreeSet::new();
+
+        for file_path in file_fixtures.keys() {
+            all_paths.insert(file_path.clone());
+
+            // Add all parent directories
+            let mut current = file_path.as_path();
+            while let Some(parent) = current.parent() {
+                if parent == root_path || parent.as_os_str().is_empty() {
+                    break;
+                }
+                all_paths.insert(parent.to_path_buf());
+                current = parent;
+            }
+        }
+
+        // Build parent-child relationships
+        for path in &all_paths {
+            if let Some(parent) = path.parent() {
+                if parent != root_path && !parent.as_os_str().is_empty() {
+                    tree.entry(parent.to_path_buf())
+                        .or_default()
+                        .push(path.clone());
+                }
+            }
+        }
+
+        // Sort children in each directory
+        for children in tree.values_mut() {
+            children.sort();
+        }
+
+        // Print the tree
+        println!("Fixtures tree for: {}", root_path.display());
+        println!();
+
+        if file_fixtures.is_empty() {
+            println!("No fixtures found in this directory.");
+            return;
+        }
+
+        // Find top-level items (direct children of root)
+        let mut top_level: Vec<PathBuf> = all_paths
+            .iter()
+            .filter(|p| {
+                if let Some(parent) = p.parent() {
+                    parent == root_path
+                } else {
+                    false
+                }
+            })
+            .cloned()
+            .collect();
+        top_level.sort();
+
+        for (i, path) in top_level.iter().enumerate() {
+            let is_last = i == top_level.len() - 1;
+            self.print_tree_node(
+                path,
+                &file_fixtures,
+                &tree,
+                "",
+                is_last,
+                true, // is_root_level
+                &fixture_usage_counts,
+                skip_unused,
+                only_unused,
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::only_used_in_recursion)]
+    fn print_tree_node(
+        &self,
+        path: &Path,
+        file_fixtures: &BTreeMap<PathBuf, BTreeSet<String>>,
+        tree: &BTreeMap<PathBuf, Vec<PathBuf>>,
+        prefix: &str,
+        is_last: bool,
+        is_root_level: bool,
+        fixture_usage_counts: &HashMap<String, usize>,
+        skip_unused: bool,
+        only_unused: bool,
+    ) {
+        use colored::Colorize;
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+
+        // Print current node
+        let connector = if is_root_level {
+            "" // No connector for root level
+        } else if is_last {
+            "└── "
+        } else {
+            "├── "
+        };
+
+        if path.is_file() {
+            // Print file with fixtures
+            if let Some(fixtures) = file_fixtures.get(path) {
+                // Filter fixtures based on flags
+                let fixture_vec: Vec<_> = fixtures
+                    .iter()
+                    .filter(|fixture_name| {
+                        let usage_count = fixture_usage_counts
+                            .get(*fixture_name)
+                            .copied()
+                            .unwrap_or(0);
+                        if only_unused {
+                            usage_count == 0
+                        } else if skip_unused {
+                            usage_count > 0
+                        } else {
+                            true
+                        }
+                    })
+                    .collect();
+
+                // Skip this file if no fixtures match the filter
+                if fixture_vec.is_empty() {
+                    return;
+                }
+
+                let file_display = name.to_string().cyan().bold();
+                println!(
+                    "{}{}{} ({} fixtures)",
+                    prefix,
+                    connector,
+                    file_display,
+                    fixture_vec.len()
+                );
+
+                // Print fixtures in this file
+                let new_prefix = if is_root_level {
+                    "".to_string()
+                } else {
+                    format!("{}{}", prefix, if is_last { "    " } else { "│   " })
+                };
+
+                for (j, fixture_name) in fixture_vec.iter().enumerate() {
+                    let is_last_fixture = j == fixture_vec.len() - 1;
+                    let fixture_connector = if is_last_fixture {
+                        "└── "
+                    } else {
+                        "├── "
+                    };
+
+                    // Get usage count for this fixture
+                    let usage_count = fixture_usage_counts
+                        .get(*fixture_name)
+                        .copied()
+                        .unwrap_or(0);
+
+                    // Format the fixture name with color based on usage
+                    let fixture_display = if usage_count == 0 {
+                        // Unused fixture - show in dim/gray
+                        fixture_name.to_string().dimmed()
+                    } else {
+                        // Used fixture - show in green
+                        fixture_name.to_string().green()
+                    };
+
+                    // Format usage count
+                    let usage_info = if usage_count == 0 {
+                        "unused".dimmed().to_string()
+                    } else if usage_count == 1 {
+                        format!("{}", "used 1 time".yellow())
+                    } else {
+                        format!("{}", format!("used {} times", usage_count).yellow())
+                    };
+
+                    println!(
+                        "{}{}{} ({})",
+                        new_prefix, fixture_connector, fixture_display, usage_info
+                    );
+                }
+            } else {
+                println!("{}{}{}", prefix, connector, name);
+            }
+        } else {
+            // Print directory - but first check if it has any visible children
+            if let Some(children) = tree.get(path) {
+                // Check if any children will be visible
+                let has_visible_children = children.iter().any(|child| {
+                    Self::has_visible_fixtures(
+                        child,
+                        file_fixtures,
+                        tree,
+                        fixture_usage_counts,
+                        skip_unused,
+                        only_unused,
+                    )
+                });
+
+                if !has_visible_children {
+                    return;
+                }
+
+                let dir_display = format!("{}/", name).blue().bold();
+                println!("{}{}{}", prefix, connector, dir_display);
+
+                let new_prefix = if is_root_level {
+                    "".to_string()
+                } else {
+                    format!("{}{}", prefix, if is_last { "    " } else { "│   " })
+                };
+
+                for (j, child) in children.iter().enumerate() {
+                    let is_last_child = j == children.len() - 1;
+                    self.print_tree_node(
+                        child,
+                        file_fixtures,
+                        tree,
+                        &new_prefix,
+                        is_last_child,
+                        false, // is_root_level
+                        fixture_usage_counts,
+                        skip_unused,
+                        only_unused,
+                    );
+                }
+            }
+        }
+    }
+
+    fn has_visible_fixtures(
+        path: &Path,
+        file_fixtures: &BTreeMap<PathBuf, BTreeSet<String>>,
+        tree: &BTreeMap<PathBuf, Vec<PathBuf>>,
+        fixture_usage_counts: &HashMap<String, usize>,
+        skip_unused: bool,
+        only_unused: bool,
+    ) -> bool {
+        if path.is_file() {
+            // Check if this file has any fixtures matching the filter
+            if let Some(fixtures) = file_fixtures.get(path) {
+                return fixtures.iter().any(|fixture_name| {
+                    let usage_count = fixture_usage_counts.get(fixture_name).copied().unwrap_or(0);
+                    if only_unused {
+                        usage_count == 0
+                    } else if skip_unused {
+                        usage_count > 0
+                    } else {
+                        true
+                    }
+                });
+            }
+            false
+        } else {
+            // Check if any children have visible fixtures
+            if let Some(children) = tree.get(path) {
+                children.iter().any(|child| {
+                    Self::has_visible_fixtures(
+                        child,
+                        file_fixtures,
+                        tree,
+                        fixture_usage_counts,
+                        skip_unused,
+                        only_unused,
+                    )
+                })
+            } else {
+                false
+            }
+        }
     }
 }

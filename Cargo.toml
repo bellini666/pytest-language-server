@@ -28,3 +28,5 @@ dashmap = "6.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
+clap = { version = "4.5.53", features = ["derive"] }
+colored = "2.1"

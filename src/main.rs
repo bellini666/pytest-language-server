@@ -1,3 +1,4 @@
+use clap::{Parser, Subcommand};
 use pytest_language_server::FixtureDatabase;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -751,15 +752,98 @@ impl Backend {
     }
 }
 
+/// A blazingly fast Language Server Protocol implementation for pytest
+#[derive(Parser)]
+#[command(name = "pytest-language-server")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
+#[command(about = "A Language Server Protocol implementation for pytest", long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Fixture-related commands
+    Fixtures {
+        #[command(subcommand)]
+        command: FixtureCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum FixtureCommands {
+    /// List all fixtures in a hierarchical tree view
+    List {
+        /// Path to the directory containing test files
+        path: PathBuf,
+
+        /// Skip unused fixtures from the output
+        #[arg(long)]
+        skip_unused: bool,
+
+        /// Show only unused fixtures
+        #[arg(long, conflicts_with = "skip_unused")]
+        only_unused: bool,
+    },
+}
+
 #[tokio::main]
 async fn main() {
-    // Handle --version flag
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() > 1 && (args[1] == "--version" || args[1] == "-v") {
-        println!("{}", env!("CARGO_PKG_VERSION"));
-        return;
+    let cli = Cli::parse();
+
+    match cli.command {
+        Some(Commands::Fixtures { command }) => match command {
+            FixtureCommands::List {
+                path,
+                skip_unused,
+                only_unused,
+            } => {
+                handle_fixtures_list(path, skip_unused, only_unused);
+            }
+        },
+        None => {
+            // No subcommand provided - start LSP server
+            start_lsp_server().await;
+        }
+    }
+}
+
+fn handle_fixtures_list(path: PathBuf, skip_unused: bool, only_unused: bool) {
+    // Convert to absolute path
+    let absolute_path = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(&path)
+    };
+
+    if !absolute_path.exists() {
+        eprintln!("Error: Path does not exist: {}", absolute_path.display());
+        std::process::exit(1);
     }
 
+    if !absolute_path.is_dir() {
+        eprintln!(
+            "Error: Path is not a directory: {}",
+            absolute_path.display()
+        );
+        std::process::exit(1);
+    }
+
+    // Canonicalize the path to resolve symlinks and relative components
+    let canonical_path = absolute_path.canonicalize().unwrap_or(absolute_path);
+
+    // Create a fixture database and scan the directory
+    let fixture_db = FixtureDatabase::new();
+    fixture_db.scan_workspace(&canonical_path);
+
+    // Print the tree
+    fixture_db.print_fixtures_tree(&canonical_path, skip_unused, only_unused);
+}
+
+async fn start_lsp_server() {
     // Set up stderr logging with env-filter support
     // Users can control verbosity with RUST_LOG env var:
     // RUST_LOG=debug pytest-language-server

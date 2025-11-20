@@ -25,14 +25,6 @@ This is simpler to maintain and matches how most LSP extensions work (e.g., rust
    - Display version information
    - Health check diagnostics
 
-### Won't Implement
-
-~~**Automatic Binary Downloads**~~
-- Adds complexity for minimal benefit
-- Users already have pip/cargo/brew installed
-- Virtual environment integration works better with pip install
-- Standalone binaries would need to be built and maintained
-
 ## Contributing
 
 If you want to add features, please:

@@ -1,6 +1,6 @@
 [package]
 name = "zed-pytest-lsp"
-version = "0.8.5"
+version = "0.9.0"
 edition = "2021"
 authors = ["Thiago Bellini Ribeiro <hackedbellini@gmail.com>"]
 repository = "https://github.com/bellini666/pytest-language-server"

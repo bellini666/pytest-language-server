@@ -10,6 +10,36 @@
 
 A blazingly fast Language Server Protocol (LSP) implementation for pytest, built with Rust.
 
+## Table of Contents
+
+- [Demo](#demo)
+- [Features](#features)
+  - [Go to Definition](#-go-to-definition)
+  - [Code Completion](#-code-completion)
+  - [Find References](#-find-references)
+  - [Hover Documentation](#-hover-documentation)
+  - [Code Actions (Quick Fixes)](#-code-actions-quick-fixes)
+  - [Diagnostics & Quick Fixes](#️-diagnostics--quick-fixes)
+  - [Performance](#️-performance)
+- [Installation](#installation)
+- [Setup](#setup)
+  - [Neovim](#neovim-with-nvim-lspconfig)
+  - [Zed](#zed)
+  - [VS Code](#vs-code)
+  - [IntelliJ IDEA / PyCharm](#intellij-idea--pycharm)
+  - [Other Editors](#other-editors)
+- [Configuration](#configuration)
+- [CLI Commands](#cli-commands)
+- [Supported Fixture Patterns](#supported-fixture-patterns)
+- [Fixture Priority Rules](#fixture-priority-rules)
+- [Supported Third-Party Fixtures](#supported-third-party-fixtures)
+- [Architecture](#architecture)
+- [Development](#development)
+- [Security](#security)
+- [Contributing](#contributing)
+- [License](#license)
+- [Acknowledgments](#acknowledgments)
+
 ## Demo
 
 ![pytest-language-server demo](demo.gif)
@@ -185,7 +215,7 @@ require'lspconfig'.pytest_lsp.setup{
 
 ### Zed
 
-Install from the extensions marketplace:
+Install from the [Zed Extensions Marketplace](https://zed.dev/extensions/pytest-language-server):
 
 1. Open Zed
 2. Open the command palette (Cmd+Shift+P / Ctrl+Shift+P)
@@ -212,7 +242,7 @@ Works out of the box with zero configuration!
 
 **The plugin includes pre-built binaries - no separate installation required!**
 
-Install from the [JetBrains Marketplace](https://plugins.jetbrains.com/):
+Install from the [JetBrains Marketplace](https://plugins.jetbrains.com/plugin/29056-pytest-language-server):
 
 1. Open PyCharm or IntelliJ IDEA
 2. Go to Settings/Preferences → Plugins

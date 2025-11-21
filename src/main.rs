@@ -563,30 +563,36 @@ impl LanguageServer for Backend {
                             // Read the file to determine where to insert the parameter
                             if let Ok(content) = std::fs::read_to_string(&file_path) {
                                 let lines: Vec<&str> = content.lines().collect();
-                                if function_line < lines.len() as u32 {
-                                    let func_line_content = lines[function_line as usize];
-
+                                // Use get() instead of direct indexing for safety
+                                if let Some(func_line_content) = lines.get(function_line as usize) {
                                     // Find the closing parenthesis of the function signature
                                     // This is a simplified approach - works for single-line signatures
                                     if let Some(paren_pos) = func_line_content.find("):") {
-                                        let insert_pos =
-                                            if func_line_content[..paren_pos].contains('(') {
-                                                // Check if there are already parameters
-                                                let param_start =
-                                                    func_line_content.find('(').unwrap() + 1;
-                                                let params_section =
-                                                    &func_line_content[param_start..paren_pos];
-
-                                                if params_section.trim().is_empty() {
-                                                    // No parameters yet
-                                                    (function_line, (param_start as u32))
-                                                } else {
-                                                    // Already has parameters, add after them
-                                                    (function_line, (paren_pos as u32))
+                                        let insert_pos = if func_line_content[..paren_pos]
+                                            .contains('(')
+                                        {
+                                            // Check if there are already parameters
+                                            // Use find() result safely without unwrap
+                                            let param_start = match func_line_content.find('(') {
+                                                Some(pos) => pos + 1,
+                                                None => {
+                                                    warn!("Invalid function signature: missing opening parenthesis at {:?}:{}", file_path, function_line);
+                                                    continue;
                                                 }
-                                            } else {
-                                                continue;
                                             };
+                                            let params_section =
+                                                &func_line_content[param_start..paren_pos];
+
+                                            if params_section.trim().is_empty() {
+                                                // No parameters yet
+                                                (function_line, (param_start as u32))
+                                            } else {
+                                                // Already has parameters, add after them
+                                                (function_line, (paren_pos as u32))
+                                            }
+                                        } else {
+                                            continue;
+                                        };
 
                                         let has_params = !func_line_content[..paren_pos]
                                             .split('(')

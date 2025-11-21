@@ -27,10 +27,8 @@ impl zed::Extension for PytestLspExtension {
         let (platform, arch) = zed::current_platform();
 
         // Get shell environment for proper PATH resolution
-        let environment = match platform {
-            zed::Os::Mac | zed::Os::Linux => worktree.shell_env(),
-            zed::Os::Windows => vec![],
-        };
+        // Works on all platforms including Windows
+        let environment = worktree.shell_env();
 
         // Try to get binary path (cached or fresh)
         let binary_path = if let Some(ref cached) = self.cached_binary_path {

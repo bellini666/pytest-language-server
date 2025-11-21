@@ -457,8 +457,11 @@ impl FixtureDatabase {
 
         // Clear previous fixture definitions from this file
         // We need to remove definitions that were in this file
-        // IMPORTANT: Collect keys first to avoid deadlock from holding iterator locks
-        // while trying to mutate the map
+        // IMPORTANT: Collect keys first to avoid deadlock. The issue is that
+        // iter() holds read locks on the DashMap, and if we try to call .get() or
+        // .insert() on the same map while iterating, we'll deadlock due to lock
+        // contention. Collecting keys first releases the iterator locks before
+        // we start mutating the map.
         let keys: Vec<String> = {
             let mut k = Vec::new();
             for entry in self.definitions.iter() {
@@ -809,7 +812,7 @@ impl FixtureDatabase {
         self.collect_local_variables(body, content, line_index, &mut local_vars);
 
         // Also add imported names to local_vars (they shouldn't be flagged as undeclared fixtures)
-        // Set their line to 0 so they're always considered "in scope"
+        // We set their line to 0 so they're treated as always in scope (line 0 < any actual usage line)
         if let Some(imports) = self.imports.get(file_path) {
             for import in imports.iter() {
                 local_vars.insert(import.clone(), 0);
@@ -992,8 +995,9 @@ impl FixtureDatabase {
                 }
                 Stmt::Try(try_stmt) => {
                     self.collect_local_variables(&try_stmt.body, content, line_index, local_vars);
-                    // Note: ExceptHandler struct doesn't expose name/body in current API
-                    // This is a limitation of rustpython-parser 0.4.0
+                    // TODO: ExceptHandler struct doesn't expose exception variable name or
+                    // body in rustpython-parser 0.4.0. This means we can't collect local
+                    // variables from except blocks. Should be revisited if parser is upgraded.
                     self.collect_local_variables(&try_stmt.orelse, content, line_index, local_vars);
                     self.collect_local_variables(
                         &try_stmt.finalbody,
@@ -1689,8 +1693,8 @@ impl FixtureDatabase {
                     {
                         return true;
                     }
-                    // Note: ExceptHandler struct doesn't expose body in current API
-                    // This is a limitation of rustpython-parser 0.4.0
+                    // TODO: ExceptHandler struct doesn't expose body in rustpython-parser 0.4.0.
+                    // Should be revisited if parser is upgraded.
                 }
                 _ => {}
             }
@@ -1726,26 +1730,26 @@ impl FixtureDatabase {
     }
 
     #[allow(clippy::only_used_in_recursion)]
-    fn expr_to_string(&self, expr: &rustpython_parser::ast::Expr, _content: &str) -> String {
+    fn expr_to_string(&self, expr: &rustpython_parser::ast::Expr, content: &str) -> String {
         match expr {
             Expr::Name(name) => name.id.to_string(),
             Expr::Attribute(attr) => {
                 format!(
                     "{}.{}",
-                    self.expr_to_string(&attr.value, _content),
+                    self.expr_to_string(&attr.value, content),
                     attr.attr
                 )
             }
             Expr::Subscript(subscript) => {
-                let base = self.expr_to_string(&subscript.value, _content);
-                let slice = self.expr_to_string(&subscript.slice, _content);
+                let base = self.expr_to_string(&subscript.value, content);
+                let slice = self.expr_to_string(&subscript.slice, content);
                 format!("{}[{}]", base, slice)
             }
             Expr::Tuple(tuple) => {
                 let elements: Vec<String> = tuple
                     .elts
                     .iter()
-                    .map(|e| self.expr_to_string(e, _content))
+                    .map(|e| self.expr_to_string(e, content))
                     .collect();
                 elements.join(", ")
             }
@@ -1756,8 +1760,8 @@ impl FixtureDatabase {
                 // Handle union types like str | int
                 format!(
                     "{} | {}",
-                    self.expr_to_string(&binop.left, _content),
-                    self.expr_to_string(&binop.right, _content)
+                    self.expr_to_string(&binop.left, content),
+                    self.expr_to_string(&binop.right, content)
                 )
             }
             _ => {

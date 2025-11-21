@@ -411,12 +411,19 @@ When using find-references:
 
 ## Supported Third-Party Fixtures
 
-Automatically discovers fixtures from popular pytest plugins:
-- **pytest-mock**: `mocker`, `class_mocker`
-- **pytest-asyncio**: `event_loop`
-- **pytest-django**: Database fixtures
-- **pytest-cov**: Coverage fixtures
-- And any other pytest plugin in your environment
+Automatically discovers fixtures from **50+ popular pytest plugins**, including:
+
+- **Testing frameworks**: pytest-mock, pytest-asyncio, pytest-bdd, pytest-cases
+- **Web frameworks**: pytest-flask, pytest-django, pytest-aiohttp, pytest-tornado, pytest-sanic, pytest-fastapi
+- **HTTP clients**: pytest-httpx
+- **Databases**: pytest-postgresql, pytest-mongodb, pytest-redis, pytest-mysql, pytest-elasticsearch
+- **Infrastructure**: pytest-docker, pytest-kubernetes, pytest-rabbitmq, pytest-celery
+- **Browser testing**: pytest-selenium, pytest-playwright, pytest-splinter
+- **Performance**: pytest-benchmark, pytest-timeout
+- **Test data**: pytest-factoryboy, pytest-freezegun, pytest-mimesis
+- And many more...
+
+The server automatically scans your virtual environment for any pytest plugin and makes their fixtures available.
 
 ## Architecture
 

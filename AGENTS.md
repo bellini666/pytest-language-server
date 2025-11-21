@@ -165,12 +165,17 @@ src/
 └── main.rs              # LSP server (861 lines)
 
 tests/
-├── test_fixtures.rs     # FixtureDatabase integration tests (60 tests, 2,950 lines)
-├── test_lsp.rs         # LSP protocol tests (13 tests, 1,181 lines)
+├── test_fixtures.rs     # FixtureDatabase integration tests (164 tests)
+├── test_lsp.rs         # LSP protocol tests (29 tests)
+├── test_e2e.rs         # End-to-end integration tests (22 tests)
 └── test_project/       # Fixture test files for integration tests
     ├── conftest.py
     ├── test_example.py
     ├── test_parent_usage.py
+    ├── api/            # API fixtures and tests
+    ├── database/       # Database fixtures with 3-level dependency chain
+    ├── utils/          # Utility fixtures with autouse
+    ├── integration/    # Scoped fixtures (session, module)
     └── subdir/
         ├── conftest.py
         ├── test_hierarchy.py
@@ -180,32 +185,67 @@ tests/
 ### Running Tests
 
 ```bash
-cargo test                          # Run all tests (73 total)
-cargo test --test test_fixtures     # Run FixtureDatabase tests (60 tests)
-cargo test --test test_lsp         # Run LSP protocol tests (13 tests)
+cargo test                          # Run all tests (215 total)
+cargo test --test test_fixtures     # Run FixtureDatabase tests (164 tests)
+cargo test --test test_lsp         # Run LSP protocol tests (29 tests)
+cargo test --test test_e2e         # Run E2E integration tests (22 tests)
 RUST_LOG=debug cargo test          # Run with debug logging
 ```
 
 ### Test Coverage
 
-- **73 total tests passing** (as of v0.7.2)
-  - 60 integration tests in `tests/test_fixtures.rs` (FixtureDatabase API)
-  - 13 integration tests in `tests/test_lsp.rs` (LSP protocol handlers)
+- **215 total tests passing** (as of latest)
+  - 164 integration tests in `tests/test_fixtures.rs` (FixtureDatabase API)
+  - 29 integration tests in `tests/test_lsp.rs` (LSP protocol handlers)
+  - 22 integration tests in `tests/test_e2e.rs` (End-to-end CLI and workspace tests)
 
-Key test areas:
+**Key test areas:**
+
+**Core Functionality:**
 - Fixture definition extraction from various patterns
 - Fixture usage detection in test functions and other fixtures
 - Fixture priority/shadowing rules (8 comprehensive hierarchy tests)
 - Character-position awareness for self-referencing fixtures
 - LSP spec compliance (references always include current position)
 - Multiline function signatures
-- Third-party fixture detection
-- Undeclared fixture detection (5 tests)
-- Hierarchy-aware undeclared fixture reporting
-- Deterministic fixture resolution (ensures no random behavior with multiple definitions)
+- Third-party fixture detection (50+ plugins)
+- Undeclared fixture detection (hierarchy-aware)
+- Deterministic fixture resolution
 - Path normalization and canonicalization
 - Deep directory hierarchy support
 - Sibling directory isolation
+
+**Docstring Variations (8 tests):**
+- Empty, multiline, single-quoted docstrings
+- RST, Google, NumPy documentation styles
+- Unicode characters and code blocks in docstrings
+
+**Performance/Scalability (6 tests):**
+- 100 fixtures in single file
+- 20-level deep fixture dependency chains
+- Fixtures with 15 parameters
+- Very long function bodies (100 lines)
+- 50 files with same fixture name
+- Rapid file updates simulation
+
+**Virtual Environment (5 tests):**
+- Third-party fixtures in site-packages
+- Fixture overrides from plugins
+- Multiple plugins with same fixture
+- Unused venv fixtures
+
+**Edge Cases (13 tests):**
+- Property, staticmethod, classmethod decorators
+- Context managers, multiple decorators
+- Modern Python: walrus operator, match statement, exception groups
+- Type system: dataclass, NamedTuple, Protocol, Generic types
+- Fixtures in if blocks (documented as unsupported)
+
+**E2E Tests (22 tests):**
+- CLI commands with snapshot testing (10 tests)
+- Full workspace scanning (8 tests)
+- Performance E2E (2 tests)
+- Error handling E2E (2 tests)
 
 ## Development Workflow
 
@@ -417,6 +457,17 @@ Python test discovery patterns:
    - Priority order: same file > conftest hierarchy > third-party (site-packages) > sorted by path
    - Prevents non-deterministic behavior from DashMap iteration order
 
+8. **DashMap deadlock in analyze_file** (fixed in v0.9.0)
+   - Fixed deadlock when processing multiple third-party fixtures with same name
+   - Issue: `iter_mut()` held read locks while trying to mutate the map
+   - Solution: Collect keys first, then process each key individually without holding locks
+   - Critical for projects using multiple pytest plugins with overlapping fixture names
+
+9. **Fixtures in if blocks** (known limitation)
+   - Fixtures defined inside if statements are not detected
+   - This is a documented limitation of the AST traversal logic
+   - Workaround: Define fixtures at module level, use if logic inside function body
+
 ## LSP Spec Compliance
 
 Critical LSP specification requirements:
@@ -526,7 +577,13 @@ The project includes extensions for three major editors/IDEs:
 
 ## Version History
 
-- **v0.7.2** (November 2025) - Current version with improved extension metadata
+- **v0.9.0** (November 2025) - Current version
+  - Fixed critical DashMap deadlock in analyze_file
+  - Added support for 50+ pytest third-party plugins
+  - Comprehensive test suite: 215 tests (164 unit + 29 LSP + 22 E2E)
+  - Added E2E tests with snapshot testing
+  - Added docstring variation, performance, virtual environment, and edge case tests
+- **v0.7.2** (November 2025) - Improved extension metadata
 - **v0.5.1** (November 2025) - Critical fix for deterministic fixture resolution, path canonicalization, 8 new comprehensive hierarchy tests
 - **v0.5.0** (November 2025) - Undeclared fixture diagnostics, code actions (quick fixes), line-aware scoping, LSP compliance improvements
 - **v0.4.0** (November 2025) - Character-position aware references, LSP spec compliance
@@ -535,6 +592,6 @@ The project includes extensions for three major editors/IDEs:
 
 ---
 
-**Last Updated**: v0.7.2 (November 2025)
+**Last Updated**: v0.9.0 (November 2025)
 
 This document should be updated when making significant architectural changes or adding new features.

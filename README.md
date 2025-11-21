@@ -293,8 +293,6 @@ Code actions are automatically available on diagnostic warnings. If code actions
 3. **Verify diagnostics**: Code actions only appear where there are warnings
 4. **Trigger manually**: Use your editor's code action keybinding (Cmd+. / Ctrl+.)
 
-For detailed troubleshooting, see [CODE_ACTION_TESTING.md](CODE_ACTION_TESTING.md).
-
 ## CLI Commands
 
 In addition to the LSP server mode, pytest-language-server provides useful command-line tools:

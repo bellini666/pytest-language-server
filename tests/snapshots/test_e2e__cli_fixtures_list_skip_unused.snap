@@ -1,0 +1,35 @@
+---
+source: tests/test_e2e.rs
+expression: stdout
+---
+Fixtures tree for: /Users/bellini/dev/pytest-language-server/tests/test_project
+
+api/
+├── conftest.py (3 fixtures)
+│   ├── api_client (used 2 times)
+│   ├── api_token (used 2 times)
+│   └── mock_response (used 1 time)
+└── test_endpoints.py (1 fixtures)
+    └── local_fixture (used 5 times)
+conftest.py (6 fixtures)
+├── another_fixture (used 2 times)
+├── cli_runner (used 7 times)
+├── database (used 6 times)
+├── generator_fixture (used 1 time)
+├── sample_fixture (used 7 times)
+└── shared_resource (used 5 times)
+database/
+└── conftest.py (3 fixtures)
+    ├── db_connection (used 2 times)
+    ├── db_cursor (used 2 times)
+    └── transaction (used 1 time)
+integration/
+└── test_scopes.py (2 fixtures)
+    ├── module_fixture (used 1 time)
+    └── session_fixture (used 1 time)
+subdir/
+└── conftest.py (4 fixtures)
+    ├── cli_runner (used 7 times)
+    ├── database (used 6 times)
+    ├── local_fixture (used 5 times)
+    └── sample_fixture (used 7 times)

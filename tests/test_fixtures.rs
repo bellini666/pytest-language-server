@@ -4528,3 +4528,453 @@ def test_event_loop(event_loop):
     assert_eq!(usages.len(), 1, "Should detect usage in test");
     assert_eq!(usages[0].name, "event_loop");
 }
+
+// MARK: File Path Edge Cases
+
+#[test]
+fn test_unicode_characters_in_path() {
+    let db = FixtureDatabase::new();
+
+    // Test with Unicode characters in path
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return "test"
+"#;
+    let path = PathBuf::from("/tmp/test/日本語/тест/test_unicode.py");
+    db.analyze_file(path.clone(), content);
+
+    let defs = db.definitions.get("my_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+    assert_eq!(defs[0].file_path, path);
+}
+
+#[test]
+fn test_spaces_in_path() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return "test"
+"#;
+    let path = PathBuf::from("/tmp/test/my folder/sub folder/test file.py");
+    db.analyze_file(path.clone(), content);
+
+    let defs = db.definitions.get("my_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+    assert_eq!(defs[0].file_path, path);
+}
+
+#[test]
+fn test_special_characters_in_path() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return "test"
+"#;
+    // Test with parentheses, brackets, and other special chars
+    let path = PathBuf::from("/tmp/test/my(folder)[2023]/test-file_v2.py");
+    db.analyze_file(path.clone(), content);
+
+    let defs = db.definitions.get("my_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+    assert_eq!(defs[0].file_path, path);
+}
+
+#[test]
+fn test_very_long_path() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return "test"
+"#;
+    // Create a very long path (close to system limits)
+    let long_component = "a".repeat(50);
+    let path_str = format!(
+        "/tmp/{}/{}/{}/{}/{}/{}/test.py",
+        long_component,
+        long_component,
+        long_component,
+        long_component,
+        long_component,
+        long_component
+    );
+    let path = PathBuf::from(path_str);
+    db.analyze_file(path.clone(), content);
+
+    let defs = db.definitions.get("my_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+}
+
+#[test]
+fn test_paths_with_dots() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return "test"
+"#;
+    // Path with .hidden directories
+    let path = PathBuf::from("/tmp/test/.hidden/.config/test.py");
+    db.analyze_file(path.clone(), content);
+
+    let defs = db.definitions.get("my_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+    assert_eq!(defs[0].file_path, path);
+}
+
+#[test]
+fn test_conftest_hierarchy_with_unicode_paths() {
+    let db = FixtureDatabase::new();
+
+    // Parent conftest with unicode path
+    let parent_content = r#"
+import pytest
+
+@pytest.fixture
+def base_fixture():
+    return "base"
+"#;
+    let parent_path = PathBuf::from("/tmp/проект/conftest.py");
+    db.analyze_file(parent_path.clone(), parent_content);
+
+    // Child test file
+    let test_content = r#"
+def test_something(base_fixture):
+    assert base_fixture == "base"
+"#;
+    let test_path = PathBuf::from("/tmp/проект/tests/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Should detect usage
+    let usages = db.usages.get(&test_path).unwrap();
+    assert_eq!(usages.len(), 1);
+    assert_eq!(usages[0].name, "base_fixture");
+}
+
+#[test]
+fn test_fixture_resolution_with_special_char_paths() {
+    let db = FixtureDatabase::new();
+
+    // Conftest in path with special characters
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def special_fixture():
+    return "special"
+"#;
+    let conftest_path = PathBuf::from("/tmp/my-project (2023)/conftest.py");
+    db.analyze_file(conftest_path, conftest_content);
+
+    // Test file in subdirectory
+    let test_content = r#"
+def test_something(special_fixture):
+    pass
+"#;
+    let test_path = PathBuf::from("/tmp/my-project (2023)/tests/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    let usages = db.usages.get(&test_path).unwrap();
+    assert_eq!(usages.len(), 1);
+}
+
+#[test]
+fn test_multiple_consecutive_slashes_in_path() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return "test"
+"#;
+    // Path with multiple consecutive slashes (should be normalized internally)
+    let path = PathBuf::from("/tmp/test//subdir///test.py");
+    db.analyze_file(path.clone(), content);
+
+    let defs = db.definitions.get("my_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+}
+
+#[test]
+fn test_path_with_trailing_slash() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return "test"
+"#;
+    // Even though this is odd, the code should handle it
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    let defs = db.definitions.get("my_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+    assert_eq!(defs[0].file_path, path);
+}
+
+#[test]
+fn test_emoji_in_path() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return "test"
+"#;
+    let path = PathBuf::from("/tmp/test/😀_folder/🎉test.py");
+    db.analyze_file(path.clone(), content);
+
+    let defs = db.definitions.get("my_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+    assert_eq!(defs[0].file_path, path);
+}
+
+// MARK: Workspace Scanning Edge Cases
+
+#[test]
+fn test_scan_workspace_with_no_python_files() {
+    let db = FixtureDatabase::new();
+    let temp_dir = std::env::temp_dir().join("test_no_python_files");
+
+    // Create directory structure without Python files
+    std::fs::create_dir_all(&temp_dir).ok();
+
+    // Scan should complete without errors
+    db.scan_workspace(&temp_dir);
+
+    // Should have no definitions
+    assert!(db.definitions.is_empty());
+
+    // Cleanup
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[test]
+fn test_scan_workspace_with_only_non_test_files() {
+    let db = FixtureDatabase::new();
+    let temp_dir = std::env::temp_dir().join("test_no_test_files");
+
+    std::fs::create_dir_all(&temp_dir).ok();
+
+    // Create a Python file that doesn't match test patterns
+    let file_path = temp_dir.join("utils.py");
+    std::fs::write(
+        &file_path,
+        r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return "test"
+"#,
+    )
+    .ok();
+
+    db.scan_workspace(&temp_dir);
+
+    // Should not detect fixtures in non-test files
+    // (scan_workspace only looks for test_*.py, *_test.py, conftest.py)
+    assert!(db.definitions.get("my_fixture").is_none());
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[test]
+fn test_scan_workspace_with_deeply_nested_structure() {
+    let db = FixtureDatabase::new();
+    let temp_dir = std::env::temp_dir().join("test_deep_nesting");
+
+    // Create deeply nested structure
+    let deep_path = temp_dir.join("a/b/c/d/e/f/g/h/i/j");
+    std::fs::create_dir_all(&deep_path).ok();
+
+    // Add a test file at the deepest level
+    let test_file = deep_path.join("test_deep.py");
+    std::fs::write(
+        &test_file,
+        r#"
+import pytest
+
+@pytest.fixture
+def deep_fixture():
+    return "deep"
+"#,
+    )
+    .ok();
+
+    db.scan_workspace(&temp_dir);
+
+    // Should find the deeply nested fixture
+    let defs = db.definitions.get("deep_fixture");
+    assert!(defs.is_some());
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[test]
+fn test_scan_workspace_with_mixed_file_types() {
+    let db = FixtureDatabase::new();
+    let temp_dir = std::env::temp_dir().join("test_mixed_files");
+
+    std::fs::create_dir_all(&temp_dir).ok();
+
+    // Create conftest.py
+    std::fs::write(
+        temp_dir.join("conftest.py"),
+        r#"
+import pytest
+
+@pytest.fixture
+def conftest_fixture():
+    return "conftest"
+"#,
+    )
+    .ok();
+
+    // Create test_*.py
+    std::fs::write(
+        temp_dir.join("test_example.py"),
+        r#"
+import pytest
+
+@pytest.fixture
+def test_file_fixture():
+    return "test"
+"#,
+    )
+    .ok();
+
+    // Create *_test.py
+    std::fs::write(
+        temp_dir.join("example_test.py"),
+        r#"
+import pytest
+
+@pytest.fixture
+def suffix_test_fixture():
+    return "suffix"
+"#,
+    )
+    .ok();
+
+    // Create non-test Python file
+    std::fs::write(
+        temp_dir.join("utils.py"),
+        r#"
+import pytest
+
+@pytest.fixture
+def utils_fixture():
+    return "utils"
+"#,
+    )
+    .ok();
+
+    db.scan_workspace(&temp_dir);
+
+    // Should find fixtures in test files and conftest
+    assert!(db.definitions.get("conftest_fixture").is_some());
+    assert!(db.definitions.get("test_file_fixture").is_some());
+    assert!(db.definitions.get("suffix_test_fixture").is_some());
+    // Should not find fixtures in non-test files
+    assert!(db.definitions.get("utils_fixture").is_none());
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[test]
+fn test_empty_conftest_file() {
+    let db = FixtureDatabase::new();
+
+    // Analyze empty conftest
+    let content = "";
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path, content);
+
+    // Should not crash, should have no fixtures
+    assert!(db.definitions.is_empty());
+}
+
+#[test]
+fn test_conftest_with_only_imports() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+import sys
+from pathlib import Path
+"#;
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path, content);
+
+    // Should not crash, should have no fixtures
+    assert!(db.definitions.is_empty());
+}
+
+#[test]
+fn test_file_with_syntax_error_in_docstring() {
+    let db = FixtureDatabase::new();
+
+    // Python file with weird but valid docstring
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    """
+    This docstring has "quotes" and 'apostrophes'
+    And some special chars: @#$%^&*()
+    """
+    return "test"
+"#;
+    let path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(path, content);
+
+    let defs = db.definitions.get("my_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+    // Docstring should be preserved
+    assert!(defs[0].docstring.is_some());
+}
+
+#[test]
+fn test_fixture_in_file_with_multiple_encodings_declared() {
+    let db = FixtureDatabase::new();
+
+    // File with encoding declaration
+    let content = r#"# -*- coding: utf-8 -*-
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return "test"
+"#;
+    let path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(path, content);
+
+    let defs = db.definitions.get("my_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+}

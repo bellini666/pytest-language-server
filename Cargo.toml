@@ -30,3 +30,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 clap = { version = "4.5.53", features = ["derive"] }
 colored = "2.1"
+
+[dev-dependencies]
+insta = { version = "1.40", features = ["yaml"] }
+assert_cmd = "2.0"
+predicates = "3.1"

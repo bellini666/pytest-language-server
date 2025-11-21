@@ -1,0 +1,13 @@
+---
+source: tests/test_e2e.rs
+expression: stdout
+---
+Fixtures tree for: /Users/bellini/dev/pytest-language-server/tests/test_project
+
+conftest.py (1 fixtures)
+└── iterator_fixture (unused)
+utils/
+└── conftest.py (3 fixtures)
+    ├── auto_cleanup (unused)
+    ├── temp_dir (unused)
+    └── temp_file (unused)

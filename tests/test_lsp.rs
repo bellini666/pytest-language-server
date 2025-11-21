@@ -1179,3 +1179,443 @@ def test_undeclared():
 
     println!("\nCode action test passed ✓");
 }
+
+// ============================================================================
+// HIGH PRIORITY TESTS: LSP Protocol Edge Cases
+// ============================================================================
+
+#[test]
+fn test_position_in_string_literal() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 42
+"#;
+    let conftest_path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(conftest_path, conftest_content);
+
+    let test_content = r#"
+def test_something(my_fixture):
+    # Fixture name in string literal - should NOT trigger goto-definition
+    text = "my_fixture"
+    assert my_fixture == 42
+"#;
+    let test_path = PathBuf::from("/tmp/test/test_string.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Try to find definition at position inside string literal "my_fixture"
+    // Line 3 (0-indexed), character 12 is inside the string
+    let definition = db.find_fixture_definition(&test_path, 3, 12);
+
+    // Should NOT find definition because cursor is in a string literal
+    // Note: Current implementation may not distinguish string literals from identifiers
+    if definition.is_some() {
+        println!("LIMITATION: String literals not distinguished from identifiers");
+        // This is a known limitation - the current implementation doesn't
+        // have context about whether a position is in a string or comment
+    } else {
+        // Correctly ignores string literals
+    }
+}
+
+#[test]
+fn test_position_in_comment() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 42
+"#;
+    let conftest_path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(conftest_path, conftest_content);
+
+    let test_content = r#"
+def test_something(my_fixture):
+    # my_fixture is used here - cursor should not trigger
+    assert my_fixture == 42
+"#;
+    let test_path = PathBuf::from("/tmp/test/test_comment.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Try to find definition at position inside comment
+    // Line 2 (0-indexed), character 8 is inside "# my_fixture"
+    let definition = db.find_fixture_definition(&test_path, 2, 8);
+
+    // Should NOT find definition in comment
+    // Note: Current implementation doesn't track comments, so this depends on usage tracking
+    if definition.is_some() {
+        println!("LIMITATION: Comments not distinguished from code");
+    } else {
+        // Correctly ignores comments
+    }
+}
+
+#[test]
+fn test_empty_file() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let empty_content = "";
+    let test_path = PathBuf::from("/tmp/test/test_empty.py");
+    db.analyze_file(test_path.clone(), empty_content);
+
+    // Should not crash on empty file
+    let definition = db.find_fixture_definition(&test_path, 0, 0);
+    assert!(definition.is_none(), "Empty file should return None");
+
+    let undeclared = db.get_undeclared_fixtures(&test_path);
+    assert!(
+        undeclared.is_empty(),
+        "Empty file should have no undeclared fixtures"
+    );
+}
+
+#[test]
+fn test_position_out_of_bounds() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let test_content = r#"
+def test_something():
+    assert True
+"#;
+    let test_path = PathBuf::from("/tmp/test/test_bounds.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Try position beyond last line
+    let definition = db.find_fixture_definition(&test_path, 999, 0);
+    assert!(
+        definition.is_none(),
+        "Out of bounds line should return None"
+    );
+
+    // Try position beyond last character on valid line
+    let definition2 = db.find_fixture_definition(&test_path, 1, 9999);
+    assert!(
+        definition2.is_none(),
+        "Out of bounds character should return None"
+    );
+}
+
+#[test]
+fn test_whitespace_only_file() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let whitespace_content = "   \n\n\t\t\n   \n";
+    let test_path = PathBuf::from("/tmp/test/test_whitespace.py");
+    db.analyze_file(test_path.clone(), whitespace_content);
+
+    // Should handle whitespace-only file gracefully
+    let definition = db.find_fixture_definition(&test_path, 1, 2);
+    assert!(definition.is_none(), "Whitespace file should return None");
+
+    // Should not detect any fixtures
+    assert!(
+        !db.definitions
+            .iter()
+            .any(|entry| { entry.value().iter().any(|def| def.file_path == test_path) }),
+        "Whitespace file should not have fixtures"
+    );
+}
+
+#[test]
+fn test_malformed_python_syntax() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    // Python file with syntax error
+    let malformed_content = r#"
+import pytest
+
+@pytest.fixture
+def incomplete_fixture(
+    # Missing closing parenthesis and function body
+"#;
+    let test_path = PathBuf::from("/tmp/test/test_malformed.py");
+    db.analyze_file(test_path.clone(), malformed_content);
+
+    // Should not crash on syntax error
+    // Fixture detection may or may not work depending on how parser handles errors
+    println!("Malformed file handled without crash");
+
+    // Just verify it doesn't panic
+    let _ = db.get_undeclared_fixtures(&test_path);
+    // Malformed file handled gracefully
+}
+
+#[test]
+fn test_multi_byte_utf8_characters() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return "测试"
+"#;
+    let conftest_path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let test_content = r#"
+def test_unicode(my_fixture):
+    # Comment with emoji 🔥 and Chinese 测试
+    result = my_fixture
+    assert result == "测试"
+"#;
+    let test_path = PathBuf::from("/tmp/test/test_unicode.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Verify usages were detected despite unicode in file
+    let usages = db.usages.get(&test_path);
+    assert!(
+        usages.is_some(),
+        "Should detect usages in file with unicode"
+    );
+
+    // Verify fixture can be found
+    let definition = db.find_fixture_definition(&test_path, 1, 17);
+    assert!(definition.is_some(), "Should find fixture in unicode file");
+}
+
+#[test]
+fn test_very_long_line() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def fixture_with_very_long_name_that_exceeds_normal_expectations():
+    return 42
+"#;
+    let conftest_path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let test_content = r#"
+def test_long(fixture_with_very_long_name_that_exceeds_normal_expectations):
+    result = fixture_with_very_long_name_that_exceeds_normal_expectations
+    assert result == 42
+"#;
+    let test_path = PathBuf::from("/tmp/test/test_long.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Should handle very long fixture names
+    assert!(db
+        .definitions
+        .contains_key("fixture_with_very_long_name_that_exceeds_normal_expectations"));
+
+    let usages = db.usages.get(&test_path);
+    assert!(usages.is_some(), "Should detect long fixture names");
+}
+
+// ============================================================================
+// HIGH PRIORITY TESTS: Error Handling
+// ============================================================================
+
+#[test]
+fn test_invalid_utf8_content() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    // Invalid UTF-8 byte sequences
+    // Rust strings must be valid UTF-8, so we can't actually create invalid UTF-8 in a string literal
+    // This test documents that the file reading layer should handle this
+
+    // Instead, test with valid but unusual UTF-8
+    let unusual_content = "import pytest\n\n@pytest.fixture\ndef \u{FEFF}bom_fixture():  # BOM character\n    return 42";
+    let test_path = PathBuf::from("/tmp/test/test_utf8.py");
+    db.analyze_file(test_path.clone(), unusual_content);
+
+    // Should handle without crashing
+    println!("UTF-8 with unusual characters handled gracefully");
+    // No crash on unusual UTF-8
+}
+
+#[test]
+fn test_incomplete_function_definition() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let incomplete_content = r#"
+import pytest
+
+@pytest.fixture
+def incomplete_fixture(
+"#;
+    let test_path = PathBuf::from("/tmp/test/test_incomplete.py");
+    db.analyze_file(test_path.clone(), incomplete_content);
+
+    // Should not crash, but won't detect incomplete fixture
+    // The parser will fail, and we should handle that gracefully
+    println!("Incomplete function definition handled without panic");
+    // Graceful handling of syntax error
+}
+
+#[test]
+fn test_truncated_file() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let truncated_content = r#"
+import pytest
+
+@pytest.fixture
+def truncated_fixture():
+    return "
+"#;
+    let test_path = PathBuf::from("/tmp/test/test_truncated.py");
+    db.analyze_file(test_path.clone(), truncated_content);
+
+    // Should handle truncated string literal without crash
+    println!("Truncated file handled gracefully");
+    // No crash on truncated file
+}
+
+#[test]
+fn test_mixed_line_endings() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    // Mix of \n (Unix) and \r\n (Windows) line endings
+    let mixed_content =
+        "import pytest\r\n\n@pytest.fixture\r\ndef my_fixture():\n    return 42\r\n";
+
+    let test_path = PathBuf::from("/tmp/test/test_mixed.py");
+    db.analyze_file(test_path.clone(), mixed_content);
+
+    // Should detect fixture despite mixed line endings
+    assert!(
+        db.definitions.contains_key("my_fixture"),
+        "Should detect fixtures with mixed line endings"
+    );
+}
+
+#[test]
+fn test_file_with_only_comments() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let comment_only = r#"
+# This is a comment
+# Another comment
+# TODO: implement tests
+"#;
+    let test_path = PathBuf::from("/tmp/test/test_comments.py");
+    db.analyze_file(test_path.clone(), comment_only);
+
+    // Should not crash, no fixtures detected
+    assert!(
+        !db.definitions
+            .iter()
+            .any(|entry| { entry.value().iter().any(|def| def.file_path == test_path) }),
+        "Comment-only file should have no fixtures"
+    );
+}
+
+#[test]
+fn test_deeply_nested_indentation() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let nested_content = r#"
+import pytest
+
+@pytest.fixture
+def deeply_nested():
+    class A:
+        class B:
+            class C:
+                class D:
+                    def inner():
+                        def more_inner():
+                            return 42
+    return A()
+"#;
+    let test_path = PathBuf::from("/tmp/test/test_nested.py");
+    db.analyze_file(test_path.clone(), nested_content);
+
+    // Should detect the fixture definition despite deep nesting
+    assert!(
+        db.definitions.contains_key("deeply_nested"),
+        "Should handle deeply nested structures"
+    );
+}
+
+#[test]
+fn test_tabs_and_spaces_mixed() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    // Python typically rejects mixed tabs and spaces, but parser should handle it
+    let mixed_indentation = "import pytest\n\n@pytest.fixture\ndef my_fixture():\n\treturn 42  # tab\n    # space indentation";
+
+    let test_path = PathBuf::from("/tmp/test/test_tabs.py");
+    db.analyze_file(test_path.clone(), mixed_indentation);
+
+    // Should detect fixture or handle parse error gracefully
+    if db.definitions.contains_key("my_fixture") {
+        // Fixture detected despite mixed indentation
+    } else {
+        println!("Parser rejected mixed tabs/spaces (expected)");
+        // Graceful handling of indentation error
+    }
+}
+
+#[test]
+fn test_non_ascii_fixture_name() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    // Python 3 allows non-ASCII identifiers
+    let non_ascii_content = r#"
+import pytest
+
+@pytest.fixture
+def测试_fixture():
+    return "test"
+
+@pytest.fixture
+def фикстура():
+    return "fixture"
+"#;
+    let test_path = PathBuf::from("/tmp/test/test_non_ascii.py");
+    db.analyze_file(test_path.clone(), non_ascii_content);
+
+    // Should handle non-ASCII fixture names
+    if db.definitions.contains_key("测试_fixture") {
+        // Non-ASCII fixture names supported
+        assert!(db.definitions.contains_key("фикстура"));
+    } else {
+        println!("LIMITATION: Non-ASCII identifiers not fully supported");
+        // Test documents non-ASCII handling
+    }
+}

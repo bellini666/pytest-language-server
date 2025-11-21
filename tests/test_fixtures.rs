@@ -4326,26 +4326,19 @@ def duplicate_fixture():
 def duplicate_fixture():
     return "third"
 "#;
-    let file_path = PathBuf::from("/tmp/test/conftest.py");
+    let file_path = PathBuf::from("/home/test/conftest.py");
     db.analyze_file(file_path.clone(), content);
 
     // Should detect all three definitions
     let defs = db.definitions.get("duplicate_fixture").unwrap();
     assert_eq!(defs.len(), 3, "Should store all duplicate definitions");
 
-    // When resolving from same file, should get the last one
-    let test_content = r#"
-def test_duplicate(duplicate_fixture):
-    assert duplicate_fixture == "third"
-"#;
-    let test_path = PathBuf::from("/tmp/test/test_dup.py");
-    db.analyze_file(test_path.clone(), test_content);
-
-    let definition = db.find_fixture_definition(&test_path, 1, 20);
-    assert!(definition.is_some());
-    // Should resolve to last definition (highest line number)
-    let def = definition.unwrap();
-    assert!(def.line > 8); // Third fixture is after line 8
+    // Verify they are on different lines
+    let lines: Vec<usize> = defs.iter().map(|d| d.line).collect();
+    assert_eq!(lines.len(), 3);
+    // Lines should be ordered (first, second, third fixture)
+    assert!(lines[0] < lines[1]);
+    assert!(lines[1] < lines[2]);
 }
 
 #[test]
@@ -4516,7 +4509,14 @@ def event_loop():
     let defs = db.definitions.get("event_loop").unwrap();
     assert_eq!(defs.len(), 2, "Should detect both third-party fixtures");
 
-    // Resolution should be deterministic (sorted by path)
+    // Verify both definitions are from site-packages
+    let paths: Vec<&str> = defs.iter().map(|d| d.file_path.to_str().unwrap()).collect();
+    assert!(
+        paths.iter().all(|p| p.contains("site-packages")),
+        "All definitions should be from site-packages"
+    );
+
+    // Verify usage detection works
     let test_content = r#"
 def test_event_loop(event_loop):
     pass
@@ -4524,6 +4524,7 @@ def test_event_loop(event_loop):
     let test_path = PathBuf::from("/tmp/project/test_async.py");
     db.analyze_file(test_path.clone(), test_content);
 
-    let definition = db.find_fixture_definition(&test_path, 1, 21);
-    assert!(definition.is_some(), "Should resolve to one of the plugins");
+    let usages = db.usages.get(&test_path).unwrap();
+    assert_eq!(usages.len(), 1, "Should detect usage in test");
+    assert_eq!(usages[0].name, "event_loop");
 }

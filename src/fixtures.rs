@@ -361,11 +361,39 @@ impl FixtureDatabase {
 
         // Clear previous fixture definitions from this file
         // We need to remove definitions that were in this file
-        for mut entry in self.definitions.iter_mut() {
-            entry.value_mut().retain(|def| def.file_path != file_path);
+        // IMPORTANT: Collect keys first to avoid deadlock from holding iterator locks
+        // while trying to mutate the map
+        let keys: Vec<String> = {
+            let mut k = Vec::new();
+            for entry in self.definitions.iter() {
+                k.push(entry.key().clone());
+            }
+            k
+        }; // Iterator dropped here, all locks released
+
+        // Now process each key individually
+        for key in keys {
+            // Get current definitions for this key
+            let current_defs = match self.definitions.get(&key) {
+                Some(defs) => defs.clone(),
+                None => continue,
+            };
+
+            // Filter out definitions from this file
+            let filtered: Vec<FixtureDefinition> = current_defs
+                .iter()
+                .filter(|def| def.file_path != file_path)
+                .cloned()
+                .collect();
+
+            // Update or remove
+            if filtered.is_empty() {
+                self.definitions.remove(&key);
+            } else if filtered.len() != current_defs.len() {
+                // Only update if something changed
+                self.definitions.insert(key, filtered);
+            }
         }
-        // Remove empty entries
-        self.definitions.retain(|_, defs| !defs.is_empty());
 
         // Check if this is a conftest.py
         let is_conftest = file_path

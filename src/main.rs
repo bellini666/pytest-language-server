@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug)]
 struct Backend {
@@ -40,7 +40,13 @@ impl LanguageServer for Backend {
                     .await;
             }
         } else {
-            warn!("No root URI provided in initialize");
+            error!("No root URI provided in initialize - workspace scanning disabled");
+            self.client
+                .log_message(
+                    MessageType::ERROR,
+                    "No workspace root provided - fixture analysis disabled",
+                )
+                .await;
         }
 
         info!("Returning initialize result with capabilities");

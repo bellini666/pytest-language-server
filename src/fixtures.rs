@@ -4,7 +4,7 @@ use rustpython_parser::{parse, Mode};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use walkdir::WalkDir;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -48,6 +48,8 @@ pub struct FixtureDatabase {
     pub undeclared_fixtures: Arc<DashMap<PathBuf, Vec<UndeclaredFixture>>>,
     // Map from file path to imported names in that file
     pub imports: Arc<DashMap<PathBuf, std::collections::HashSet<String>>>,
+    // Cache of canonical paths to avoid repeated filesystem calls
+    pub canonical_path_cache: Arc<DashMap<PathBuf, PathBuf>>,
 }
 
 impl Default for FixtureDatabase {
@@ -64,7 +66,27 @@ impl FixtureDatabase {
             file_cache: Arc::new(DashMap::new()),
             undeclared_fixtures: Arc::new(DashMap::new()),
             imports: Arc::new(DashMap::new()),
+            canonical_path_cache: Arc::new(DashMap::new()),
         }
+    }
+
+    /// Get canonical path with caching to avoid repeated filesystem calls
+    /// Falls back to original path if canonicalization fails
+    fn get_canonical_path(&self, path: PathBuf) -> PathBuf {
+        // Check cache first
+        if let Some(cached) = self.canonical_path_cache.get(&path) {
+            return cached.value().clone();
+        }
+
+        // Attempt canonicalization
+        let canonical = path.canonicalize().unwrap_or_else(|_| {
+            debug!("Could not canonicalize path {:?}, using as-is", path);
+            path.clone()
+        });
+
+        // Store in cache for future lookups
+        self.canonical_path_cache.insert(path, canonical.clone());
+        canonical
     }
 
     /// Get file content from cache or read from filesystem
@@ -81,8 +103,29 @@ impl FixtureDatabase {
     pub fn scan_workspace(&self, root_path: &Path) {
         info!("Scanning workspace: {:?}", root_path);
         let mut file_count = 0;
+        let mut error_count = 0;
 
-        for entry in WalkDir::new(root_path).into_iter().filter_map(|e| e.ok()) {
+        for entry in WalkDir::new(root_path).into_iter() {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(err) => {
+                    // Log directory traversal errors (permission denied, etc.)
+                    if err
+                        .io_error()
+                        .is_some_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
+                    {
+                        warn!(
+                            "Permission denied accessing path during workspace scan: {}",
+                            err
+                        );
+                    } else {
+                        error!("Error during workspace scan: {}", err);
+                        error_count += 1;
+                    }
+                    continue;
+                }
+            };
+
             let path = entry.path();
 
             // Look for conftest.py or test_*.py or *_test.py files
@@ -92,12 +135,26 @@ impl FixtureDatabase {
                     || filename.ends_with("_test.py")
                 {
                     debug!("Found test/conftest file: {:?}", path);
-                    if let Ok(content) = std::fs::read_to_string(path) {
-                        self.analyze_file(path.to_path_buf(), &content);
-                        file_count += 1;
+                    match std::fs::read_to_string(path) {
+                        Ok(content) => {
+                            self.analyze_file(path.to_path_buf(), &content);
+                            file_count += 1;
+                        }
+                        Err(err) => {
+                            if err.kind() == std::io::ErrorKind::PermissionDenied {
+                                warn!("Permission denied reading file: {:?}", path);
+                            } else {
+                                error!("Failed to read file {:?}: {}", path, err);
+                                error_count += 1;
+                            }
+                        }
                     }
                 }
             }
+        }
+
+        if error_count > 0 {
+            error!("Workspace scan completed with {} errors", error_count);
         }
 
         info!("Workspace scan complete. Processed {} files", file_count);
@@ -274,17 +331,8 @@ impl FixtureDatabase {
 
     /// Analyze a single Python file for fixtures using AST parsing
     pub fn analyze_file(&self, file_path: PathBuf, content: &str) {
-        // Canonicalize the path to handle symlinks and normalize path representation
-        // This ensures consistent path comparisons later
-        let file_path = file_path.canonicalize().unwrap_or_else(|_| {
-            // If canonicalization fails (e.g., file doesn't exist yet, or on some filesystems),
-            // fall back to the original path
-            debug!(
-                "Warning: Could not canonicalize path {:?}, using as-is",
-                file_path
-            );
-            file_path
-        });
+        // Use cached canonical path to avoid repeated filesystem calls
+        let file_path = self.get_canonical_path(file_path);
 
         debug!("Analyzing file: {:?}", file_path);
 
@@ -297,7 +345,7 @@ impl FixtureDatabase {
         let parsed = match parse(content, Mode::Module, "") {
             Ok(ast) => ast,
             Err(e) => {
-                warn!("Failed to parse {:?}: {:?}", file_path, e);
+                error!("Failed to parse Python file {:?}: {}", file_path, e);
                 return;
             }
         };
@@ -2006,40 +2054,48 @@ impl FixtureDatabase {
     }
 
     pub fn extract_word_at_position(&self, line: &str, character: usize) -> Option<String> {
-        let chars: Vec<char> = line.chars().collect();
+        // Use char_indices to avoid Vec allocation - more efficient for hot path
+        let char_indices: Vec<(usize, char)> = line.char_indices().collect();
 
         // If cursor is beyond the line, return None
-        if character > chars.len() {
+        if character >= char_indices.len() {
             return None;
         }
 
+        // Get the character at the cursor position
+        let (_byte_pos, c) = char_indices[character];
+
         // Check if cursor is ON an identifier character
-        if character < chars.len() {
-            let c = chars[character];
-            if c.is_alphanumeric() || c == '_' {
-                // Cursor is ON an identifier character, extract the word
-                let mut start = character;
-                while start > 0 {
-                    let prev_c = chars[start - 1];
-                    if !prev_c.is_alphanumeric() && prev_c != '_' {
-                        break;
-                    }
-                    start -= 1;
+        if c.is_alphanumeric() || c == '_' {
+            // Find start of word (scan backwards)
+            let mut start_idx = character;
+            while start_idx > 0 {
+                let (_, prev_c) = char_indices[start_idx - 1];
+                if !prev_c.is_alphanumeric() && prev_c != '_' {
+                    break;
                 }
-
-                let mut end = character;
-                while end < chars.len() {
-                    let curr_c = chars[end];
-                    if !curr_c.is_alphanumeric() && curr_c != '_' {
-                        break;
-                    }
-                    end += 1;
-                }
-
-                if start < end {
-                    return Some(chars[start..end].iter().collect());
-                }
+                start_idx -= 1;
             }
+
+            // Find end of word (scan forwards)
+            let mut end_idx = character + 1;
+            while end_idx < char_indices.len() {
+                let (_, curr_c) = char_indices[end_idx];
+                if !curr_c.is_alphanumeric() && curr_c != '_' {
+                    break;
+                }
+                end_idx += 1;
+            }
+
+            // Extract substring using byte positions
+            let start_byte = char_indices[start_idx].0;
+            let end_byte = if end_idx < char_indices.len() {
+                char_indices[end_idx].0
+            } else {
+                line.len()
+            };
+
+            return Some(line[start_byte..end_byte].to_string());
         }
 
         None

@@ -62,9 +62,12 @@ export async function activate(context: vscode.ExtensionContext) {
       fs.chmodSync(command, 0o755);
     }
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
     vscode.window.showErrorMessage(
-      `Failed to access pytest-language-server binary: ${error}`
+      `Failed to access pytest-language-server binary: ${message}. ` +
+      `Ensure the file exists and you have permission to execute it.`
     );
+    console.error('Binary access error:', error);
     return;
   }
 
@@ -91,12 +94,31 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand('pytest-language-server.restart', async () => {
       if (client) {
-        await client.restart();
+        try {
+          await client.restart();
+          vscode.window.showInformationMessage('pytest Language Server restarted successfully');
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          vscode.window.showErrorMessage(
+            `Failed to restart pytest Language Server: ${message}`
+          );
+        }
       }
     })
   );
 
-  await client.start();
+  // Start the language server with proper error handling
+  try {
+    await client.start();
+    console.log('pytest-language-server started successfully');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    vscode.window.showErrorMessage(
+      `Failed to start pytest-language-server: ${message}. Please check the extension output for details.`
+    );
+    console.error('pytest-language-server activation error:', error);
+    throw error; // Re-throw to prevent partial activation
+  }
 }
 
 export function deactivate(): Thenable<void> | undefined {

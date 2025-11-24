@@ -8,11 +8,14 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python Version](https://img.shields.io/pypi/pyversions/pytest-language-server.svg)](https://pypi.org/project/pytest-language-server/)
 
-A blazingly fast Language Server Protocol (LSP) implementation for pytest, built with Rust.
+A blazingly fast Language Server Protocol (LSP) implementation for pytest, built with Rust, with
+full support for fixture discovery, go to definition, code completion, find references, hover
+documentation, diagnostics, and more!
+
+![pytest-language-server demo](demo.gif)
 
 ## Table of Contents
 
-- [Demo](#demo)
 - [Features](#features)
   - [Go to Definition](#-go-to-definition)
   - [Code Completion](#-code-completion)
@@ -40,20 +43,14 @@ A blazingly fast Language Server Protocol (LSP) implementation for pytest, built
 - [License](#license)
 - [Acknowledgments](#acknowledgments)
 
-## Demo
-
-![pytest-language-server demo](demo.gif)
-
-*Showcasing go-to-definition, code completion, hover documentation, and code actions
+## Features
 
 > **Shamelessly vibed into existence** 🤖✨
 >
 > This entire LSP implementation was built from scratch in a single AI-assisted coding session.
 > No template. No boilerplate. Just pure vibes and Rust. That's right - a complete, working
 > Language Server Protocol implementation for pytest, vibed into reality through the power of
-> modern AI tooling. Even this message about vibing was vibed into existence.
-
-## Features
+> modern AI tooling.
 
 ### 🎯 Go to Definition
 Jump directly to fixture definitions from anywhere they're used:

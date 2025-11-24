@@ -1,0 +1,13 @@
+# Dependency Review configuration
+# https://docs.github.com/en/code-security/supply-chain-security/understanding-your-software-supply-chain/dependency-review-action-configuration-options
+
+fail_on_severity: moderate
+
+license_check: true
+
+deny_licenses:
+  - GPL-3.0
+  - LGPL-3.0
+  - AGPL-3.0
+
+comment_summary_in_pr: always

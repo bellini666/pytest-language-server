@@ -19,7 +19,7 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
         rust: [stable]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -61,7 +61,7 @@ jobs:
     name: Check MSRV
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master

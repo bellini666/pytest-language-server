@@ -285,7 +285,7 @@ jobs:
     needs: [build-binaries]
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '20'
       - name: Download all binaries

@@ -26,7 +26,7 @@ documentation, diagnostics, and more!
   - [Performance](#️-performance)
 - [Installation](#installation)
 - [Setup](#setup)
-  - [Neovim](#neovim-with-nvim-lspconfig)
+  - [Neovim](#neovim)
   - [Zed](#zed)
   - [VS Code](#vs-code)
   - [IntelliJ IDEA / PyCharm](#intellij-idea--pycharm)
@@ -198,16 +198,18 @@ The binary will be at `target/release/pytest-language-server`.
 
 ## Setup
 
-### Neovim (with nvim-lspconfig)
+### Neovim
+
+Add this to your config:
 
 ```lua
-require'lspconfig'.pytest_lsp.setup{
-  cmd = { "pytest-language-server" },
-  filetypes = { "python" },
-  root_dir = function(fname)
-    return require'lspconfig'.util.root_pattern('pyproject.toml', 'setup.py', 'setup.cfg', 'pytest.ini')(fname)
-  end,
-}
+vim.lsp.config('pytest_lsp', {
+  cmd = { 'pytest-language-server' },
+  filetypes = { 'python' },
+  root_markers = { 'pyproject.toml', 'setup.py', 'setup.cfg', 'pytest.ini', '.git' },
+})
+
+vim.lsp.enable('pytest_lsp')
 ```
 
 ### Zed

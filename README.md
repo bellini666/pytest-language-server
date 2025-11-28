@@ -45,12 +45,11 @@ documentation, diagnostics, and more!
 
 ## Features
 
-> **Shamelessly vibed into existence** 🤖✨
+> **Built with AI, maintained with care** 🤖
 >
-> This entire LSP implementation was built from scratch in a single AI-assisted coding session.
-> No template. No boilerplate. Just pure vibes and Rust. That's right - a complete, working
-> Language Server Protocol implementation for pytest, vibed into reality through the power of
-> modern AI tooling.
+> This project was built with the help of AI coding agents, but carefully reviewed to ensure
+> correctness, reliability, security and performance. If you find any issues, please open an issue
+> or submit a pull request!
 
 ### 🎯 Go to Definition
 Jump directly to fixture definitions from anywhere they're used:
@@ -501,6 +500,6 @@ Special thanks to the pytest team for creating such an amazing testing framework
 
 ---
 
-**Made with ❤️ and Rust. Shamelessly vibed into existence. Blazingly fast. 🔥**
+**Made with ❤️ and Rust. Blazingly fast 🔥**
 
-*When you need a pytest LSP and the vibes are just right.* ✨
+*Built with AI assistance, maintained with care.*

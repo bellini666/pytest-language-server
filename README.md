@@ -12,7 +12,7 @@ A blazingly fast Language Server Protocol (LSP) implementation for pytest, built
 full support for fixture discovery, go to definition, code completion, find references, hover
 documentation, diagnostics, and more!
 
-![pytest-language-server demo](demo.gif)
+[![pytest-language-server demo](demo/demo.gif)](demo/demo.mp4)
 
 ## Table of Contents
 

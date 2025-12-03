@@ -99,13 +99,78 @@ impl FixtureDatabase {
         }
     }
 
+    /// Directories that should be skipped during workspace scanning.
+    /// These are typically large directories that don't contain test files.
+    const SKIP_DIRECTORIES: &'static [&'static str] = &[
+        // Version control
+        ".git",
+        ".hg",
+        ".svn",
+        // Virtual environments (scanned separately for plugins)
+        ".venv",
+        "venv",
+        "env",
+        ".env",
+        // Python caches and build artifacts
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".tox",
+        ".nox",
+        "build",
+        "dist",
+        ".eggs",
+        // JavaScript/Node
+        "node_modules",
+        "bower_components",
+        // Rust (for mixed projects)
+        "target",
+        // IDE and editor directories
+        ".idea",
+        ".vscode",
+        // Other common large directories
+        ".cache",
+        ".local",
+        "vendor",
+        "site-packages",
+    ];
+
+    /// Check if a directory should be skipped during scanning
+    fn should_skip_directory(dir_name: &str) -> bool {
+        // Check exact matches
+        if Self::SKIP_DIRECTORIES.contains(&dir_name) {
+            return true;
+        }
+        // Also skip directories ending with .egg-info
+        if dir_name.ends_with(".egg-info") {
+            return true;
+        }
+        false
+    }
+
     /// Scan a workspace directory for test files and conftest.py files
     pub fn scan_workspace(&self, root_path: &Path) {
         info!("Scanning workspace: {:?}", root_path);
         let mut file_count = 0;
         let mut error_count = 0;
+        let mut skipped_dirs = 0;
 
-        for entry in WalkDir::new(root_path).into_iter() {
+        // Use WalkDir with filter to skip large/irrelevant directories
+        let walker = WalkDir::new(root_path).into_iter().filter_entry(|entry| {
+            // Allow files to pass through
+            if entry.file_type().is_file() {
+                return true;
+            }
+            // For directories, check if we should skip them
+            if let Some(dir_name) = entry.file_name().to_str() {
+                !Self::should_skip_directory(dir_name)
+            } else {
+                true
+            }
+        });
+
+        for entry in walker {
             let entry = match entry {
                 Ok(e) => e,
                 Err(err) => {
@@ -119,7 +184,7 @@ impl FixtureDatabase {
                             err
                         );
                     } else {
-                        error!("Error during workspace scan: {}", err);
+                        debug!("Error during workspace scan: {}", err);
                         error_count += 1;
                     }
                     continue;
@@ -127,6 +192,16 @@ impl FixtureDatabase {
             };
 
             let path = entry.path();
+
+            // Skip files in filtered directories (shouldn't happen with filter_entry, but just in case)
+            if path.components().any(|c| {
+                c.as_os_str()
+                    .to_str()
+                    .is_some_and(Self::should_skip_directory)
+            }) {
+                skipped_dirs += 1;
+                continue;
+            }
 
             // Look for conftest.py or test_*.py or *_test.py files
             if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
@@ -153,8 +228,12 @@ impl FixtureDatabase {
             }
         }
 
+        if skipped_dirs > 0 {
+            debug!("Skipped {} entries in filtered directories", skipped_dirs);
+        }
+
         if error_count > 0 {
-            error!("Workspace scan completed with {} errors", error_count);
+            warn!("Workspace scan completed with {} errors", error_count);
         }
 
         info!("Workspace scan complete. Processed {} files", file_count);

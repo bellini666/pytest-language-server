@@ -20,30 +20,58 @@ impl LanguageServer for Backend {
         info!("Initialize request received");
 
         // Scan the workspace for fixtures on initialization
+        // This is done in a background task to avoid blocking the LSP initialization
         if let Some(root_uri) = params.root_uri.clone() {
             if let Ok(root_path) = root_uri.to_file_path() {
-                info!("Scanning workspace: {:?}", root_path);
+                info!("Starting workspace scan: {:?}", root_path);
 
                 // Store the workspace root
                 *self.workspace_root.write().await = Some(root_path.clone());
 
-                self.client
-                    .log_message(
-                        MessageType::INFO,
-                        format!("Scanning workspace: {:?}", root_path),
-                    )
+                // Clone references for the background task
+                let fixture_db = Arc::clone(&self.fixture_db);
+                let client = self.client.clone();
+
+                // Spawn workspace scanning in a background task
+                // This allows the LSP to respond immediately while scanning continues
+                tokio::spawn(async move {
+                    client
+                        .log_message(
+                            MessageType::INFO,
+                            format!("Scanning workspace: {:?}", root_path),
+                        )
+                        .await;
+
+                    // Run the synchronous scan in a blocking task to avoid blocking the async runtime
+                    let scan_result = tokio::task::spawn_blocking(move || {
+                        fixture_db.scan_workspace(&root_path);
+                    })
                     .await;
-                self.fixture_db.scan_workspace(&root_path);
-                info!("Workspace scan complete");
-                self.client
-                    .log_message(MessageType::INFO, "Workspace scan complete")
-                    .await;
+
+                    match scan_result {
+                        Ok(()) => {
+                            info!("Workspace scan complete");
+                            client
+                                .log_message(MessageType::INFO, "Workspace scan complete")
+                                .await;
+                        }
+                        Err(e) => {
+                            error!("Workspace scan failed: {:?}", e);
+                            client
+                                .log_message(
+                                    MessageType::ERROR,
+                                    format!("Workspace scan failed: {:?}", e),
+                                )
+                                .await;
+                        }
+                    }
+                });
             }
         } else {
-            error!("No root URI provided in initialize - workspace scanning disabled");
+            warn!("No root URI provided in initialize - workspace scanning disabled");
             self.client
                 .log_message(
-                    MessageType::ERROR,
+                    MessageType::WARNING,
                     "No workspace root provided - fixture analysis disabled",
                 )
                 .await;

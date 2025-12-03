@@ -6619,3 +6619,390 @@ def test_something(*, my_fixture):
     assert_eq!(def.name, "my_fixture");
     assert_eq!(def.file_path, conftest_path);
 }
+
+// =============================================================================
+// Tests for directory filtering during workspace scanning
+// =============================================================================
+
+#[test]
+fn test_scan_skips_node_modules() {
+    use std::fs;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let root = temp_dir.path();
+
+    // Create a test file in root
+    let root_test = root.join("test_root.py");
+    fs::write(
+        &root_test,
+        r#"
+def test_root(root_fixture):
+    pass
+"#,
+    )
+    .unwrap();
+
+    // Create conftest in root
+    let root_conftest = root.join("conftest.py");
+    fs::write(
+        &root_conftest,
+        r#"
+import pytest
+
+@pytest.fixture
+def root_fixture():
+    return 1
+"#,
+    )
+    .unwrap();
+
+    // Create node_modules with a test file that should be skipped
+    let node_modules = root.join("node_modules");
+    fs::create_dir_all(&node_modules).unwrap();
+    let node_test = node_modules.join("test_node.py");
+    fs::write(
+        &node_test,
+        r#"
+def test_node(node_fixture):
+    pass
+"#,
+    )
+    .unwrap();
+    let node_conftest = node_modules.join("conftest.py");
+    fs::write(
+        &node_conftest,
+        r#"
+import pytest
+
+@pytest.fixture
+def node_fixture():
+    return 2
+"#,
+    )
+    .unwrap();
+
+    let db = FixtureDatabase::new();
+    db.scan_workspace(root);
+
+    // Should find root_fixture but not node_fixture
+    assert!(
+        db.definitions.contains_key("root_fixture"),
+        "root_fixture should be found"
+    );
+    assert!(
+        !db.definitions.contains_key("node_fixture"),
+        "node_fixture should NOT be found (node_modules should be skipped)"
+    );
+}
+
+#[test]
+fn test_scan_skips_git_directory() {
+    use std::fs;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let root = temp_dir.path();
+
+    // Create a test file in root
+    let root_conftest = root.join("conftest.py");
+    fs::write(
+        &root_conftest,
+        r#"
+import pytest
+
+@pytest.fixture
+def real_fixture():
+    return 1
+"#,
+    )
+    .unwrap();
+
+    // Create .git with a conftest.py that should be skipped
+    let git_dir = root.join(".git");
+    fs::create_dir_all(&git_dir).unwrap();
+    let git_conftest = git_dir.join("conftest.py");
+    fs::write(
+        &git_conftest,
+        r#"
+import pytest
+
+@pytest.fixture
+def git_fixture():
+    return 2
+"#,
+    )
+    .unwrap();
+
+    let db = FixtureDatabase::new();
+    db.scan_workspace(root);
+
+    // Should find real_fixture but not git_fixture
+    assert!(
+        db.definitions.contains_key("real_fixture"),
+        "real_fixture should be found"
+    );
+    assert!(
+        !db.definitions.contains_key("git_fixture"),
+        "git_fixture should NOT be found (.git should be skipped)"
+    );
+}
+
+#[test]
+fn test_scan_skips_pycache() {
+    use std::fs;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let root = temp_dir.path();
+
+    // Create a test file in root
+    let root_conftest = root.join("conftest.py");
+    fs::write(
+        &root_conftest,
+        r#"
+import pytest
+
+@pytest.fixture
+def actual_fixture():
+    return 1
+"#,
+    )
+    .unwrap();
+
+    // Create __pycache__ with a conftest.py that should be skipped
+    let pycache = root.join("__pycache__");
+    fs::create_dir_all(&pycache).unwrap();
+    let cache_conftest = pycache.join("conftest.py");
+    fs::write(
+        &cache_conftest,
+        r#"
+import pytest
+
+@pytest.fixture
+def cache_fixture():
+    return 2
+"#,
+    )
+    .unwrap();
+
+    let db = FixtureDatabase::new();
+    db.scan_workspace(root);
+
+    // Should find actual_fixture but not cache_fixture
+    assert!(
+        db.definitions.contains_key("actual_fixture"),
+        "actual_fixture should be found"
+    );
+    assert!(
+        !db.definitions.contains_key("cache_fixture"),
+        "cache_fixture should NOT be found (__pycache__ should be skipped)"
+    );
+}
+
+#[test]
+fn test_scan_skips_venv_but_scans_plugins() {
+    use std::fs;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let root = temp_dir.path();
+
+    // Create a test file in root
+    let root_conftest = root.join("conftest.py");
+    fs::write(
+        &root_conftest,
+        r#"
+import pytest
+
+@pytest.fixture
+def project_fixture():
+    return 1
+"#,
+    )
+    .unwrap();
+
+    // Create .venv with a random test file that should be skipped during main scan
+    let venv = root.join(".venv");
+    fs::create_dir_all(&venv).unwrap();
+    let venv_test = venv.join("test_venv.py");
+    fs::write(
+        &venv_test,
+        r#"
+def test_venv(venv_fixture):
+    pass
+"#,
+    )
+    .unwrap();
+
+    let db = FixtureDatabase::new();
+    db.scan_workspace(root);
+
+    // Should find project_fixture
+    assert!(
+        db.definitions.contains_key("project_fixture"),
+        "project_fixture should be found"
+    );
+
+    // venv test files should not create usages in the main scan
+    // (venv is scanned separately for plugin fixtures only)
+    let venv_test_path = venv_test.canonicalize().unwrap_or(venv_test);
+    assert!(
+        !db.usages.contains_key(&venv_test_path),
+        "test files in .venv should not be scanned"
+    );
+}
+
+#[test]
+fn test_scan_skips_multiple_directories() {
+    use std::fs;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let root = temp_dir.path();
+
+    // Create a test file in root
+    let root_conftest = root.join("conftest.py");
+    fs::write(
+        &root_conftest,
+        r#"
+import pytest
+
+@pytest.fixture
+def main_fixture():
+    return 1
+"#,
+    )
+    .unwrap();
+
+    // Create multiple directories that should be skipped
+    for skip_dir in &[
+        "node_modules",
+        ".git",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        "build",
+        "dist",
+        ".tox",
+    ] {
+        let dir = root.join(skip_dir);
+        fs::create_dir_all(&dir).unwrap();
+        let conftest = dir.join("conftest.py");
+        fs::write(
+            &conftest,
+            format!(
+                r#"
+import pytest
+
+@pytest.fixture
+def {}_fixture():
+    return 2
+"#,
+                skip_dir.replace(".", "").replace("-", "_")
+            ),
+        )
+        .unwrap();
+    }
+
+    let db = FixtureDatabase::new();
+    db.scan_workspace(root);
+
+    // Should only find main_fixture
+    assert!(
+        db.definitions.contains_key("main_fixture"),
+        "main_fixture should be found"
+    );
+
+    // None of the skipped directory fixtures should be found
+    assert!(
+        !db.definitions.contains_key("node_modules_fixture"),
+        "node_modules fixture should be skipped"
+    );
+    assert!(
+        !db.definitions.contains_key("git_fixture"),
+        ".git fixture should be skipped"
+    );
+    assert!(
+        !db.definitions.contains_key("__pycache___fixture"),
+        "__pycache__ fixture should be skipped"
+    );
+    assert!(
+        !db.definitions.contains_key("pytest_cache_fixture"),
+        ".pytest_cache fixture should be skipped"
+    );
+}
+
+#[test]
+fn test_scan_skips_nested_node_modules() {
+    use std::fs;
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let root = temp_dir.path();
+
+    // Create a test file in root
+    let root_conftest = root.join("conftest.py");
+    fs::write(
+        &root_conftest,
+        r#"
+import pytest
+
+@pytest.fixture
+def root_fix():
+    return 1
+"#,
+    )
+    .unwrap();
+
+    // Create a tests directory with a test file (should be scanned)
+    let tests_dir = root.join("tests");
+    fs::create_dir_all(&tests_dir).unwrap();
+    let tests_conftest = tests_dir.join("conftest.py");
+    fs::write(
+        &tests_conftest,
+        r#"
+import pytest
+
+@pytest.fixture
+def tests_fix():
+    return 2
+"#,
+    )
+    .unwrap();
+
+    // Create deeply nested node_modules (should be skipped entirely)
+    let deep_node = root.join("frontend/app/node_modules/some_package");
+    fs::create_dir_all(&deep_node).unwrap();
+    let deep_conftest = deep_node.join("conftest.py");
+    fs::write(
+        &deep_conftest,
+        r#"
+import pytest
+
+@pytest.fixture
+def deep_node_fix():
+    return 3
+"#,
+    )
+    .unwrap();
+
+    let db = FixtureDatabase::new();
+    db.scan_workspace(root);
+
+    // Should find root and tests fixtures
+    assert!(
+        db.definitions.contains_key("root_fix"),
+        "root_fix should be found"
+    );
+    assert!(
+        db.definitions.contains_key("tests_fix"),
+        "tests_fix should be found"
+    );
+
+    // Should NOT find deeply nested node_modules fixture
+    assert!(
+        !db.definitions.contains_key("deep_node_fix"),
+        "deep_node_fix should NOT be found (nested node_modules should be skipped)"
+    );
+}

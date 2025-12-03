@@ -223,6 +223,18 @@ Install from the [Zed Extensions Marketplace](https://zed.dev/extensions/pytest-
 
 The extension downloads platform-specific binaries from GitHub Releases. If you prefer to use your own installation (via pip, cargo, or brew), place `pytest-language-server` in your PATH.
 
+After installing the extension, you need to enable the language server for Python files. Add the following to your Zed `settings.json`:
+
+```json
+{
+  "languages": {
+    "Python": {
+      "language_servers": ["pyright", "pytest-language-server", "..."]
+    }
+  }
+}
+```
+
 ### VS Code
 
 **The extension includes pre-built binaries - no separate installation required!**

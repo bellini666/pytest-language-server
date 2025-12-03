@@ -34,6 +34,10 @@ subdir/
     ├── database (used 6 times)
     ├── local_fixture (used 5 times)
     └── sample_fixture (used 7 times)
+test_renamed_fixtures.py (3 fixtures)
+├── normal_fixture (used 1 time)
+├── renamed_db (used 3 times)
+└── user (used 1 time)
 utils/
 └── conftest.py (3 fixtures)
     ├── auto_cleanup (unused)

@@ -1619,3 +1619,211 @@ def фикстура():
         // Test documents non-ASCII handling
     }
 }
+
+// MARK: - Renamed Fixtures Tests (name= parameter)
+
+#[test]
+fn test_goto_definition_renamed_fixture() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let conftest = r#"
+import pytest
+
+@pytest.fixture(name="db_conn")
+def internal_database_connection():
+    return "connection"
+"#;
+    let conftest_path = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest);
+
+    let test_content = r#"
+def test_uses_renamed(db_conn):
+    assert db_conn == "connection"
+"#;
+    let test_path = PathBuf::from("/tmp/project/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Click on db_conn in test - should find definition
+    let fixture_name = db.find_fixture_at_position(&test_path, 1, 22);
+    assert_eq!(fixture_name, Some("db_conn".to_string()));
+
+    let definition = db.find_fixture_definition(&test_path, 1, 22);
+    assert!(
+        definition.is_some(),
+        "Should find renamed fixture definition"
+    );
+
+    let def = definition.unwrap();
+    assert_eq!(def.name, "db_conn");
+    assert_eq!(def.file_path, conftest_path);
+    assert_eq!(def.line, 5); // Line where function def is (1-indexed)
+}
+
+#[test]
+fn test_find_references_renamed_fixture() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let conftest = r#"
+import pytest
+
+@pytest.fixture(name="client")
+def create_test_client():
+    return "test_client"
+"#;
+    let conftest_path = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest);
+
+    let test_content = r#"
+def test_one(client):
+    pass
+
+def test_two(client):
+    pass
+"#;
+    let test_path = PathBuf::from("/tmp/project/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Get definition and find references
+    let definition = db.find_fixture_definition(&test_path, 1, 14);
+    assert!(definition.is_some());
+
+    let refs = db.find_references_for_definition(&definition.unwrap());
+    assert_eq!(refs.len(), 2, "Should find 2 references to 'client'");
+
+    // Both should reference "client" not "create_test_client"
+    assert!(refs.iter().all(|r| r.name == "client"));
+}
+
+#[test]
+fn test_renamed_fixture_with_dependency() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture(name="db")
+def database_fixture():
+    return "database"
+
+@pytest.fixture(name="user")
+def user_fixture(db):
+    return {"db": db}
+
+def test_example(user, db):
+    pass
+"#;
+    let file_path = PathBuf::from("/tmp/project/test_file.py");
+    db.analyze_file(file_path.clone(), content);
+
+    // Verify both renamed fixtures are registered correctly
+    assert!(db.definitions.contains_key("db"));
+    assert!(db.definitions.contains_key("user"));
+    assert!(!db.definitions.contains_key("database_fixture"));
+    assert!(!db.definitions.contains_key("user_fixture"));
+
+    // Verify usages: user_fixture uses db, test uses both
+    let usages = db.usages.get(&file_path).unwrap();
+    let db_usages: Vec<_> = usages.iter().filter(|u| u.name == "db").collect();
+    let user_usages: Vec<_> = usages.iter().filter(|u| u.name == "user").collect();
+
+    assert_eq!(
+        db_usages.len(),
+        2,
+        "db should be used twice (in user_fixture and test)"
+    );
+    assert_eq!(user_usages.len(), 1, "user should be used once (in test)");
+}
+
+#[test]
+fn test_normal_fixture_no_regression() {
+    // Ensure fixtures without name= still work correctly
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let conftest = r#"
+import pytest
+
+@pytest.fixture
+def normal_fixture():
+    return "normal"
+
+@pytest.fixture(scope="session")
+def session_fixture():
+    return "session"
+
+@pytest.fixture(autouse=True)
+def autouse_fixture():
+    return "autouse"
+"#;
+    let conftest_path = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest);
+
+    let test_content = r#"
+def test_example(normal_fixture, session_fixture):
+    pass
+"#;
+    let test_path = PathBuf::from("/tmp/project/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // All fixtures should be registered by function name
+    assert!(db.definitions.contains_key("normal_fixture"));
+    assert!(db.definitions.contains_key("session_fixture"));
+    assert!(db.definitions.contains_key("autouse_fixture"));
+
+    // Goto definition should work
+    let def = db.find_fixture_definition(&test_path, 1, 18);
+    assert!(def.is_some());
+    assert_eq!(def.unwrap().name, "normal_fixture");
+
+    // References should work
+    let def = db.find_fixture_definition(&test_path, 1, 18).unwrap();
+    let refs = db.find_references_for_definition(&def);
+    assert_eq!(refs.len(), 1);
+}
+
+#[test]
+fn test_mixed_renamed_and_normal_fixtures() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture(name="renamed")
+def internal_name():
+    return 1
+
+@pytest.fixture
+def normal():
+    return 2
+
+def test_mixed(renamed, normal):
+    pass
+"#;
+    let file_path = PathBuf::from("/tmp/project/test_file.py");
+    db.analyze_file(file_path.clone(), content);
+
+    // Renamed fixture uses alias
+    assert!(db.definitions.contains_key("renamed"));
+    assert!(!db.definitions.contains_key("internal_name"));
+
+    // Normal fixture uses function name
+    assert!(db.definitions.contains_key("normal"));
+
+    // Both should be findable via goto definition
+    let renamed_def = db.find_fixture_definition(&file_path, 11, 15);
+    let normal_def = db.find_fixture_definition(&file_path, 11, 24);
+
+    assert!(renamed_def.is_some());
+    assert!(normal_def.is_some());
+    assert_eq!(renamed_def.unwrap().name, "renamed");
+    assert_eq!(normal_def.unwrap().name, "normal");
+}

@@ -429,3 +429,134 @@ def test_something(valid_fixture):
 
     std::fs::remove_dir_all(&temp_dir).ok();
 }
+
+// MARK: - Renamed Fixtures E2E Tests
+
+#[test]
+fn test_e2e_renamed_fixtures_in_test_project() {
+    let db = FixtureDatabase::new();
+    let project_path = PathBuf::from("tests/test_project");
+
+    db.scan_workspace(&project_path);
+
+    // The test_renamed_fixtures.py file has fixtures with name= parameter
+    // Fixtures should be registered by their alias, not function name
+    assert!(
+        db.definitions.contains_key("renamed_db"),
+        "Should find fixture by alias 'renamed_db'"
+    );
+    assert!(
+        db.definitions.contains_key("user"),
+        "Should find fixture by alias 'user'"
+    );
+    assert!(
+        db.definitions.contains_key("normal_fixture"),
+        "Should find normal fixture by function name"
+    );
+
+    // Internal function names should NOT be registered
+    assert!(
+        !db.definitions.contains_key("internal_database_fixture"),
+        "Internal function name should not be registered"
+    );
+    assert!(
+        !db.definitions.contains_key("create_user_fixture"),
+        "Internal function name should not be registered"
+    );
+}
+
+#[test]
+fn test_e2e_renamed_fixture_references() {
+    let db = FixtureDatabase::new();
+    let project_path = PathBuf::from("tests/test_project");
+
+    db.scan_workspace(&project_path);
+
+    // Get the renamed_db fixture definition
+    let renamed_db_defs = db.definitions.get("renamed_db");
+    assert!(renamed_db_defs.is_some());
+
+    let def = &renamed_db_defs.unwrap()[0];
+    let refs = db.find_references_for_definition(def);
+
+    // Should have references from:
+    // 1. create_user_fixture (depends on renamed_db)
+    // 2. test_with_renamed_fixture
+    // 3. test_mixed_fixtures
+    assert!(
+        refs.len() >= 3,
+        "Should have at least 3 references to renamed_db, got {}",
+        refs.len()
+    );
+
+    // All references should use the alias name
+    assert!(
+        refs.iter().all(|r| r.name == "renamed_db"),
+        "All references should use alias name"
+    );
+}
+
+#[test]
+fn test_e2e_renamed_fixture_goto_definition() {
+    let db = FixtureDatabase::new();
+    let project_path = PathBuf::from("tests/test_project");
+
+    db.scan_workspace(&project_path);
+
+    let test_file = project_path
+        .join("test_renamed_fixtures.py")
+        .canonicalize()
+        .unwrap();
+
+    // Find "renamed_db" in test_with_renamed_fixture (line 24, 0-indexed: 23)
+    // def test_with_renamed_fixture(renamed_db):
+    let fixture_name = db.find_fixture_at_position(&test_file, 23, 30);
+    assert_eq!(
+        fixture_name,
+        Some("renamed_db".to_string()),
+        "Should find fixture name at position"
+    );
+
+    let definition = db.find_fixture_definition(&test_file, 23, 30);
+    assert!(definition.is_some(), "Should find fixture definition");
+
+    let def = definition.unwrap();
+    assert_eq!(def.name, "renamed_db", "Definition should have alias name");
+}
+
+#[test]
+fn test_e2e_cli_fixtures_list_with_renamed() {
+    // Run CLI and verify renamed fixtures appear correctly
+    let mut cmd = Command::cargo_bin("pytest-language-server").unwrap();
+    let output = cmd
+        .arg("fixtures")
+        .arg("list")
+        .arg("tests/test_project")
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Should show renamed fixtures by their alias
+    assert!(
+        stdout.contains("renamed_db"),
+        "Output should contain 'renamed_db'"
+    );
+    assert!(stdout.contains("user"), "Output should contain 'user'");
+    assert!(
+        stdout.contains("normal_fixture"),
+        "Output should contain 'normal_fixture'"
+    );
+
+    // Should NOT show internal function names
+    assert!(
+        !stdout.contains("internal_database_fixture"),
+        "Should not show internal function name"
+    );
+    assert!(
+        !stdout.contains("create_user_fixture"),
+        "Should not show internal function name"
+    );
+}

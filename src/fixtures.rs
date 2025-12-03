@@ -566,15 +566,18 @@ impl FixtureDatabase {
             func_name,
             decorator_list.len()
         );
-        let is_fixture = decorator_list.iter().any(|dec| {
-            let result = Self::is_fixture_decorator(dec);
-            if result {
-                debug!("  Decorator matched as fixture!");
-            }
-            result
-        });
+        // Find the fixture decorator and check for renamed fixtures (name= parameter)
+        let fixture_decorator = decorator_list
+            .iter()
+            .find(|dec| Self::is_fixture_decorator(dec));
 
-        if is_fixture {
+        if let Some(decorator) = fixture_decorator {
+            debug!("  Decorator matched as fixture!");
+
+            // Check if the fixture has a custom name (e.g., @pytest.fixture(name="custom_name"))
+            let fixture_name = Self::extract_fixture_name_from_decorator(decorator)
+                .unwrap_or_else(|| func_name.to_string());
+
             // Calculate line number from the range start
             let line = self.get_line_from_offset(range.start().to_usize(), line_index);
 
@@ -585,8 +588,8 @@ impl FixtureDatabase {
             let return_type = self.extract_return_type(returns, body, content);
 
             info!(
-                "Found fixture definition: {} at {:?}:{}",
-                func_name, file_path, line
+                "Found fixture definition: {} (function: {}) at {:?}:{}",
+                fixture_name, func_name, file_path, line
             );
             if let Some(ref doc) = docstring {
                 debug!("  Docstring: {}", doc);
@@ -596,7 +599,7 @@ impl FixtureDatabase {
             }
 
             let definition = FixtureDefinition {
-                name: func_name.to_string(),
+                name: fixture_name.clone(),
                 file_path: file_path.clone(),
                 line,
                 docstring,
@@ -604,7 +607,7 @@ impl FixtureDatabase {
             };
 
             self.definitions
-                .entry(func_name.to_string())
+                .entry(fixture_name)
                 .or_default()
                 .push(definition);
 
@@ -794,6 +797,25 @@ impl FixtureDatabase {
             }
             _ => false,
         }
+    }
+
+    /// Extracts the fixture name from a decorator's `name=` argument if present.
+    fn extract_fixture_name_from_decorator(expr: &Expr) -> Option<String> {
+        let Expr::Call(call) = expr else { return None };
+        if !Self::is_fixture_decorator(&call.func) {
+            return None;
+        }
+
+        call.keywords
+            .iter()
+            .filter(|kw| kw.arg.as_ref().is_some_and(|a| a.as_str() == "name"))
+            .find_map(|kw| match &kw.value {
+                Expr::Constant(c) => match &c.value {
+                    rustpython_parser::ast::Constant::Str(s) => Some(s.to_string()),
+                    _ => None,
+                },
+                _ => None,
+            })
     }
 
     #[allow(clippy::too_many_arguments)]

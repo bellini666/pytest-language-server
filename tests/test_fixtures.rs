@@ -3181,15 +3181,45 @@ def database_connection():
     let file_path = PathBuf::from("/tmp/test/conftest.py");
     db.analyze_file(file_path.clone(), content);
 
-    // Should detect fixtures by their internal name
-    // Note: The 'name' parameter creates an alias, but we currently
-    // detect fixtures by their function name
-    assert!(db.definitions.contains_key("internal_fixture_name"));
-    assert!(db.definitions.contains_key("database_connection"));
+    // Should detect fixtures by their alias name (from name= parameter)
+    assert!(db.definitions.contains_key("custom_name"));
+    assert!(db.definitions.contains_key("db"));
 
-    // Future enhancement: also detect by alias name
-    // assert!(db.definitions.contains_key("custom_name"));
-    // assert!(db.definitions.contains_key("db"));
+    // The internal function names should NOT be registered as fixtures
+    assert!(!db.definitions.contains_key("internal_fixture_name"));
+    assert!(!db.definitions.contains_key("database_connection"));
+}
+
+#[test]
+fn test_renamed_fixture_usage_detection() {
+    // Test case from https://github.com/bellini666/pytest-language-server/issues/18
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture(name="new")
+def old() -> int:
+    return 1
+
+def test_example(new: int):
+    assert new == 1
+"#;
+    let file_path = PathBuf::from("/tmp/test/test_renamed.py");
+    db.analyze_file(file_path.clone(), content);
+
+    // The fixture should be registered under "new", not "old"
+    assert!(db.definitions.contains_key("new"));
+    assert!(!db.definitions.contains_key("old"));
+
+    // The usage in test_example should reference "new"
+    let usages = db.usages.get(&file_path).unwrap();
+    assert!(usages.iter().any(|u| u.name == "new"));
+
+    // The fixture should be found and marked as used
+    let new_defs = db.definitions.get("new").unwrap();
+    assert_eq!(new_defs.len(), 1);
+    assert_eq!(new_defs[0].file_path, file_path);
 }
 
 #[test]
@@ -3779,8 +3809,10 @@ def parametrized_scoped():
     db.analyze_file(file_path.clone(), content);
 
     // Should detect fixtures with multiple decorator arguments
-    assert!(db.definitions.contains_key("complex_fixture"));
-    assert!(db.definitions.contains_key("parametrized_scoped"));
+    // When name= is present, use the alias; otherwise use function name
+    assert!(db.definitions.contains_key("custom")); // has name="custom"
+    assert!(!db.definitions.contains_key("complex_fixture")); // function name not registered
+    assert!(db.definitions.contains_key("parametrized_scoped")); // no name=, uses function name
 }
 
 #[test]

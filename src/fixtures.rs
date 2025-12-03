@@ -152,6 +152,15 @@ impl FixtureDatabase {
     /// Scan a workspace directory for test files and conftest.py files
     pub fn scan_workspace(&self, root_path: &Path) {
         info!("Scanning workspace: {:?}", root_path);
+
+        // Defensive check: ensure the root path exists
+        if !root_path.exists() {
+            warn!(
+                "Workspace path does not exist, skipping scan: {:?}",
+                root_path
+            );
+            return;
+        }
         let mut file_count = 0;
         let mut error_count = 0;
         let mut skipped_dirs = 0;
@@ -618,6 +627,38 @@ impl FixtureDatabase {
 
         // Handle class definitions - recurse into class body to find test methods
         if let Stmt::ClassDef(class_def) = stmt {
+            // Check for @pytest.mark.usefixtures decorator on the class
+            for decorator in &class_def.decorator_list {
+                let usefixtures = Self::extract_usefixtures_names(decorator);
+                for (fixture_name, range) in usefixtures {
+                    let usage_line =
+                        self.get_line_from_offset(range.start().to_usize(), line_index);
+                    let start_char =
+                        self.get_char_position_from_offset(range.start().to_usize(), line_index);
+                    // Add 1 to start_char and subtract 1 from end for the quotes around the string
+                    let end_char =
+                        self.get_char_position_from_offset(range.end().to_usize(), line_index);
+
+                    info!(
+                        "Found usefixtures usage on class: {} at {:?}:{}:{}",
+                        fixture_name, file_path, usage_line, start_char
+                    );
+
+                    let usage = FixtureUsage {
+                        name: fixture_name,
+                        file_path: file_path.clone(),
+                        line: usage_line,
+                        start_char: start_char + 1, // Skip opening quote
+                        end_char: end_char - 1,     // Skip closing quote
+                    };
+
+                    self.usages
+                        .entry(file_path.clone())
+                        .or_default()
+                        .push(usage);
+                }
+            }
+
             for class_stmt in &class_def.body {
                 self.visit_stmt(class_stmt, file_path, _is_conftest, content, line_index);
             }
@@ -646,6 +687,66 @@ impl FixtureDatabase {
         };
 
         debug!("Found function: {}", func_name);
+
+        // Check for @pytest.mark.usefixtures decorator on the function
+        for decorator in decorator_list {
+            let usefixtures = Self::extract_usefixtures_names(decorator);
+            for (fixture_name, range) in usefixtures {
+                let usage_line = self.get_line_from_offset(range.start().to_usize(), line_index);
+                let start_char =
+                    self.get_char_position_from_offset(range.start().to_usize(), line_index);
+                let end_char =
+                    self.get_char_position_from_offset(range.end().to_usize(), line_index);
+
+                info!(
+                    "Found usefixtures usage on function: {} at {:?}:{}:{}",
+                    fixture_name, file_path, usage_line, start_char
+                );
+
+                let usage = FixtureUsage {
+                    name: fixture_name,
+                    file_path: file_path.clone(),
+                    line: usage_line,
+                    start_char: start_char + 1, // Skip opening quote
+                    end_char: end_char - 1,     // Skip closing quote
+                };
+
+                self.usages
+                    .entry(file_path.clone())
+                    .or_default()
+                    .push(usage);
+            }
+        }
+
+        // Check for @pytest.mark.parametrize with indirect=True on the function
+        for decorator in decorator_list {
+            let indirect_fixtures = Self::extract_parametrize_indirect_fixtures(decorator);
+            for (fixture_name, range) in indirect_fixtures {
+                let usage_line = self.get_line_from_offset(range.start().to_usize(), line_index);
+                let start_char =
+                    self.get_char_position_from_offset(range.start().to_usize(), line_index);
+                let end_char =
+                    self.get_char_position_from_offset(range.end().to_usize(), line_index);
+
+                info!(
+                    "Found parametrize indirect fixture usage: {} at {:?}:{}:{}",
+                    fixture_name, file_path, usage_line, start_char
+                );
+
+                let usage = FixtureUsage {
+                    name: fixture_name,
+                    file_path: file_path.clone(),
+                    line: usage_line,
+                    start_char: start_char + 1, // Skip opening quote
+                    end_char: end_char - 1,     // Skip closing quote
+                };
+
+                self.usages
+                    .entry(file_path.clone())
+                    .or_default()
+                    .push(usage);
+            }
+        }
 
         // Check if this is a fixture definition
         debug!(
@@ -915,6 +1016,162 @@ impl FixtureDatabase {
                 },
                 _ => None,
             })
+    }
+
+    /// Checks if an expression is a pytest.mark.usefixtures decorator.
+    /// Handles both @pytest.mark.usefixtures("fix") and @mark.usefixtures("fix")
+    fn is_usefixtures_decorator(expr: &Expr) -> bool {
+        match expr {
+            Expr::Call(call) => Self::is_usefixtures_decorator(&call.func),
+            Expr::Attribute(attr) => {
+                // Check for pytest.mark.usefixtures or mark.usefixtures
+                if attr.attr.as_str() != "usefixtures" {
+                    return false;
+                }
+                match &*attr.value {
+                    // pytest.mark.usefixtures
+                    Expr::Attribute(inner_attr) => {
+                        if inner_attr.attr.as_str() != "mark" {
+                            return false;
+                        }
+                        matches!(&*inner_attr.value, Expr::Name(name) if name.id.as_str() == "pytest")
+                    }
+                    // mark.usefixtures (when imported as from pytest import mark)
+                    Expr::Name(name) => name.id.as_str() == "mark",
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Extracts fixture names from @pytest.mark.usefixtures("fix1", "fix2", ...) decorator.
+    /// Returns a vector of (fixture_name, range) tuples.
+    fn extract_usefixtures_names(
+        expr: &Expr,
+    ) -> Vec<(String, rustpython_parser::text_size::TextRange)> {
+        let Expr::Call(call) = expr else {
+            return vec![];
+        };
+        if !Self::is_usefixtures_decorator(&call.func) {
+            return vec![];
+        }
+
+        call.args
+            .iter()
+            .filter_map(|arg| {
+                if let Expr::Constant(c) = arg {
+                    if let rustpython_parser::ast::Constant::Str(s) = &c.value {
+                        return Some((s.to_string(), c.range));
+                    }
+                }
+                None
+            })
+            .collect()
+    }
+
+    /// Checks if an expression is a pytest.mark.parametrize decorator.
+    fn is_parametrize_decorator(expr: &Expr) -> bool {
+        match expr {
+            Expr::Call(call) => Self::is_parametrize_decorator(&call.func),
+            Expr::Attribute(attr) => {
+                if attr.attr.as_str() != "parametrize" {
+                    return false;
+                }
+                match &*attr.value {
+                    // pytest.mark.parametrize
+                    Expr::Attribute(inner_attr) => {
+                        if inner_attr.attr.as_str() != "mark" {
+                            return false;
+                        }
+                        matches!(&*inner_attr.value, Expr::Name(name) if name.id.as_str() == "pytest")
+                    }
+                    // mark.parametrize (when imported as from pytest import mark)
+                    Expr::Name(name) => name.id.as_str() == "mark",
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Extracts fixture names from @pytest.mark.parametrize when indirect=True.
+    /// Returns a vector of (fixture_name, range) tuples.
+    ///
+    /// Handles:
+    /// - @pytest.mark.parametrize("fixture_name", [...], indirect=True)
+    /// - @pytest.mark.parametrize("fix1,fix2", [...], indirect=True)
+    /// - @pytest.mark.parametrize("fix1,fix2", [...], indirect=["fix1"])
+    fn extract_parametrize_indirect_fixtures(
+        expr: &Expr,
+    ) -> Vec<(String, rustpython_parser::text_size::TextRange)> {
+        let Expr::Call(call) = expr else {
+            return vec![];
+        };
+        if !Self::is_parametrize_decorator(&call.func) {
+            return vec![];
+        }
+
+        // Check for indirect keyword argument
+        let indirect_value = call.keywords.iter().find_map(|kw| {
+            if kw.arg.as_ref().is_some_and(|a| a.as_str() == "indirect") {
+                Some(&kw.value)
+            } else {
+                None
+            }
+        });
+
+        let Some(indirect) = indirect_value else {
+            return vec![];
+        };
+
+        // Get the first positional argument (parameter names)
+        let Some(first_arg) = call.args.first() else {
+            return vec![];
+        };
+
+        let Expr::Constant(param_const) = first_arg else {
+            return vec![];
+        };
+
+        let rustpython_parser::ast::Constant::Str(param_str) = &param_const.value else {
+            return vec![];
+        };
+
+        // Parse parameter names (can be comma-separated)
+        let param_names: Vec<&str> = param_str.split(',').map(|s| s.trim()).collect();
+
+        match indirect {
+            // indirect=True means all parameters are fixtures
+            Expr::Constant(c) => {
+                if matches!(c.value, rustpython_parser::ast::Constant::Bool(true)) {
+                    return param_names
+                        .into_iter()
+                        .map(|name| (name.to_string(), param_const.range))
+                        .collect();
+                }
+            }
+            // indirect=["fix1", "fix2"] means only listed parameters are fixtures
+            Expr::List(list) => {
+                return list
+                    .elts
+                    .iter()
+                    .filter_map(|elt| {
+                        if let Expr::Constant(c) = elt {
+                            if let rustpython_parser::ast::Constant::Str(s) = &c.value {
+                                if param_names.contains(&s.as_str()) {
+                                    return Some((s.to_string(), c.range));
+                                }
+                            }
+                        }
+                        None
+                    })
+                    .collect();
+            }
+            _ => {}
+        }
+
+        vec![]
     }
 
     #[allow(clippy::too_many_arguments)]

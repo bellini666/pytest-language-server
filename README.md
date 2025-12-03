@@ -375,6 +375,31 @@ def fixture_b(fixture_a):  # Go to definition works on fixture_a
     return fixture_a + "b"
 ```
 
+### @pytest.mark.usefixtures
+```python
+@pytest.mark.usefixtures("database", "cache")
+class TestWithFixtures:
+    def test_something(self):
+        pass  # database and cache are available
+```
+
+### @pytest.mark.parametrize with indirect
+```python
+@pytest.fixture
+def user(request):
+    return User(name=request.param)
+
+# All parameters treated as fixtures
+@pytest.mark.parametrize("user", ["alice", "bob"], indirect=True)
+def test_user(user):
+    pass
+
+# Selective indirect fixtures
+@pytest.mark.parametrize("user,value", [("alice", 1)], indirect=["user"])
+def test_user_value(user, value):
+    pass
+```
+
 ## Fixture Priority Rules
 
 pytest-language-server correctly implements pytest's fixture shadowing rules:

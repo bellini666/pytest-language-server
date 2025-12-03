@@ -24,7 +24,7 @@ This ensures the user maintains full control over their git workflow.
 - **Language**: Rust (Edition 2021, MSRV 1.83)
 - **Lines of Code**: ~3,120 lines (2,254 in fixtures.rs, 861 in main.rs)
 - **Architecture**: Async LSP server using tower-lsp with CLI support via clap
-- **Key Features**: Fixture go-to-definition, find-references, hover docs, fixture overriding, undeclared fixture diagnostics, CLI commands
+- **Key Features**: Fixture go-to-definition, find-references, hover docs, fixture overriding, undeclared fixture diagnostics, CLI commands, `@pytest.mark.usefixtures` support, `@pytest.mark.parametrize` indirect fixtures
 
 ## Core Architecture
 
@@ -194,10 +194,10 @@ RUST_LOG=debug cargo test          # Run with debug logging
 
 ### Test Coverage
 
-- **215 total tests passing** (as of latest)
-  - 164 integration tests in `tests/test_fixtures.rs` (FixtureDatabase API)
-  - 29 integration tests in `tests/test_lsp.rs` (LSP protocol handlers)
-  - 22 integration tests in `tests/test_e2e.rs` (End-to-end CLI and workspace tests)
+- **272 total tests passing** (as of latest)
+  - 206 integration tests in `tests/test_fixtures.rs` (FixtureDatabase API)
+  - 34 integration tests in `tests/test_lsp.rs` (LSP protocol handlers)
+  - 32 integration tests in `tests/test_e2e.rs` (End-to-end CLI and workspace tests)
 
 **Key test areas:**
 
@@ -214,6 +214,8 @@ RUST_LOG=debug cargo test          # Run with debug logging
 - Path normalization and canonicalization
 - Deep directory hierarchy support
 - Sibling directory isolation
+- `@pytest.mark.usefixtures` decorator support
+- `@pytest.mark.parametrize` with `indirect=True` fixtures
 
 **Docstring Variations (8 tests):**
 - Empty, multiline, single-quoted docstrings
@@ -234,18 +236,27 @@ RUST_LOG=debug cargo test          # Run with debug logging
 - Multiple plugins with same fixture
 - Unused venv fixtures
 
-**Edge Cases (13 tests):**
+**Edge Cases (15+ tests):**
 - Property, staticmethod, classmethod decorators
 - Context managers, multiple decorators
 - Modern Python: walrus operator, match statement, exception groups
 - Type system: dataclass, NamedTuple, Protocol, Generic types
 - Fixtures in if blocks (documented as unsupported)
+- Unicode fixture names and docstrings
+- Yield fixtures with complex teardown
+- Nested test classes
+- Variadic parameters (`*args`, `**kwargs`)
 
-**E2E Tests (22 tests):**
-- CLI commands with snapshot testing (10 tests)
-- Full workspace scanning (8 tests)
-- Performance E2E (2 tests)
-- Error handling E2E (2 tests)
+**Pytest Markers (9 tests):**
+- `@pytest.mark.usefixtures` on functions and classes
+- `@pytest.mark.parametrize` with `indirect=True`
+- `@pytest.mark.parametrize` with selective `indirect=["fixture"]`
+
+**E2E Tests (32 tests):**
+- CLI commands with snapshot testing
+- Full workspace scanning
+- Performance E2E
+- Error handling E2E
 
 ## Development Workflow
 
@@ -580,7 +591,7 @@ The project includes extensions for three major editors/IDEs:
 - **v0.9.0** (November 2025) - Current version
   - Fixed critical DashMap deadlock in analyze_file
   - Added support for 50+ pytest third-party plugins
-  - Comprehensive test suite: 215 tests (164 unit + 29 LSP + 22 E2E)
+  - Comprehensive test suite: 272 tests (206 unit + 34 LSP + 32 E2E)
   - Added E2E tests with snapshot testing
   - Added docstring variation, performance, virtual environment, and edge case tests
 - **v0.7.2** (November 2025) - Improved extension metadata

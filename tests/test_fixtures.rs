@@ -3014,6 +3014,47 @@ def test_with_parametrized(number_fixture):
 }
 
 #[test]
+fn test_parametrized_fixture_with_ids() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture(params=[1, 2, 3], ids=["one", "two", "three"])
+def number_with_ids(request):
+    return request.param
+
+@pytest.fixture(params=["x", "y"], ids=lambda x: f"letter_{x}")
+def letter_with_ids(request):
+    return request.param
+
+@pytest.fixture(
+    params=[{"a": 1}, {"b": 2}],
+    ids=["dict_a", "dict_b"],
+    scope="module"
+)
+def complex_params(request):
+    return request.param
+"#;
+    let file_path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(file_path.clone(), content);
+
+    // Should detect all parametrized fixtures with ids
+    assert!(
+        db.definitions.contains_key("number_with_ids"),
+        "Should detect fixture with list ids"
+    );
+    assert!(
+        db.definitions.contains_key("letter_with_ids"),
+        "Should detect fixture with lambda ids"
+    );
+    assert!(
+        db.definitions.contains_key("complex_params"),
+        "Should detect multi-line parametrized fixture"
+    );
+}
+
+#[test]
 fn test_factory_fixture_pattern() {
     let db = FixtureDatabase::new();
 
@@ -3295,6 +3336,150 @@ class TestOuter:
 }
 
 #[test]
+fn test_deeply_nested_classes() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def shared_fixture():
+    return "shared"
+
+class TestLevel1:
+    def test_level1(self, shared_fixture):
+        pass
+
+    class TestLevel2:
+        def test_level2(self, shared_fixture):
+            pass
+
+        class TestLevel3:
+            def test_level3(self, shared_fixture):
+                pass
+"#;
+    let file_path = PathBuf::from("/tmp/test/test_deep_nested.py");
+    db.analyze_file(file_path.clone(), content);
+
+    // All test methods at all nesting levels should find the fixture
+    let usages = db.usages.get(&file_path).unwrap();
+    let fixture_usages: Vec<_> = usages
+        .iter()
+        .filter(|u| u.name == "shared_fixture")
+        .collect();
+
+    assert_eq!(
+        fixture_usages.len(),
+        3,
+        "Should have 3 usages from all nesting levels"
+    );
+}
+
+#[test]
+fn test_nested_class_with_usefixtures() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def setup_fixture():
+    return "setup"
+
+@pytest.fixture
+def nested_setup():
+    return "nested"
+
+@pytest.mark.usefixtures("setup_fixture")
+class TestOuter:
+    def test_outer(self):
+        pass
+
+    @pytest.mark.usefixtures("nested_setup")
+    class TestNested:
+        def test_nested(self):
+            pass
+"#;
+    let file_path = PathBuf::from("/tmp/test/test_nested_usefixtures.py");
+    db.analyze_file(file_path.clone(), content);
+
+    let usages = db.usages.get(&file_path).unwrap();
+
+    // Both usefixtures decorators should be detected
+    assert!(
+        usages.iter().any(|u| u.name == "setup_fixture"),
+        "setup_fixture from outer class usefixtures should be detected"
+    );
+    assert!(
+        usages.iter().any(|u| u.name == "nested_setup"),
+        "nested_setup from nested class usefixtures should be detected"
+    );
+}
+
+#[test]
+fn test_fixture_in_nested_class() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+class TestOuter:
+    @pytest.fixture
+    def outer_class_fixture(self):
+        return "outer"
+
+    def test_uses_outer(self, outer_class_fixture):
+        pass
+
+    class TestNested:
+        @pytest.fixture
+        def nested_class_fixture(self):
+            return "nested"
+
+        def test_uses_nested(self, nested_class_fixture):
+            pass
+
+        def test_uses_both(self, outer_class_fixture, nested_class_fixture):
+            pass
+"#;
+    let file_path = PathBuf::from("/tmp/test/test_fixture_in_nested.py");
+    db.analyze_file(file_path.clone(), content);
+
+    // Both class-level fixtures should be detected
+    assert!(
+        db.definitions.contains_key("outer_class_fixture"),
+        "Fixture in outer class should be detected"
+    );
+    assert!(
+        db.definitions.contains_key("nested_class_fixture"),
+        "Fixture in nested class should be detected"
+    );
+
+    let usages = db.usages.get(&file_path).unwrap();
+
+    // Check usages
+    let outer_usages: Vec<_> = usages
+        .iter()
+        .filter(|u| u.name == "outer_class_fixture")
+        .collect();
+    assert_eq!(
+        outer_usages.len(),
+        2,
+        "outer_class_fixture should be used twice"
+    );
+
+    let nested_usages: Vec<_> = usages
+        .iter()
+        .filter(|u| u.name == "nested_class_fixture")
+        .collect();
+    assert_eq!(
+        nested_usages.len(),
+        2,
+        "nested_class_fixture should be used twice"
+    );
+}
+
+#[test]
 fn test_fixture_defined_in_class() {
     let db = FixtureDatabase::new();
 
@@ -3479,6 +3664,152 @@ def complex_fixture():
     // Should detect yield fixtures with exception handling
     assert!(db.definitions.contains_key("resource_with_cleanup"));
     assert!(db.definitions.contains_key("complex_fixture"));
+}
+
+#[test]
+fn test_yield_fixture_basic() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def simple_yield_fixture():
+    """A simple yield fixture with setup and teardown."""
+    # Setup
+    connection = create_connection()
+    yield connection
+    # Teardown
+    connection.close()
+
+@pytest.fixture
+def yield_with_value():
+    yield 42
+
+@pytest.fixture
+def yield_none():
+    yield
+"#;
+    let file_path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(file_path.clone(), content);
+
+    // All yield fixtures should be detected
+    assert!(
+        db.definitions.contains_key("simple_yield_fixture"),
+        "Simple yield fixture should be detected"
+    );
+    assert!(
+        db.definitions.contains_key("yield_with_value"),
+        "Yield with value should be detected"
+    );
+    assert!(
+        db.definitions.contains_key("yield_none"),
+        "Yield None should be detected"
+    );
+
+    // Check docstring extraction works for yield fixtures
+    let simple = db.definitions.get("simple_yield_fixture").unwrap();
+    assert!(
+        simple[0].docstring.is_some(),
+        "Docstring should be extracted from yield fixture"
+    );
+}
+
+#[test]
+fn test_yield_fixture_usage_in_test() {
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def db_session():
+    session = create_session()
+    yield session
+    session.rollback()
+    session.close()
+"#;
+
+    let test_content = r#"
+def test_with_db(db_session):
+    db_session.query("SELECT 1")
+"#;
+
+    let conftest_path = PathBuf::from("/tmp/test_yield/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_yield/test_db.py");
+
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Yield fixture should be found via go-to-definition
+    let definition = db.find_fixture_definition(&test_path, 1, 18);
+    assert!(definition.is_some(), "Should find yield fixture definition");
+    let def = definition.unwrap();
+    assert_eq!(def.name, "db_session");
+    assert_eq!(def.file_path, conftest_path);
+}
+
+#[test]
+fn test_yield_fixture_with_context_manager() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+from contextlib import contextmanager
+
+@pytest.fixture
+def managed_resource():
+    with open("file.txt") as f:
+        yield f
+
+@pytest.fixture
+def nested_context():
+    with lock:
+        with connection:
+            yield connection
+"#;
+    let file_path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(file_path.clone(), content);
+
+    assert!(
+        db.definitions.contains_key("managed_resource"),
+        "Yield fixture with context manager should be detected"
+    );
+    assert!(
+        db.definitions.contains_key("nested_context"),
+        "Yield fixture with nested context should be detected"
+    );
+}
+
+#[test]
+fn test_async_yield_fixture() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+async def async_db():
+    db = await create_async_db()
+    yield db
+    await db.close()
+
+@pytest.fixture
+async def async_client():
+    async with httpx.AsyncClient() as client:
+        yield client
+"#;
+    let file_path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(file_path.clone(), content);
+
+    assert!(
+        db.definitions.contains_key("async_db"),
+        "Async yield fixture should be detected"
+    );
+    assert!(
+        db.definitions.contains_key("async_client"),
+        "Async yield fixture with context manager should be detected"
+    );
 }
 
 #[test]
@@ -4006,6 +4337,123 @@ def fixture_with_both(base, *args, **kwargs):
 }
 
 #[test]
+fn test_variadic_with_fixture_dependencies() {
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def base_fixture():
+    return "base"
+
+@pytest.fixture
+def config_fixture():
+    return {"key": "value"}
+
+@pytest.fixture
+def combined_fixture(base_fixture, config_fixture, *args, **kwargs):
+    """Fixture that depends on other fixtures and also accepts variadic args."""
+    return {
+        "base": base_fixture,
+        "config": config_fixture,
+        "extra_args": args,
+        "extra_kwargs": kwargs,
+    }
+"#;
+
+    let conftest_path = PathBuf::from("/tmp/test_variadic/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // All fixtures should be detected
+    assert!(db.definitions.contains_key("base_fixture"));
+    assert!(db.definitions.contains_key("config_fixture"));
+    assert!(db.definitions.contains_key("combined_fixture"));
+
+    // Fixture dependencies should be tracked
+    let usages = db.usages.get(&conftest_path).unwrap();
+    assert!(
+        usages.iter().any(|u| u.name == "base_fixture"),
+        "base_fixture should be tracked as dependency"
+    );
+    assert!(
+        usages.iter().any(|u| u.name == "config_fixture"),
+        "config_fixture should be tracked as dependency"
+    );
+}
+
+#[test]
+fn test_variadic_in_test_function() {
+    let db = FixtureDatabase::new();
+
+    let test_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 42
+
+def test_with_variadic(my_fixture, *args, **kwargs):
+    # Note: This is unusual but valid Python
+    assert my_fixture == 42
+"#;
+
+    let test_path = PathBuf::from("/tmp/test_variadic/test_func.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Fixture should be detected
+    assert!(db.definitions.contains_key("my_fixture"));
+
+    // Usage should be tracked
+    let usages = db.usages.get(&test_path).unwrap();
+    assert!(
+        usages.iter().any(|u| u.name == "my_fixture"),
+        "my_fixture should be tracked as usage in test"
+    );
+
+    // *args and **kwargs should NOT be tracked as fixture usages
+    assert!(
+        !usages.iter().any(|u| u.name == "args"),
+        "args should not be tracked as fixture"
+    );
+    assert!(
+        !usages.iter().any(|u| u.name == "kwargs"),
+        "kwargs should not be tracked as fixture"
+    );
+}
+
+#[test]
+fn test_keyword_only_with_variadic() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def dep_fixture():
+    return "dep"
+
+@pytest.fixture
+def complex_fixture(*args, kwonly_dep: str, **kwargs):
+    # kwonly_dep is a keyword-only parameter that could be a fixture
+    return kwonly_dep
+"#;
+
+    let file_path = PathBuf::from("/tmp/test_variadic/conftest.py");
+    db.analyze_file(file_path.clone(), content);
+
+    assert!(db.definitions.contains_key("dep_fixture"));
+    assert!(db.definitions.contains_key("complex_fixture"));
+
+    // kwonly_dep should be tracked as a potential fixture dependency
+    let usages = db.usages.get(&file_path).unwrap();
+    assert!(
+        usages.iter().any(|u| u.name == "kwonly_dep"),
+        "Keyword-only parameter should be tracked as potential fixture dependency"
+    );
+}
+
+#[test]
 fn test_class_based_fixtures() {
     let db = FixtureDatabase::new();
 
@@ -4071,27 +4519,133 @@ import pytest
 
 @pytest.fixture
 def 測試_fixture():
+    """Chinese/Japanese test fixture"""
     return "test"
 
 @pytest.fixture
 def фикстура():
+    """Russian fixture"""
     return "fixture"
 
 @pytest.fixture
 def fixture_émoji():
+    """French accent fixture"""
     return "emoji"
+
+@pytest.fixture
+def données_utilisateur():
+    """French: user data"""
+    return {"name": "Jean"}
+
+@pytest.fixture
+def δεδομένα_χρήστη():
+    """Greek: user data"""
+    return {"name": "Γιώργος"}
 "#;
     let file_path = PathBuf::from("/tmp/test/conftest.py");
     db.analyze_file(file_path.clone(), content);
 
-    // Python 3 supports Unicode identifiers
-    if db.definitions.contains_key("測試_fixture") {
-        assert!(db.definitions.contains_key("фикстура"));
-        assert!(db.definitions.contains_key("fixture_émoji"));
-        println!("Unicode fixture names fully supported");
-    } else {
-        println!("LIMITATION: Unicode identifiers not fully supported by parser");
-    }
+    // Python 3 supports Unicode identifiers (PEP 3131)
+    // All fixtures should be detected
+    assert!(
+        db.definitions.contains_key("測試_fixture"),
+        "Chinese/Japanese fixture should be detected"
+    );
+    assert!(
+        db.definitions.contains_key("фикстура"),
+        "Russian fixture should be detected"
+    );
+    assert!(
+        db.definitions.contains_key("fixture_émoji"),
+        "French accent fixture should be detected"
+    );
+    assert!(
+        db.definitions.contains_key("données_utilisateur"),
+        "French fixture should be detected"
+    );
+    assert!(
+        db.definitions.contains_key("δεδομένα_χρήστη"),
+        "Greek fixture should be detected"
+    );
+
+    // Check that docstrings are correctly extracted
+    let russian = db.definitions.get("фикстура").unwrap();
+    assert!(
+        russian[0].docstring.as_ref().unwrap().contains("Russian"),
+        "Russian docstring should be extracted"
+    );
+}
+
+#[test]
+fn test_unicode_fixture_usage_detection() {
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def données():
+    return 42
+"#;
+
+    let test_content = r#"
+def test_unicode_usage(données):
+    assert données == 42
+"#;
+
+    let conftest_path = PathBuf::from("/tmp/test_unicode/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_unicode/test_example.py");
+
+    db.analyze_file(conftest_path, conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Check that the Unicode fixture usage was detected
+    let usages = db.usages.get(&test_path).unwrap();
+    assert!(
+        usages.iter().any(|u| u.name == "données"),
+        "Unicode fixture usage should be detected"
+    );
+}
+
+#[test]
+fn test_unicode_fixture_goto_definition() {
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def données():
+    return 42
+"#;
+
+    let test_content = r#"
+def test_unicode(données):
+    pass
+"#;
+
+    let conftest_path = PathBuf::from("/tmp/test_unicode/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_unicode/test_example.py");
+
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    // The fixture "données" starts at character position 17 on line 2 (1-indexed)
+    // In 0-indexed LSP coords: line 1, character 17
+    // "def test_unicode(données):"
+    //  0         1         2
+    //  0123456789012345678901234
+    //                  ^--- position 17
+
+    let definition = db.find_fixture_definition(&test_path, 1, 17);
+
+    assert!(
+        definition.is_some(),
+        "Definition should be found for Unicode fixture"
+    );
+    let def = definition.unwrap();
+    assert_eq!(def.name, "données");
+    assert_eq!(def.file_path, conftest_path);
 }
 
 #[test]
@@ -4890,6 +5444,21 @@ def my_fixture():
 }
 
 // MARK: Workspace Scanning Edge Cases
+
+#[test]
+fn test_scan_workspace_nonexistent_path() {
+    let db = FixtureDatabase::new();
+
+    // Try to scan a path that doesn't exist
+    let nonexistent_path = std::path::PathBuf::from("/nonexistent/path/that/should/not/exist");
+
+    // Scan should complete without panicking or errors
+    db.scan_workspace(&nonexistent_path);
+
+    // Should have no definitions
+    assert!(db.definitions.is_empty());
+    assert!(db.usages.is_empty());
+}
 
 #[test]
 fn test_scan_workspace_with_no_python_files() {
@@ -7004,5 +7573,420 @@ def deep_node_fix():
     assert!(
         !db.definitions.contains_key("deep_node_fix"),
         "deep_node_fix should NOT be found (nested node_modules should be skipped)"
+    );
+}
+
+// =============================================================================
+// pytest.mark.usefixtures tests
+// =============================================================================
+
+#[test]
+fn test_usefixtures_decorator_on_function() {
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def db_connection():
+    return "connection"
+
+@pytest.fixture
+def auth_user():
+    return "user"
+"#;
+
+    let test_content = r#"
+import pytest
+
+@pytest.mark.usefixtures("db_connection")
+def test_with_usefixtures():
+    pass
+
+@pytest.mark.usefixtures("db_connection", "auth_user")
+def test_with_multiple_usefixtures():
+    pass
+"#;
+
+    let conftest_path = PathBuf::from("/tmp/test_usefixtures/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_usefixtures/test_example.py");
+
+    db.analyze_file(conftest_path, conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Check that usefixtures usages were detected
+    let usages = db.usages.get(&test_path).unwrap();
+
+    assert!(
+        usages.iter().any(|u| u.name == "db_connection"),
+        "db_connection should be detected as usage from usefixtures"
+    );
+    assert!(
+        usages.iter().any(|u| u.name == "auth_user"),
+        "auth_user should be detected as usage from usefixtures"
+    );
+
+    // Count occurrences - db_connection should appear twice (once for each test)
+    let db_conn_count = usages.iter().filter(|u| u.name == "db_connection").count();
+    assert_eq!(
+        db_conn_count, 2,
+        "db_connection should be used twice (once in each test)"
+    );
+}
+
+#[test]
+fn test_usefixtures_decorator_on_class() {
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def setup_database():
+    return "db"
+"#;
+
+    let test_content = r#"
+import pytest
+
+@pytest.mark.usefixtures("setup_database")
+class TestWithSetup:
+    def test_first(self):
+        pass
+
+    def test_second(self):
+        pass
+"#;
+
+    let conftest_path = PathBuf::from("/tmp/test_usefixtures/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_usefixtures/test_class.py");
+
+    db.analyze_file(conftest_path, conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Check that usefixtures usage on class was detected
+    let usages = db.usages.get(&test_path).unwrap();
+
+    assert!(
+        usages.iter().any(|u| u.name == "setup_database"),
+        "setup_database should be detected as usage from class usefixtures"
+    );
+}
+
+#[test]
+fn test_usefixtures_goto_definition() {
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 42
+"#;
+
+    let test_content = r#"
+import pytest
+
+@pytest.mark.usefixtures("my_fixture")
+def test_something():
+    pass
+"#;
+
+    let conftest_path = PathBuf::from("/tmp/test_usefixtures/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_usefixtures/test_goto.py");
+
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    // The fixture "my_fixture" in @pytest.mark.usefixtures("my_fixture") is on line 4 (1-indexed)
+    // In 0-indexed LSP coords: line 3
+    // Position is within the string "my_fixture"
+    // @pytest.mark.usefixtures("my_fixture")
+    //                          ^--- somewhere in the middle of the fixture name
+
+    let definition = db.find_fixture_definition(&test_path, 3, 27);
+
+    assert!(
+        definition.is_some(),
+        "Definition should be found for fixture used in usefixtures"
+    );
+    let def = definition.unwrap();
+    assert_eq!(def.name, "my_fixture");
+    assert_eq!(def.file_path, conftest_path);
+}
+
+#[test]
+fn test_usefixtures_affects_unused_detection() {
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def used_via_usefixtures():
+    return "used"
+
+@pytest.fixture
+def actually_unused():
+    return "unused"
+"#;
+
+    let test_content = r#"
+import pytest
+
+@pytest.mark.usefixtures("used_via_usefixtures")
+def test_something():
+    pass
+"#;
+
+    let conftest_path = PathBuf::from("/tmp/test_usefixtures/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_usefixtures/test_unused.py");
+
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Get all usages across all files
+    let mut all_usages: Vec<String> = Vec::new();
+    for entry in db.usages.iter() {
+        for usage in entry.value().iter() {
+            all_usages.push(usage.name.clone());
+        }
+    }
+
+    // used_via_usefixtures should be in usages (not unused)
+    assert!(
+        all_usages.contains(&"used_via_usefixtures".to_string()),
+        "Fixture used via usefixtures should be tracked as used"
+    );
+}
+
+#[test]
+fn test_usefixtures_with_mark_import() {
+    let db = FixtureDatabase::new();
+
+    let test_content = r#"
+from pytest import mark, fixture
+
+@fixture
+def my_fix():
+    return 1
+
+@mark.usefixtures("my_fix")
+def test_with_mark():
+    pass
+"#;
+
+    let test_path = PathBuf::from("/tmp/test_usefixtures/test_mark.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Check that both the fixture definition and usage were detected
+    assert!(
+        db.definitions.contains_key("my_fix"),
+        "my_fix fixture should be detected"
+    );
+
+    let usages = db.usages.get(&test_path).unwrap();
+    assert!(
+        usages.iter().any(|u| u.name == "my_fix"),
+        "my_fix should be detected as usage from mark.usefixtures"
+    );
+}
+
+// =============================================================================
+// pytest_plugins tests (known limitation documentation)
+// =============================================================================
+
+/// Test that pytest_plugins is recognized at the module level
+/// Note: Full resolution of pytest_plugins paths is not implemented
+/// This test documents the current behavior
+#[test]
+fn test_pytest_plugins_declaration_detected() {
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+# Declare external fixture modules
+pytest_plugins = ["myapp.fixtures", "other.fixtures"]
+
+import pytest
+
+@pytest.fixture
+def local_fixture():
+    return "local"
+"#;
+
+    let conftest_path = PathBuf::from("/tmp/test_plugins/conftest.py");
+    db.analyze_file(conftest_path, conftest_content);
+
+    // Local fixtures should still be detected
+    assert!(
+        db.definitions.contains_key("local_fixture"),
+        "local_fixture should be detected even with pytest_plugins"
+    );
+
+    // Note: We don't currently resolve the pytest_plugins modules
+    // This is a known limitation - fixtures from those modules won't be found
+    // unless the modules are explicitly scanned as part of the workspace
+}
+
+/// Test that pytest_plugins tuple syntax is also recognized
+#[test]
+fn test_pytest_plugins_tuple_syntax() {
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+pytest_plugins = ("plugin1", "plugin2")
+
+import pytest
+
+@pytest.fixture
+def another_fixture():
+    return "value"
+"#;
+
+    let conftest_path = PathBuf::from("/tmp/test_plugins/conftest.py");
+    db.analyze_file(conftest_path, conftest_content);
+
+    // Fixture detection should work normally
+    assert!(
+        db.definitions.contains_key("another_fixture"),
+        "another_fixture should be detected"
+    );
+}
+
+// =============================================================================
+// pytest.mark.parametrize with indirect tests
+// =============================================================================
+
+#[test]
+fn test_parametrize_indirect_true() {
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture(request):
+    return request.param * 2
+"#;
+
+    let test_content = r#"
+import pytest
+
+@pytest.mark.parametrize("my_fixture", [1, 2, 3], indirect=True)
+def test_with_indirect(my_fixture):
+    assert my_fixture in [2, 4, 6]
+"#;
+
+    let conftest_path = PathBuf::from("/tmp/test_indirect/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_indirect/test_indirect.py");
+
+    db.analyze_file(conftest_path, conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    // my_fixture should be detected as usage both from the parameter and from indirect
+    let usages = db.usages.get(&test_path).unwrap();
+    let fixture_usages: Vec<_> = usages.iter().filter(|u| u.name == "my_fixture").collect();
+
+    // Should have 2 usages: one from indirect decorator, one from function parameter
+    assert!(
+        fixture_usages.len() >= 2,
+        "my_fixture should be used at least twice (indirect + parameter)"
+    );
+}
+
+#[test]
+fn test_parametrize_indirect_multiple_fixtures() {
+    let db = FixtureDatabase::new();
+
+    let test_content = r#"
+import pytest
+
+@pytest.fixture
+def fixture_a(request):
+    return request.param
+
+@pytest.fixture
+def fixture_b(request):
+    return request.param
+
+@pytest.mark.parametrize("fixture_a,fixture_b", [(1, 2), (3, 4)], indirect=True)
+def test_multiple_indirect(fixture_a, fixture_b):
+    pass
+"#;
+
+    let test_path = PathBuf::from("/tmp/test_indirect/test_multiple.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    let usages = db.usages.get(&test_path).unwrap();
+
+    // Both fixtures should be detected as indirect usages
+    assert!(
+        usages.iter().any(|u| u.name == "fixture_a"),
+        "fixture_a should be detected as indirect usage"
+    );
+    assert!(
+        usages.iter().any(|u| u.name == "fixture_b"),
+        "fixture_b should be detected as indirect usage"
+    );
+}
+
+#[test]
+fn test_parametrize_indirect_list_selective() {
+    let db = FixtureDatabase::new();
+
+    let test_content = r#"
+import pytest
+
+@pytest.fixture
+def indirect_fix(request):
+    return request.param
+
+@pytest.fixture
+def direct_fix():
+    return "direct"
+
+@pytest.mark.parametrize("indirect_fix,direct_fix", [(1, 2)], indirect=["indirect_fix"])
+def test_selective_indirect(indirect_fix, direct_fix):
+    pass
+"#;
+
+    let test_path = PathBuf::from("/tmp/test_indirect/test_selective.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    let usages = db.usages.get(&test_path).unwrap();
+
+    // indirect_fix should have an additional usage from the indirect list
+    let indirect_usages: Vec<_> = usages.iter().filter(|u| u.name == "indirect_fix").collect();
+    assert!(
+        indirect_usages.len() >= 2,
+        "indirect_fix should have at least 2 usages (from indirect list + parameter)"
+    );
+}
+
+#[test]
+fn test_parametrize_without_indirect() {
+    let db = FixtureDatabase::new();
+
+    let test_content = r#"
+import pytest
+
+@pytest.mark.parametrize("value", [1, 2, 3])
+def test_normal_parametrize(value):
+    pass
+"#;
+
+    let test_path = PathBuf::from("/tmp/test_indirect/test_normal.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // value should be detected as a parameter usage, but not as an indirect fixture
+    let usages = db.usages.get(&test_path).unwrap();
+    let value_usages: Vec<_> = usages.iter().filter(|u| u.name == "value").collect();
+
+    // Should only have 1 usage from the function parameter
+    assert_eq!(
+        value_usages.len(),
+        1,
+        "value should only have 1 usage (from parameter, not indirect)"
     );
 }

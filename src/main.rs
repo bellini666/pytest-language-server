@@ -7,11 +7,12 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use tracing::{debug, error, info, warn};
 
-#[derive(Debug)]
 struct Backend {
     client: Client,
     fixture_db: Arc<FixtureDatabase>,
     workspace_root: Arc<tokio::sync::RwLock<Option<PathBuf>>>,
+    /// Handle to the background workspace scan task, used for cancellation on shutdown
+    scan_task: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 #[tower_lsp::async_trait]
@@ -34,7 +35,7 @@ impl LanguageServer for Backend {
 
                 // Spawn workspace scanning in a background task
                 // This allows the LSP to respond immediately while scanning continues
-                tokio::spawn(async move {
+                let scan_handle = tokio::spawn(async move {
                     client
                         .log_message(
                             MessageType::INFO,
@@ -66,6 +67,9 @@ impl LanguageServer for Backend {
                         }
                     }
                 });
+
+                // Store the handle so we can cancel it on shutdown
+                *self.scan_task.lock().await = Some(scan_handle);
             }
         } else {
             warn!("No root URI provided in initialize - workspace scanning disabled");
@@ -700,6 +704,31 @@ impl LanguageServer for Backend {
     }
 
     async fn shutdown(&self) -> Result<()> {
+        info!("Shutdown request received");
+
+        // Cancel the background scan task if it's still running
+        if let Some(handle) = self.scan_task.lock().await.take() {
+            info!("Aborting background workspace scan task");
+            handle.abort();
+            // Wait briefly for the task to finish (don't block shutdown indefinitely)
+            match tokio::time::timeout(std::time::Duration::from_millis(100), handle).await {
+                Ok(Ok(_)) => info!("Background scan task already completed"),
+                Ok(Err(_)) => info!("Background scan task aborted"),
+                Err(_) => info!("Background scan task abort timed out, continuing shutdown"),
+            }
+        }
+
+        info!("Shutdown complete");
+
+        // tower-lsp doesn't always exit cleanly after the exit notification
+        // (serve() may block on stdin/stdout), so we spawn a task to force exit
+        // after a brief delay to allow the shutdown response to be sent
+        tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            info!("Forcing process exit");
+            std::process::exit(0);
+        });
+
         Ok(())
     }
 }
@@ -909,8 +938,10 @@ async fn start_lsp_server() {
         client,
         fixture_db: fixture_db.clone(),
         workspace_root: Arc::new(tokio::sync::RwLock::new(None)),
+        scan_task: Arc::new(tokio::sync::Mutex::new(None)),
     });
 
     info!("LSP server ready");
     Server::new(stdin, stdout, socket).serve(service).await;
+    // Note: serve() typically won't return - process exit is handled by shutdown()
 }

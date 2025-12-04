@@ -712,7 +712,8 @@ impl LanguageServer for Backend {
             handle.abort();
             // Wait briefly for the task to finish (don't block shutdown indefinitely)
             match tokio::time::timeout(std::time::Duration::from_millis(100), handle).await {
-                Ok(_) => info!("Background scan task finished"),
+                Ok(Ok(_)) => info!("Background scan task already completed"),
+                Ok(Err(_)) => info!("Background scan task aborted"),
                 Err(_) => info!("Background scan task abort timed out, continuing shutdown"),
             }
         }
@@ -942,10 +943,5 @@ async fn start_lsp_server() {
 
     info!("LSP server ready");
     Server::new(stdin, stdout, socket).serve(service).await;
-
-    // Explicitly exit the process after the server stops
-    // This is necessary because the tokio runtime may have pending tasks
-    // or blocked I/O that prevents clean shutdown
-    info!("LSP server stopped, exiting process");
-    std::process::exit(0);
+    // Note: serve() typically won't return - process exit is handled by shutdown()
 }

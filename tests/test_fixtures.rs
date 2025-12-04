@@ -2396,11 +2396,12 @@ def test_b(module_specific, shared):
 
 #[test]
 fn test_fixture_resolution_multiple_unrelated_branches_is_deterministic() {
-    // This is the key test: when a fixture is defined in multiple unrelated branches,
-    // the resolution should be deterministic (not random based on DashMap iteration)
+    // Issue #23 fix: When a fixture is defined in multiple unrelated branches,
+    // and a test file is NOT in any of their hierarchies, the fixture should NOT
+    // be accessible (returns None, not a random choice).
     let db = FixtureDatabase::new();
 
-    // Three unrelated project branches
+    // Three unrelated project branches - each has their own conftest.py
     let branch_a_content = r#"
 import pytest
 
@@ -2431,7 +2432,7 @@ def common_fixture():
     let branch_c_conftest = PathBuf::from("/tmp/projects/project_c/conftest.py");
     db.analyze_file(branch_c_conftest.clone(), branch_c_content);
 
-    // Test in yet another unrelated location
+    // Test in yet another unrelated location - NOT in any project's hierarchy
     let test_content = r#"
 def test_something(common_fixture):
     assert common_fixture is not None
@@ -2439,23 +2440,34 @@ def test_something(common_fixture):
     let test_path = PathBuf::from("/tmp/unrelated/test_foo.py");
     db.analyze_file(test_path.clone(), test_content);
 
-    // Run resolution multiple times - should always return the same result
-    let mut results = Vec::new();
-    for _ in 0..20 {
-        let result = db.find_fixture_definition(&test_path, 1, 19);
-        assert!(result.is_some(), "Should find a fixture");
-        results.push(result.unwrap().file_path.clone());
-    }
+    // The fixture is NOT accessible from this location because:
+    // 1. It's not in the same file
+    // 2. None of the conftest.py files are in parent directories of test_path
+    // 3. It's not in site-packages
+    let result = db.find_fixture_definition(&test_path, 1, 19);
+    assert!(
+        result.is_none(),
+        "Fixture should NOT be found - test file is not in any conftest hierarchy"
+    );
 
-    // All results should be identical (deterministic)
-    let first_result = &results[0];
-    for (i, result) in results.iter().enumerate() {
-        assert_eq!(
-            result, first_result,
-            "Iteration {}: fixture resolution should be deterministic, expected {:?} but got {:?}",
-            i, first_result, result
-        );
-    }
+    // However, a test WITHIN project_a should find project_a's fixture
+    let test_in_a_content = r#"
+def test_in_project_a(common_fixture):
+    pass
+"#;
+    let test_in_a_path = PathBuf::from("/tmp/projects/project_a/test_example.py");
+    db.analyze_file(test_in_a_path.clone(), test_in_a_content);
+
+    let result_in_a = db.find_fixture_definition(&test_in_a_path, 1, 22);
+    assert!(
+        result_in_a.is_some(),
+        "Fixture should be found in project_a"
+    );
+    assert_eq!(
+        result_in_a.unwrap().file_path,
+        branch_a_conftest,
+        "Should resolve to project_a's conftest.py"
+    );
 }
 
 #[test]
@@ -7989,4 +8001,184 @@ def test_normal_parametrize(value):
         1,
         "value should only have 1 usage (from parameter, not indirect)"
     );
+}
+
+// MARK: Scoping Tests - Issue #23
+
+#[test]
+fn test_fixture_scoping_sibling_files() {
+    // Test case from issue #23:
+    // A fixture defined in one test file should NOT be counted as "used"
+    // when a sibling test file uses a parameter with the same name.
+    let db = FixtureDatabase::new();
+
+    // File 1: defines a fixture
+    let test1_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return "example"
+"#;
+    let test1_path = PathBuf::from("/tmp/test_scope/test_example_2.py");
+    db.analyze_file(test1_path.clone(), test1_content);
+
+    // File 2: uses a parameter with the same name, but the fixture is NOT in scope
+    let test2_content = r#"
+def test_example_fixture(my_fixture):
+    assert my_fixture == "example"
+"#;
+    let test2_path = PathBuf::from("/tmp/test_scope/test_example.py");
+    db.analyze_file(test2_path.clone(), test2_content);
+
+    // Verify the fixture is defined
+    let fixture_defs = db.definitions.get("my_fixture").unwrap();
+    assert_eq!(fixture_defs.len(), 1);
+    let fixture_def = &fixture_defs[0];
+    assert_eq!(fixture_def.file_path, test1_path);
+
+    // The key assertion: find_references_for_definition should NOT include
+    // the usage from test_example.py because the fixture is not in scope there
+    let refs = db.find_references_for_definition(fixture_def);
+    assert_eq!(
+        refs.len(),
+        0,
+        "Fixture defined in test_example_2.py should have 0 references \
+         because test_example.py cannot access it (not in conftest.py hierarchy)"
+    );
+}
+
+#[test]
+fn test_fixture_scoping_with_conftest() {
+    // When a fixture IS in conftest.py, sibling files CAN use it
+    let db = FixtureDatabase::new();
+
+    // conftest.py defines a fixture
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def shared_fixture():
+    return "shared"
+"#;
+    let conftest_path = PathBuf::from("/tmp/test_scope2/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // Test file uses the fixture
+    let test_content = r#"
+def test_uses_shared(shared_fixture):
+    assert shared_fixture == "shared"
+"#;
+    let test_path = PathBuf::from("/tmp/test_scope2/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // The fixture from conftest.py should be accessible
+    let fixture_defs = db.definitions.get("shared_fixture").unwrap();
+    let fixture_def = &fixture_defs[0];
+
+    let refs = db.find_references_for_definition(fixture_def);
+    assert_eq!(
+        refs.len(),
+        1,
+        "Fixture in conftest.py should have 1 reference from sibling test file"
+    );
+    assert_eq!(refs[0].file_path, test_path);
+}
+
+#[test]
+fn test_fixture_scoping_same_file() {
+    // Fixture defined in the same file should be usable
+    let db = FixtureDatabase::new();
+
+    let test_content = r#"
+import pytest
+
+@pytest.fixture
+def local_fixture():
+    return "local"
+
+def test_uses_local(local_fixture):
+    assert local_fixture == "local"
+"#;
+    let test_path = PathBuf::from("/tmp/test_scope3/test_local.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    let fixture_defs = db.definitions.get("local_fixture").unwrap();
+    let fixture_def = &fixture_defs[0];
+
+    let refs = db.find_references_for_definition(fixture_def);
+    assert_eq!(
+        refs.len(),
+        1,
+        "Fixture defined in same file should have 1 reference"
+    );
+    assert_eq!(refs[0].file_path, test_path);
+}
+
+#[test]
+fn test_get_scoped_usage_count() {
+    // Test the new get_scoped_usage_count method
+    let db = FixtureDatabase::new();
+
+    // Setup: conftest.py with a fixture
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def global_fixture():
+    return "global"
+"#;
+    let conftest_path = PathBuf::from("/tmp/test_scope4/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // File 1: defines a local fixture with the same name (overrides)
+    let test1_content = r#"
+import pytest
+
+@pytest.fixture
+def global_fixture():
+    return "local override"
+
+def test_uses_local(global_fixture):
+    pass
+"#;
+    let test1_path = PathBuf::from("/tmp/test_scope4/subdir/test_override.py");
+    db.analyze_file(test1_path.clone(), test1_content);
+
+    // File 2: uses the global fixture (no override)
+    let test2_content = r#"
+def test_uses_global(global_fixture):
+    pass
+"#;
+    let test2_path = PathBuf::from("/tmp/test_scope4/test_global.py");
+    db.analyze_file(test2_path.clone(), test2_content);
+
+    // The conftest fixture should only be used by test_global.py (1 reference)
+    let conftest_defs = db.definitions.get("global_fixture").unwrap();
+    let conftest_def = conftest_defs
+        .iter()
+        .find(|d| d.file_path == conftest_path)
+        .unwrap();
+
+    let conftest_refs = db.find_references_for_definition(conftest_def);
+    assert_eq!(
+        conftest_refs.len(),
+        1,
+        "Conftest fixture should have 1 reference (from test_global.py)"
+    );
+    assert_eq!(conftest_refs[0].file_path, test2_path);
+
+    // The local override fixture should be used by test_override.py (1 reference)
+    let local_def = conftest_defs
+        .iter()
+        .find(|d| d.file_path == test1_path)
+        .unwrap();
+
+    let local_refs = db.find_references_for_definition(local_def);
+    assert_eq!(
+        local_refs.len(),
+        1,
+        "Local override fixture should have 1 reference"
+    );
+    assert_eq!(local_refs[0].file_path, test1_path);
 }

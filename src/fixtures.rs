@@ -2349,21 +2349,14 @@ impl FixtureDatabase {
             }
         }
 
-        // Priority 4: If still no match, this means the fixture is defined somewhere
-        // unrelated to the current file's hierarchy. This is unusual but can happen
-        // when fixtures are defined in unrelated test directories.
-        // Return the first definition sorted by path for determinism.
-        warn!(
-            "No fixture {} found following priority rules (same file, conftest hierarchy, third-party)",
-            fixture_name
+        // No fixture found in scope - this is intentional, not a fallback.
+        // A fixture must be in: same file, conftest.py hierarchy, or site-packages
+        // to be accessible from the requesting file.
+        debug!(
+            "No fixture {} found in scope for {:?} (same file, conftest hierarchy, or third-party)",
+            fixture_name, file_path
         );
-        warn!(
-            "Falling back to first definition by path (deterministic fallback for unrelated fixtures)"
-        );
-
-        let mut defs: Vec<_> = definitions.iter().cloned().collect();
-        defs.sort_by(|a, b| a.file_path.cmp(&b.file_path));
-        defs.first().cloned()
+        None
     }
 
     /// Find the closest definition for a fixture, excluding a specific definition
@@ -2465,28 +2458,14 @@ impl FixtureDatabase {
             }
         }
 
-        // Priority 4: Deterministic fallback - return first definition by path (excluding specified)
-        warn!(
-            "No fixture {} found following priority rules (excluding specified)",
-            fixture_name
+        // No fixture found in scope - this is intentional, not a fallback.
+        // A fixture must be in: same file, conftest.py hierarchy, or site-packages
+        // to be accessible from the requesting file.
+        debug!(
+            "No fixture {} found in scope for {:?} (excluding specified definition)",
+            fixture_name, file_path
         );
-        warn!(
-            "Falling back to first definition by path (deterministic fallback for unrelated fixtures)"
-        );
-
-        let mut defs: Vec<_> = definitions
-            .iter()
-            .filter(|def| {
-                if let Some(excluded) = exclude {
-                    def != &excluded
-                } else {
-                    true
-                }
-            })
-            .cloned()
-            .collect();
-        defs.sort_by(|a, b| a.file_path.cmp(&b.file_path));
-        defs.first().cloned()
+        None
     }
 
     /// Find the fixture name at a given position (either definition or usage)
@@ -2903,12 +2882,18 @@ impl FixtureDatabase {
             }
         }
 
-        // Count fixture usages
-        let mut fixture_usage_counts: HashMap<String, usize> = HashMap::new();
-        for entry in self.usages.iter() {
-            let usages = entry.value();
-            for usage in usages {
-                *fixture_usage_counts.entry(usage.name.clone()).or_insert(0) += 1;
+        // Count fixture usages using scoped reference counting (Issue #23 fix)
+        // Each definition's usage count is based on references that actually resolve to it,
+        // not just any usage of the same fixture name globally.
+        // Key: (file_path, fixture_name) -> usage_count
+        let mut definition_usage_counts: HashMap<(PathBuf, String), usize> = HashMap::new();
+
+        for entry in self.definitions.iter() {
+            let fixture_name = entry.key();
+            for def in entry.value().iter() {
+                let refs = self.find_references_for_definition(def);
+                definition_usage_counts
+                    .insert((def.file_path.clone(), fixture_name.clone()), refs.len());
             }
         }
 
@@ -2978,7 +2963,7 @@ impl FixtureDatabase {
                 "",
                 is_last,
                 true, // is_root_level
-                &fixture_usage_counts,
+                &definition_usage_counts,
                 skip_unused,
                 only_unused,
             );
@@ -2995,7 +2980,7 @@ impl FixtureDatabase {
         prefix: &str,
         is_last: bool,
         is_root_level: bool,
-        fixture_usage_counts: &HashMap<String, usize>,
+        definition_usage_counts: &HashMap<(PathBuf, String), usize>,
         skip_unused: bool,
         only_unused: bool,
     ) {
@@ -3018,8 +3003,9 @@ impl FixtureDatabase {
                 let fixture_vec: Vec<_> = fixtures
                     .iter()
                     .filter(|fixture_name| {
-                        let usage_count = fixture_usage_counts
-                            .get(*fixture_name)
+                        // Look up usage count using (file_path, fixture_name) key
+                        let usage_count = definition_usage_counts
+                            .get(&(path.to_path_buf(), (*fixture_name).clone()))
                             .copied()
                             .unwrap_or(0);
                         if only_unused {
@@ -3061,9 +3047,9 @@ impl FixtureDatabase {
                         "├── "
                     };
 
-                    // Get usage count for this fixture
-                    let usage_count = fixture_usage_counts
-                        .get(*fixture_name)
+                    // Get usage count for this specific definition (file_path, fixture_name)
+                    let usage_count = definition_usage_counts
+                        .get(&(path.to_path_buf(), (*fixture_name).clone()))
                         .copied()
                         .unwrap_or(0);
 
@@ -3102,7 +3088,7 @@ impl FixtureDatabase {
                         child,
                         file_fixtures,
                         tree,
-                        fixture_usage_counts,
+                        definition_usage_counts,
                         skip_unused,
                         only_unused,
                     )
@@ -3130,7 +3116,7 @@ impl FixtureDatabase {
                         &new_prefix,
                         is_last_child,
                         false, // is_root_level
-                        fixture_usage_counts,
+                        definition_usage_counts,
                         skip_unused,
                         only_unused,
                     );
@@ -3143,7 +3129,7 @@ impl FixtureDatabase {
         path: &Path,
         file_fixtures: &BTreeMap<PathBuf, BTreeSet<String>>,
         tree: &BTreeMap<PathBuf, Vec<PathBuf>>,
-        fixture_usage_counts: &HashMap<String, usize>,
+        definition_usage_counts: &HashMap<(PathBuf, String), usize>,
         skip_unused: bool,
         only_unused: bool,
     ) -> bool {
@@ -3151,7 +3137,10 @@ impl FixtureDatabase {
             // Check if this file has any fixtures matching the filter
             if let Some(fixtures) = file_fixtures.get(path) {
                 return fixtures.iter().any(|fixture_name| {
-                    let usage_count = fixture_usage_counts.get(fixture_name).copied().unwrap_or(0);
+                    let usage_count = definition_usage_counts
+                        .get(&(path.to_path_buf(), fixture_name.clone()))
+                        .copied()
+                        .unwrap_or(0);
                     if only_unused {
                         usage_count == 0
                     } else if skip_unused {
@@ -3170,7 +3159,7 @@ impl FixtureDatabase {
                         child,
                         file_fixtures,
                         tree,
-                        fixture_usage_counts,
+                        definition_usage_counts,
                         skip_unused,
                         only_unused,
                     )

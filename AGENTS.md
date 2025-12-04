@@ -194,8 +194,8 @@ RUST_LOG=debug cargo test          # Run with debug logging
 
 ### Test Coverage
 
-- **272 total tests passing** (as of latest)
-  - 206 integration tests in `tests/test_fixtures.rs` (FixtureDatabase API)
+- **276 total tests passing** (as of latest)
+  - 210 integration tests in `tests/test_fixtures.rs` (FixtureDatabase API)
   - 34 integration tests in `tests/test_lsp.rs` (LSP protocol handlers)
   - 32 integration tests in `tests/test_e2e.rs` (End-to-end CLI and workspace tests)
 
@@ -479,6 +479,12 @@ Python test discovery patterns:
    - This is a documented limitation of the AST traversal logic
    - Workaround: Define fixtures at module level, use if logic inside function body
 
+10. **Fixture scoping in sibling files** (fixed in v0.11.2)
+    - Fixtures defined in sibling test files are not accessible to each other
+    - Only fixtures in same file, conftest.py hierarchy, or site-packages are resolved
+    - Usage counting now uses per-definition scoped counting instead of global name counting
+    - Fixes incorrect "used X times" counts when multiple files have parameters with same name
+
 ## LSP Spec Compliance
 
 Critical LSP specification requirements:
@@ -588,7 +594,12 @@ The project includes extensions for three major editors/IDEs:
 
 ## Version History
 
-- **v0.9.0** (November 2025) - Current version
+- **v0.11.2** (December 2025) - Current version
+  - Fixed fixture scoping: sibling test files no longer incorrectly share fixtures (#23)
+  - Usage counting now uses per-definition scoped counting instead of global name counting
+  - Added 4 new scoping tests
+  - Test suite: 276 tests (210 unit + 34 LSP + 32 E2E)
+- **v0.9.0** (November 2025)
   - Fixed critical DashMap deadlock in analyze_file
   - Added support for 50+ pytest third-party plugins
   - Comprehensive test suite: 272 tests (206 unit + 34 LSP + 32 E2E)
@@ -603,6 +614,6 @@ The project includes extensions for three major editors/IDEs:
 
 ---
 
-**Last Updated**: v0.9.0 (November 2025)
+**Last Updated**: v0.11.2 (December 2025)
 
 This document should be updated when making significant architectural changes or adding new features.

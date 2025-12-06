@@ -342,44 +342,7 @@ impl FixtureDatabase {
 
     /// Extract the word at a given character position in a line
     pub fn extract_word_at_position(&self, line: &str, character: usize) -> Option<String> {
-        let char_indices: Vec<(usize, char)> = line.char_indices().collect();
-
-        if character >= char_indices.len() {
-            return None;
-        }
-
-        let (_byte_pos, c) = char_indices[character];
-
-        if c.is_alphanumeric() || c == '_' {
-            let mut start_idx = character;
-            while start_idx > 0 {
-                let (_, prev_c) = char_indices[start_idx - 1];
-                if !prev_c.is_alphanumeric() && prev_c != '_' {
-                    break;
-                }
-                start_idx -= 1;
-            }
-
-            let mut end_idx = character + 1;
-            while end_idx < char_indices.len() {
-                let (_, curr_c) = char_indices[end_idx];
-                if !curr_c.is_alphanumeric() && curr_c != '_' {
-                    break;
-                }
-                end_idx += 1;
-            }
-
-            let start_byte = char_indices[start_idx].0;
-            let end_byte = if end_idx < char_indices.len() {
-                char_indices[end_idx].0
-            } else {
-                line.len()
-            };
-
-            return Some(line[start_byte..end_byte].to_string());
-        }
-
-        None
+        super::string_utils::extract_word_at_position(line, character)
     }
 
     /// Find all references (usages) of a fixture by name

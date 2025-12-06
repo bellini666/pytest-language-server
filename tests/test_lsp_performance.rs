@@ -255,6 +255,8 @@ def test_something(root_fixture):
 
     let test_path = subdir.join("test_sub.py");
     std::fs::write(&test_path, test_content).unwrap();
+    // Canonicalize path since database stores canonical paths
+    let test_path = test_path.canonicalize().unwrap();
 
     let db = FixtureDatabase::new();
 
@@ -316,6 +318,8 @@ def test_three(my_fixture):
 "#;
 
     let file_path = create_temp_test_file(&temp_dir, "test_cache.py", content);
+    // Canonicalize path since database stores canonical paths
+    let file_path = file_path.canonicalize().unwrap();
     let db = FixtureDatabase::new();
 
     // First analysis - should populate cache
@@ -323,6 +327,10 @@ def test_three(my_fixture):
 
     // Check that line index cache is populated
     assert!(db.line_index_cache.contains_key(&file_path));
+
+    // Get the cached hash to verify it's content-based
+    let cached_hash = db.line_index_cache.get(&file_path).map(|e| e.value().0);
+    assert!(cached_hash.is_some());
 
     // Perform multiple fixture lookups (simulating hover/goto operations)
     const LOOKUP_COUNT: usize = 10;
@@ -334,8 +342,33 @@ def test_three(my_fixture):
         assert!(result.is_some());
     }
 
-    // Cache should still be there and should speed up operations
+    // Cache should still be there with the same hash (content unchanged)
     assert!(db.line_index_cache.contains_key(&file_path));
+    let new_hash = db.line_index_cache.get(&file_path).map(|e| e.value().0);
+    assert_eq!(cached_hash, new_hash, "Cache hash should remain the same");
+
+    // Re-analyze with same content - cache should be reused (same hash)
+    db.analyze_file(file_path.clone(), content);
+    let reanalyzed_hash = db.line_index_cache.get(&file_path).map(|e| e.value().0);
+    assert_eq!(
+        cached_hash, reanalyzed_hash,
+        "Cache should be reused for same content"
+    );
+
+    // Analyze with different content - cache should be updated (different hash)
+    let new_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 99  # Changed value
+"#;
+    db.analyze_file(file_path.clone(), new_content);
+    let updated_hash = db.line_index_cache.get(&file_path).map(|e| e.value().0);
+    assert_ne!(
+        cached_hash, updated_hash,
+        "Cache should be invalidated for different content"
+    );
 }
 
 #[test]

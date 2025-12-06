@@ -55,8 +55,9 @@ impl FixtureDatabase {
         // Clear previous imports for this file
         self.imports.remove(&file_path);
 
-        // Clear previous line index cache for this file
-        self.line_index_cache.remove(&file_path);
+        // Note: line_index_cache uses content-hash-based invalidation,
+        // so we don't need to clear it here - get_line_index will detect
+        // if the content has changed and rebuild if necessary.
 
         // Clear previous fixture definitions from this file (only when re-analyzing)
         // Skip this during initial workspace scan for performance

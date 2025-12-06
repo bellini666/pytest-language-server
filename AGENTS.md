@@ -35,12 +35,14 @@ src/
 ├── lib.rs              # Library exports (~7 lines)
 ├── main.rs             # LanguageServer trait impl + CLI (~310 lines)
 ├── fixtures/           # Fixture analysis engine
-│   ├── mod.rs          # FixtureDatabase struct + helpers (~92 lines)
+│   ├── mod.rs          # FixtureDatabase struct + helpers (~135 lines)
 │   ├── types.rs        # Data types (~50 lines)
 │   ├── scanner.rs      # Workspace scanning (~320 lines)
-│   ├── analyzer.rs     # AST parsing (~1400 lines)
-│   ├── resolver.rs     # Query methods (~920 lines)
-│   └── cli.rs          # CLI tree printing (~360 lines)
+│   ├── analyzer.rs     # AST parsing (~1100 lines)
+│   ├── resolver.rs     # Query methods (~860 lines)
+│   ├── cli.rs          # CLI tree printing (~360 lines)
+│   ├── decorators.rs   # Decorator analysis utilities (~180 lines)
+│   └── string_utils.rs # String manipulation utilities (~180 lines)
 └── providers/          # LSP protocol handlers
     ├── mod.rs          # Backend struct + helpers (~195 lines)
     ├── definition.rs   # Go-to-definition (~53 lines)
@@ -63,6 +65,8 @@ src/
      - `analyzer.rs` - Python AST parsing and fixture extraction
      - `resolver.rs` - Fixture resolution and query methods
      - `cli.rs` - CLI tree printing for `fixtures list` command
+     - `decorators.rs` - Decorator analysis utilities (pytest.fixture, usefixtures, parametrize)
+     - `string_utils.rs` - String manipulation utilities (docstring formatting, word extraction)
 
 2. **Backend** (`src/providers/`)
    - LSP server implementation using `tower-lsp`
@@ -240,9 +244,11 @@ src/
 
 tests/
 ├── test_fixtures.rs     # FixtureDatabase integration tests (218 tests)
-├── test_lsp.rs         # LSP protocol tests (34 tests)
-├── test_e2e.rs         # End-to-end integration tests (32 tests)
-└── test_project/       # Fixture test files for integration tests
+├── test_lsp.rs          # LSP protocol tests (34 tests)
+├── test_e2e.rs          # End-to-end integration tests (32 tests)
+├── test_decorators.rs   # Decorator utility unit tests (9 tests)
+├── test_lsp_performance.rs # LSP performance/caching tests (7 tests)
+└── test_project/        # Fixture test files for integration tests
     ├── conftest.py
     ├── test_example.py
     ├── test_parent_usage.py
@@ -268,10 +274,13 @@ RUST_LOG=debug cargo test          # Run with debug logging
 
 ### Test Coverage
 
-- **284 total tests passing** (as of latest)
+- **310 total tests passing** (as of latest)
   - 218 integration tests in `tests/test_fixtures.rs` (FixtureDatabase API)
   - 34 integration tests in `tests/test_lsp.rs` (LSP protocol handlers)
   - 32 integration tests in `tests/test_e2e.rs` (End-to-end CLI and workspace tests)
+  - 9 unit tests in `tests/test_decorators.rs` (Decorator utilities)
+  - 7 tests in `tests/test_lsp_performance.rs` (Performance and caching)
+  - 5 embedded unit tests in `src/fixtures/string_utils.rs`
 
 **Key test areas:**
 

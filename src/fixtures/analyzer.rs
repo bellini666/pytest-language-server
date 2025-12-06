@@ -179,20 +179,21 @@ impl FixtureDatabase {
     /// Reduces code duplication across multiple call sites.
     fn record_fixture_usage(
         &self,
-        file_path: &PathBuf,
+        file_path: &Path,
         fixture_name: String,
         line: usize,
         start_char: usize,
         end_char: usize,
     ) {
+        let file_path_buf = file_path.to_path_buf();
         let usage = FixtureUsage {
             name: fixture_name,
-            file_path: file_path.clone(),
+            file_path: file_path_buf.clone(),
             line,
             start_char,
             end_char,
         };
-        self.usages.entry(file_path.clone()).or_default().push(usage);
+        self.usages.entry(file_path_buf).or_default().push(usage);
     }
 
     /// Visit a statement and extract fixture definitions and usages

@@ -175,6 +175,26 @@ impl FixtureDatabase {
             .chain(args.kwonlyargs.iter())
     }
 
+    /// Helper to record a fixture usage in the database.
+    /// Reduces code duplication across multiple call sites.
+    fn record_fixture_usage(
+        &self,
+        file_path: &PathBuf,
+        fixture_name: String,
+        line: usize,
+        start_char: usize,
+        end_char: usize,
+    ) {
+        let usage = FixtureUsage {
+            name: fixture_name,
+            file_path: file_path.clone(),
+            line,
+            start_char,
+            end_char,
+        };
+        self.usages.entry(file_path.clone()).or_default().push(usage);
+    }
+
     /// Visit a statement and extract fixture definitions and usages
     fn visit_stmt(
         &self,
@@ -207,18 +227,13 @@ impl FixtureDatabase {
                         fixture_name, file_path, usage_line, start_char
                     );
 
-                    let usage = FixtureUsage {
-                        name: fixture_name,
-                        file_path: file_path.clone(),
-                        line: usage_line,
-                        start_char: start_char + 1, // Skip opening quote
-                        end_char: end_char - 1,     // Skip closing quote
-                    };
-
-                    self.usages
-                        .entry(file_path.clone())
-                        .or_default()
-                        .push(usage);
+                    self.record_fixture_usage(
+                        file_path,
+                        fixture_name,
+                        usage_line,
+                        start_char + 1,
+                        end_char - 1,
+                    );
                 }
             }
 
@@ -266,18 +281,13 @@ impl FixtureDatabase {
                     fixture_name, file_path, usage_line, start_char
                 );
 
-                let usage = FixtureUsage {
-                    name: fixture_name,
-                    file_path: file_path.clone(),
-                    line: usage_line,
-                    start_char: start_char + 1, // Skip opening quote
-                    end_char: end_char - 1,     // Skip closing quote
-                };
-
-                self.usages
-                    .entry(file_path.clone())
-                    .or_default()
-                    .push(usage);
+                self.record_fixture_usage(
+                    file_path,
+                    fixture_name,
+                    usage_line,
+                    start_char + 1,
+                    end_char - 1,
+                );
             }
         }
 
@@ -296,18 +306,13 @@ impl FixtureDatabase {
                     fixture_name, file_path, usage_line, start_char
                 );
 
-                let usage = FixtureUsage {
-                    name: fixture_name,
-                    file_path: file_path.clone(),
-                    line: usage_line,
-                    start_char: start_char + 1, // Skip opening quote
-                    end_char: end_char - 1,     // Skip closing quote
-                };
-
-                self.usages
-                    .entry(file_path.clone())
-                    .or_default()
-                    .push(usage);
+                self.record_fixture_usage(
+                    file_path,
+                    fixture_name,
+                    usage_line,
+                    start_char + 1,
+                    end_char - 1,
+                );
             }
         }
 
@@ -379,18 +384,13 @@ impl FixtureDatabase {
                         arg_name, file_path, arg_line, start_char
                     );
 
-                    let usage = FixtureUsage {
-                        name: arg_name.to_string(),
-                        file_path: file_path.clone(),
-                        line: arg_line,
+                    self.record_fixture_usage(
+                        file_path,
+                        arg_name.to_string(),
+                        arg_line,
                         start_char,
                         end_char,
-                    };
-
-                    self.usages
-                        .entry(file_path.clone())
-                        .or_default()
-                        .push(usage);
+                    );
                 }
             }
 
@@ -436,18 +436,13 @@ impl FixtureDatabase {
                         arg_name, file_path, arg_line, start_char
                     );
 
-                    let usage = FixtureUsage {
-                        name: arg_name.to_string(),
-                        file_path: file_path.clone(),
-                        line: arg_line,
+                    self.record_fixture_usage(
+                        file_path,
+                        arg_name.to_string(),
+                        arg_line,
                         start_char,
                         end_char,
-                    };
-
-                    self.usages
-                        .entry(file_path.clone())
-                        .or_default()
-                        .push(usage);
+                    );
                 }
             }
 
@@ -516,8 +511,6 @@ impl FixtureDatabase {
         }
     }
 
-    // ============ Decorator checking methods ============
-    // Moved to decorators module for better organization and reusability
 }
 
 // Second impl block for additional analyzer methods

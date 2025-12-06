@@ -606,62 +606,7 @@ impl FixtureDatabase {
     }
 
     fn format_docstring(&self, docstring: String) -> String {
-        let lines: Vec<&str> = docstring.lines().collect();
-
-        if lines.is_empty() {
-            return String::new();
-        }
-
-        let mut start = 0;
-        let mut end = lines.len();
-
-        while start < lines.len() && lines[start].trim().is_empty() {
-            start += 1;
-        }
-
-        while end > start && lines[end - 1].trim().is_empty() {
-            end -= 1;
-        }
-
-        if start >= end {
-            return String::new();
-        }
-
-        let lines = &lines[start..end];
-
-        let mut min_indent = usize::MAX;
-        for (i, line) in lines.iter().enumerate() {
-            if i == 0 && !line.trim().is_empty() {
-                continue;
-            }
-
-            if !line.trim().is_empty() {
-                let indent = line.len() - line.trim_start().len();
-                min_indent = min_indent.min(indent);
-            }
-        }
-
-        if min_indent == usize::MAX {
-            min_indent = 0;
-        }
-
-        let mut result = Vec::new();
-        for (i, line) in lines.iter().enumerate() {
-            if i == 0 {
-                result.push(line.trim().to_string());
-            } else if line.trim().is_empty() {
-                result.push(String::new());
-            } else {
-                let dedented = if line.len() > min_indent {
-                    &line[min_indent..]
-                } else {
-                    line.trim_start()
-                };
-                result.push(dedented.to_string());
-            }
-        }
-
-        result.join("\n")
+        super::string_utils::format_docstring(docstring)
     }
 
     fn extract_return_type(
@@ -793,18 +738,7 @@ impl FixtureDatabase {
         line: usize,
         func_name: &str,
     ) -> (usize, usize) {
-        if let Some(line_content) = content.lines().nth(line.saturating_sub(1)) {
-            if let Some(def_pos) = line_content.find("def ") {
-                let search_start = def_pos + 4;
-                if let Some(name_start) = line_content[search_start..].find(func_name) {
-                    let start_char = search_start + name_start;
-                    let end_char = start_char + func_name.len();
-                    return (start_char, end_char);
-                }
-            }
-        }
-
-        (0, func_name.len())
+        super::string_utils::find_function_name_position(content, line, func_name)
     }
 }
 

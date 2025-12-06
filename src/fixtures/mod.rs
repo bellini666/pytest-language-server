@@ -11,6 +11,7 @@ pub(crate) mod cli;
 pub mod decorators; // Public for testing
 mod resolver;
 mod scanner;
+mod string_utils;
 pub mod types;
 
 #[allow(unused_imports)] // ParamInsertionInfo re-exported for public API via lib.rs

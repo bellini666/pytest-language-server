@@ -1,9 +1,15 @@
+//! LSP protocol tests.
+//!
+//! All tests have a 30-second timeout to prevent hangs from blocking CI.
+
+use ntest::timeout;
 use pytest_language_server::FixtureDefinition;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tower_lsp::lsp_types::*;
 
 #[test]
+#[timeout(30000)]
 fn test_hover_content_with_leading_newline() {
     // Create a mock fixture definition with docstring
     let definition = FixtureDefinition {
@@ -66,6 +72,7 @@ fn test_hover_content_with_leading_newline() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_hover_content_structure_without_docstring() {
     // Create a mock fixture definition without docstring
     let definition = FixtureDefinition {
@@ -106,6 +113,7 @@ fn test_hover_content_structure_without_docstring() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_references_from_parent_definition() {
     use pytest_language_server::FixtureDatabase;
 
@@ -168,6 +176,7 @@ def test_two(cli_runner):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_references_from_child_definition() {
     use pytest_language_server::FixtureDatabase;
 
@@ -227,6 +236,7 @@ def test_two(cli_runner):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_references_from_usage_in_test() {
     use pytest_language_server::FixtureDatabase;
 
@@ -308,6 +318,7 @@ def test_two(cli_runner):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_references_three_level_hierarchy() {
     use pytest_language_server::FixtureDatabase;
 
@@ -403,6 +414,7 @@ def test_db(db):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_references_no_duplicate_definition() {
     // Test that when a fixture definition line also has a usage (self-referencing),
     // we don't list the definition twice in the results
@@ -463,6 +475,7 @@ def test_one(cli_runner):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_comprehensive_fixture_hierarchy_with_cursor_positions() {
     // This test validates all cursor position scenarios with fixture hierarchy
     use pytest_language_server::FixtureDatabase;
@@ -609,6 +622,7 @@ def test_two(cli_runner):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_references_clicking_on_definition_line() {
     // Test that clicking on a fixture definition itself (not parameter, not usage)
     // correctly identifies which definition and returns appropriate references
@@ -731,6 +745,7 @@ def test_two(cli_runner):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_override_in_test_file_not_conftest() {
     // This reproduces the strawberry test_codegen.py scenario:
     // A test file that defines a fixture overriding a parent from conftest
@@ -867,6 +882,7 @@ def test_three(cli_runner):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_references_include_current_position() {
     // LSP Spec requirement: textDocument/references should include the current position
     // where the cursor is, whether it's a usage or a definition
@@ -1020,6 +1036,7 @@ def test_three(cli_runner):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_references_multiline_function_signature() {
     // Test that references work correctly with multiline function signatures
     // This simulates the strawberry test_codegen.py scenario
@@ -1191,6 +1208,7 @@ def test_undeclared():
 // ============================================================================
 
 #[test]
+#[timeout(30000)]
 fn test_position_in_string_literal() {
     use pytest_language_server::FixtureDatabase;
 
@@ -1231,6 +1249,7 @@ def test_something(my_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_position_in_comment() {
     use pytest_language_server::FixtureDatabase;
 
@@ -1268,6 +1287,7 @@ def test_something(my_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_empty_file() {
     use pytest_language_server::FixtureDatabase;
 
@@ -1289,6 +1309,7 @@ fn test_empty_file() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_position_out_of_bounds() {
     use pytest_language_server::FixtureDatabase;
 
@@ -1317,6 +1338,7 @@ def test_something():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_whitespace_only_file() {
     use pytest_language_server::FixtureDatabase;
 
@@ -1340,6 +1362,7 @@ fn test_whitespace_only_file() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_malformed_python_syntax() {
     use pytest_language_server::FixtureDatabase;
 
@@ -1366,6 +1389,7 @@ def incomplete_fixture(
 }
 
 #[test]
+#[timeout(30000)]
 fn test_multi_byte_utf8_characters() {
     use pytest_language_server::FixtureDatabase;
 
@@ -1403,6 +1427,7 @@ def test_unicode(my_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_very_long_line() {
     use pytest_language_server::FixtureDatabase;
 
@@ -1440,6 +1465,7 @@ def test_long(fixture_with_very_long_name_that_exceeds_normal_expectations):
 // ============================================================================
 
 #[test]
+#[timeout(30000)]
 fn test_invalid_utf8_content() {
     use pytest_language_server::FixtureDatabase;
 
@@ -1460,6 +1486,7 @@ fn test_invalid_utf8_content() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_incomplete_function_definition() {
     use pytest_language_server::FixtureDatabase;
 
@@ -1481,6 +1508,7 @@ def incomplete_fixture(
 }
 
 #[test]
+#[timeout(30000)]
 fn test_truncated_file() {
     use pytest_language_server::FixtureDatabase;
 
@@ -1502,6 +1530,7 @@ def truncated_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_mixed_line_endings() {
     use pytest_language_server::FixtureDatabase;
 
@@ -1522,6 +1551,7 @@ fn test_mixed_line_endings() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_file_with_only_comments() {
     use pytest_language_server::FixtureDatabase;
 
@@ -1545,6 +1575,7 @@ fn test_file_with_only_comments() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_deeply_nested_indentation() {
     use pytest_language_server::FixtureDatabase;
 
@@ -1575,6 +1606,7 @@ def deeply_nested():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_tabs_and_spaces_mixed() {
     use pytest_language_server::FixtureDatabase;
 
@@ -1596,6 +1628,7 @@ fn test_tabs_and_spaces_mixed() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_non_ascii_fixture_name() {
     use pytest_language_server::FixtureDatabase;
 
@@ -1629,6 +1662,7 @@ def фикстура():
 // MARK: - Renamed Fixtures Tests (name= parameter)
 
 #[test]
+#[timeout(30000)]
 fn test_goto_definition_renamed_fixture() {
     use pytest_language_server::FixtureDatabase;
 
@@ -1668,6 +1702,7 @@ def test_uses_renamed(db_conn):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_find_references_renamed_fixture() {
     use pytest_language_server::FixtureDatabase;
 
@@ -1705,6 +1740,7 @@ def test_two(client):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_renamed_fixture_with_dependency() {
     use pytest_language_server::FixtureDatabase;
 
@@ -1747,6 +1783,7 @@ def test_example(user, db):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_normal_fixture_no_regression() {
     // Ensure fixtures without name= still work correctly
     use pytest_language_server::FixtureDatabase;
@@ -1795,6 +1832,7 @@ def test_example(normal_fixture, session_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_mixed_renamed_and_normal_fixtures() {
     use pytest_language_server::FixtureDatabase;
 
@@ -1839,6 +1877,7 @@ def test_mixed(renamed, normal):
 // ============================================================================
 
 #[test]
+#[timeout(30000)]
 fn test_completion_context_in_function_signature() {
     use pytest_language_server::CompletionContext;
     use pytest_language_server::FixtureDatabase;
@@ -1881,6 +1920,7 @@ def test_example(my_fixture, ):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_completion_context_in_function_body() {
     use pytest_language_server::CompletionContext;
     use pytest_language_server::FixtureDatabase;
@@ -1923,6 +1963,7 @@ def test_example():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_completion_context_in_usefixtures_decorator() {
     use pytest_language_server::CompletionContext;
     use pytest_language_server::FixtureDatabase;
@@ -1960,6 +2001,7 @@ def test_example():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_get_available_fixtures() {
     use pytest_language_server::FixtureDatabase;
 
@@ -2012,6 +2054,7 @@ def test_example():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_get_available_fixtures_priority() {
     use pytest_language_server::FixtureDatabase;
 
@@ -2068,6 +2111,7 @@ def test_example():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_get_function_param_insertion_info() {
     use pytest_language_server::FixtureDatabase;
 
@@ -2104,6 +2148,7 @@ def test_no_params():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_get_function_param_insertion_info_multiline() {
     use pytest_language_server::FixtureDatabase;
 
@@ -2132,6 +2177,7 @@ def test_multiline(
 // ============================================================================
 
 #[test]
+#[timeout(30000)]
 fn test_undeclared_fixture_detection() {
     use pytest_language_server::FixtureDatabase;
 
@@ -2164,6 +2210,7 @@ def test_undeclared():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_undeclared_fixture_not_detected_when_declared() {
     use pytest_language_server::FixtureDatabase;
 
@@ -2197,6 +2244,7 @@ def test_declared(my_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_undeclared_fixture_multiple() {
     use pytest_language_server::FixtureDatabase;
 
@@ -2239,6 +2287,7 @@ def test_multiple_undeclared():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_undeclared_fixture_position_accuracy() {
     use pytest_language_server::FixtureDatabase;
 
@@ -2278,6 +2327,7 @@ def test_position():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_is_third_party_fixture() {
     use pytest_language_server::FixtureDatabase;
 
@@ -2325,6 +2375,7 @@ def local_fixture():
 // =============================================================================
 
 #[test]
+#[timeout(30000)]
 fn test_document_symbol_returns_fixtures_in_file() {
     use pytest_language_server::FixtureDatabase;
 
@@ -2361,6 +2412,7 @@ def test_something(fixture_one, fixture_two):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_document_symbol_filters_by_file() {
     use pytest_language_server::FixtureDatabase;
 
@@ -2416,6 +2468,7 @@ def fixture_b():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_document_symbol_excludes_third_party() {
     use pytest_language_server::FixtureDatabase;
 
@@ -2451,6 +2504,7 @@ def mocker():
 // =============================================================================
 
 #[test]
+#[timeout(30000)]
 fn test_workspace_symbol_returns_all_fixtures() {
     use pytest_language_server::FixtureDatabase;
 
@@ -2496,6 +2550,7 @@ def gamma():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_workspace_symbol_filters_by_query() {
     use pytest_language_server::FixtureDatabase;
 
@@ -2535,6 +2590,7 @@ def http_client():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_workspace_symbol_empty_query_returns_all() {
     use pytest_language_server::FixtureDatabase;
 
@@ -2567,6 +2623,7 @@ def two():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_workspace_symbol_excludes_third_party() {
     use pytest_language_server::FixtureDatabase;
 
@@ -2610,6 +2667,7 @@ def mocker():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_workspace_symbol_case_insensitive_query() {
     use pytest_language_server::FixtureDatabase;
 
@@ -2644,6 +2702,7 @@ def MyMixedCaseFixture():
 // ============================================================================
 
 #[test]
+#[timeout(30000)]
 fn test_code_lens_shows_usage_count() {
     use pytest_language_server::FixtureDatabase;
     use std::path::PathBuf;
@@ -2686,6 +2745,7 @@ def test_three(shared_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_code_lens_excludes_third_party_fixtures() {
     use pytest_language_server::FixtureDatabase;
     use std::path::PathBuf;
@@ -2730,6 +2790,7 @@ def my_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_code_lens_zero_usages() {
     use pytest_language_server::FixtureDatabase;
     use std::path::PathBuf;
@@ -2757,6 +2818,7 @@ def unused_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_code_lens_fixture_used_by_other_fixture() {
     use pytest_language_server::FixtureDatabase;
     use std::path::PathBuf;
@@ -2787,6 +2849,7 @@ def derived_fixture(base_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_code_lens_multiple_fixtures_in_file() {
     use pytest_language_server::FixtureDatabase;
     use std::path::PathBuf;

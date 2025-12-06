@@ -96,42 +96,40 @@ impl FixtureDatabase {
         debug!("Analysis complete for {:?}", file_path);
     }
 
-    /// Remove definitions that were in a specific file
+    /// Remove definitions that were in a specific file.
+    /// Uses the file_definitions reverse index for efficient O(m) cleanup
+    /// where m = number of fixtures in this file, rather than O(n) where
+    /// n = total number of unique fixture names.
+    ///
+    /// Deadlock-free design:
+    /// 1. Atomically remove the set of fixture names from file_definitions
+    /// 2. For each fixture name, get a mutable reference, modify, then drop
+    /// 3. Only after dropping the reference, remove empty entries
     fn cleanup_definitions_for_file(&self, file_path: &PathBuf) {
-        // IMPORTANT: Collect keys first to avoid deadlock. The issue is that
-        // iter() holds read locks on the DashMap, and if we try to call .get() or
-        // .insert() on the same map while iterating, we'll deadlock due to lock
-        // contention. Collecting keys first releases the iterator locks before
-        // we start mutating the map.
-        let keys: Vec<String> = {
-            let mut k = Vec::new();
-            for entry in self.definitions.iter() {
-                k.push(entry.key().clone());
-            }
-            k
-        }; // Iterator dropped here, all locks released
+        // Step 1: Atomically remove and get the fixture names for this file
+        let fixture_names = match self.file_definitions.remove(file_path) {
+            Some((_, names)) => names,
+            None => return, // No fixtures defined in this file
+        };
 
-        // Now process each key individually
-        for key in keys {
-            // Get current definitions for this key
-            let current_defs = match self.definitions.get(&key) {
-                Some(defs) => defs.clone(),
-                None => continue,
-            };
+        // Step 2: For each fixture name, remove definitions from this file
+        for fixture_name in fixture_names {
+            let should_remove = {
+                // Get mutable reference, modify in place, check if empty
+                if let Some(mut defs) = self.definitions.get_mut(&fixture_name) {
+                    defs.retain(|def| def.file_path != *file_path);
+                    defs.is_empty()
+                } else {
+                    false
+                }
+            }; // RefMut dropped here - safe to call remove_if now
 
-            // Filter out definitions from this file
-            let filtered: Vec<FixtureDefinition> = current_defs
-                .iter()
-                .filter(|def| def.file_path != *file_path)
-                .cloned()
-                .collect();
-
-            // Update or remove
-            if filtered.is_empty() {
-                self.definitions.remove(&key);
-            } else if filtered.len() != current_defs.len() {
-                // Only update if something changed
-                self.definitions.insert(key, filtered);
+            // Step 3: Remove empty entries atomically
+            if should_remove {
+                // Use remove_if to ensure we only remove if still empty
+                // (another thread might have added a definition)
+                self.definitions
+                    .remove_if(&fixture_name, |_, defs| defs.is_empty());
             }
         }
     }
@@ -196,6 +194,25 @@ impl FixtureDatabase {
             end_char,
         };
         self.usages.entry(file_path_buf).or_default().push(usage);
+    }
+
+    /// Helper to record a fixture definition in the database.
+    /// Also maintains the file_definitions reverse index for efficient cleanup.
+    fn record_fixture_definition(&self, definition: FixtureDefinition) {
+        let file_path = definition.file_path.clone();
+        let fixture_name = definition.name.clone();
+
+        // Add to main definitions map
+        self.definitions
+            .entry(fixture_name.clone())
+            .or_default()
+            .push(definition);
+
+        // Maintain reverse index for efficient cleanup
+        self.file_definitions
+            .entry(file_path)
+            .or_default()
+            .insert(fixture_name);
     }
 
     /// Visit a statement and extract fixture definitions and usages
@@ -359,10 +376,7 @@ impl FixtureDatabase {
                 is_third_party,
             };
 
-            self.definitions
-                .entry(fixture_name)
-                .or_default()
-                .push(definition);
+            self.record_fixture_definition(definition);
 
             // Fixtures can depend on other fixtures - record these as usages too
             let mut declared_params: HashSet<String> = HashSet::new();
@@ -506,10 +520,7 @@ impl FixtureDatabase {
                                 is_third_party,
                             };
 
-                            self.definitions
-                                .entry(fixture_name.to_string())
-                                .or_default()
-                                .push(definition);
+                            self.record_fixture_definition(definition);
                         }
                     }
                 }

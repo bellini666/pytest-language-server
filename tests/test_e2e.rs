@@ -1,11 +1,14 @@
 // E2E Integration Tests
 // These tests verify the full system behavior including CLI commands,
 // workspace scanning, and LSP functionality using the test_project.
+//
+// All tests have a 30-second timeout to prevent hangs from blocking CI.
 
 #![allow(deprecated)]
 
 use assert_cmd::Command;
 use insta::assert_snapshot;
+use ntest::timeout;
 use predicates::prelude::*;
 use pytest_language_server::FixtureDatabase;
 use std::path::PathBuf;
@@ -29,6 +32,7 @@ fn normalize_path_in_output(output: &str) -> String {
 // MARK: CLI E2E Tests
 
 #[test]
+#[timeout(30000)]
 fn test_cli_fixtures_list_full_output() {
     let mut cmd = Command::cargo_bin("pytest-language-server").unwrap();
     let output = cmd
@@ -52,6 +56,7 @@ fn test_cli_fixtures_list_full_output() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_cli_fixtures_list_skip_unused() {
     let mut cmd = Command::cargo_bin("pytest-language-server").unwrap();
     let output = cmd
@@ -70,6 +75,7 @@ fn test_cli_fixtures_list_skip_unused() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_cli_fixtures_list_only_unused() {
     let mut cmd = Command::cargo_bin("pytest-language-server").unwrap();
     let output = cmd
@@ -88,6 +94,7 @@ fn test_cli_fixtures_list_only_unused() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_cli_fixtures_list_nonexistent_path() {
     let mut cmd = Command::cargo_bin("pytest-language-server").unwrap();
     cmd.arg("fixtures")
@@ -98,6 +105,7 @@ fn test_cli_fixtures_list_nonexistent_path() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_cli_fixtures_list_empty_directory() {
     let temp_dir = std::env::temp_dir().join("empty_test_dir");
     std::fs::create_dir_all(&temp_dir).ok();
@@ -117,6 +125,7 @@ fn test_cli_fixtures_list_empty_directory() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_cli_help_message() {
     let mut cmd = Command::cargo_bin("pytest-language-server").unwrap();
     cmd.arg("--help")
@@ -128,6 +137,7 @@ fn test_cli_help_message() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_cli_version() {
     let mut cmd = Command::cargo_bin("pytest-language-server").unwrap();
     cmd.arg("--version")
@@ -137,6 +147,7 @@ fn test_cli_version() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_cli_fixtures_help() {
     let mut cmd = Command::cargo_bin("pytest-language-server").unwrap();
     cmd.arg("fixtures")
@@ -148,12 +159,14 @@ fn test_cli_fixtures_help() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_cli_invalid_subcommand() {
     let mut cmd = Command::cargo_bin("pytest-language-server").unwrap();
     cmd.arg("invalid").assert().failure();
 }
 
 #[test]
+#[timeout(30000)]
 fn test_cli_conflicting_flags() {
     let mut cmd = Command::cargo_bin("pytest-language-server").unwrap();
     cmd.arg("fixtures")
@@ -168,6 +181,7 @@ fn test_cli_conflicting_flags() {
 // MARK: Workspace Scanning E2E Tests
 
 #[test]
+#[timeout(30000)]
 fn test_e2e_scan_expanded_test_project() {
     let db = FixtureDatabase::new();
     let project_path = PathBuf::from("tests/test_project");
@@ -201,6 +215,7 @@ fn test_e2e_scan_expanded_test_project() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_e2e_fixture_hierarchy_resolution() {
     let db = FixtureDatabase::new();
     let project_path = PathBuf::from("tests/test_project");
@@ -226,6 +241,7 @@ fn test_e2e_fixture_hierarchy_resolution() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_e2e_fixture_dependency_chain() {
     let db = FixtureDatabase::new();
     let project_path = PathBuf::from("tests/test_project");
@@ -244,6 +260,7 @@ fn test_e2e_fixture_dependency_chain() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_e2e_autouse_fixture_detection() {
     let db = FixtureDatabase::new();
     let project_path = PathBuf::from("tests/test_project");
@@ -256,6 +273,7 @@ fn test_e2e_autouse_fixture_detection() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_e2e_scoped_fixtures() {
     let db = FixtureDatabase::new();
     let project_path = PathBuf::from("tests/test_project");
@@ -268,6 +286,7 @@ fn test_e2e_scoped_fixtures() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_e2e_fixture_usage_in_test_file() {
     let db = FixtureDatabase::new();
     let project_path = PathBuf::from("tests/test_project");
@@ -299,6 +318,7 @@ fn test_e2e_fixture_usage_in_test_file() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_e2e_find_references_across_project() {
     let db = FixtureDatabase::new();
     let project_path = PathBuf::from("tests/test_project");
@@ -313,6 +333,7 @@ fn test_e2e_find_references_across_project() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_e2e_fixture_override_in_subdirectory() {
     let db = FixtureDatabase::new();
     let project_path = PathBuf::from("tests/test_project");
@@ -335,6 +356,7 @@ fn test_e2e_fixture_override_in_subdirectory() {
 // MARK: Performance E2E Tests
 
 #[test]
+#[timeout(30000)]
 fn test_e2e_scan_performance() {
     use std::time::Instant;
 
@@ -354,6 +376,7 @@ fn test_e2e_scan_performance() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_e2e_repeated_analysis() {
     let db = FixtureDatabase::new();
     let project_path = PathBuf::from("tests/test_project");
@@ -372,6 +395,7 @@ fn test_e2e_repeated_analysis() {
 // MARK: Error Handling E2E Tests
 
 #[test]
+#[timeout(30000)]
 fn test_e2e_malformed_python_file() {
     let db = FixtureDatabase::new();
 
@@ -393,6 +417,7 @@ fn test_e2e_malformed_python_file() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_e2e_mixed_valid_and_invalid_files() {
     let db = FixtureDatabase::new();
 
@@ -433,6 +458,7 @@ def test_something(valid_fixture):
 // MARK: - Renamed Fixtures E2E Tests
 
 #[test]
+#[timeout(30000)]
 fn test_e2e_renamed_fixtures_in_test_project() {
     let db = FixtureDatabase::new();
     let project_path = PathBuf::from("tests/test_project");
@@ -466,6 +492,7 @@ fn test_e2e_renamed_fixtures_in_test_project() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_e2e_renamed_fixture_references() {
     let db = FixtureDatabase::new();
     let project_path = PathBuf::from("tests/test_project");
@@ -497,6 +524,7 @@ fn test_e2e_renamed_fixture_references() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_e2e_renamed_fixture_goto_definition() {
     let db = FixtureDatabase::new();
     let project_path = PathBuf::from("tests/test_project");
@@ -525,6 +553,7 @@ fn test_e2e_renamed_fixture_goto_definition() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_e2e_cli_fixtures_list_with_renamed() {
     // Run CLI and verify renamed fixtures appear correctly
     let mut cmd = Command::cargo_bin("pytest-language-server").unwrap();
@@ -564,6 +593,7 @@ fn test_e2e_cli_fixtures_list_with_renamed() {
 // MARK: - Class-based Tests E2E Tests (issue #19)
 
 #[test]
+#[timeout(30000)]
 fn test_e2e_class_based_tests_fixture_usage() {
     // Test case from https://github.com/bellini666/pytest-language-server/issues/19
     let db = FixtureDatabase::new();
@@ -619,6 +649,7 @@ fn test_e2e_class_based_tests_fixture_usage() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_e2e_class_based_fixture_references() {
     let db = FixtureDatabase::new();
     let project_path = PathBuf::from("tests/test_project");
@@ -641,6 +672,7 @@ fn test_e2e_class_based_fixture_references() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_e2e_cli_class_based_fixtures_shown_as_used() {
     // Run CLI and verify fixtures used by class-based tests are marked as used
     let mut cmd = Command::cargo_bin("pytest-language-server").unwrap();
@@ -670,6 +702,7 @@ fn test_e2e_cli_class_based_fixtures_shown_as_used() {
 // MARK: Keyword-only and Positional-only Fixtures E2E Tests
 
 #[test]
+#[timeout(30000)]
 fn test_e2e_keyword_only_fixture_detection() {
     // Test that fixtures used as keyword-only arguments are properly detected
     let db = FixtureDatabase::new();
@@ -711,6 +744,7 @@ fn test_e2e_keyword_only_fixture_detection() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_e2e_keyword_only_no_undeclared_fixtures() {
     // Verify that keyword-only fixtures are not flagged as undeclared
     let db = FixtureDatabase::new();
@@ -734,6 +768,7 @@ fn test_e2e_keyword_only_no_undeclared_fixtures() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_e2e_keyword_only_go_to_definition() {
     // Test that go-to-definition works for keyword-only fixtures
     let db = FixtureDatabase::new();

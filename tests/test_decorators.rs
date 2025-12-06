@@ -1,9 +1,13 @@
 //! Unit tests for decorator analysis utilities.
+//!
+//! All tests have a 30-second timeout to prevent hangs from blocking CI.
 
+use ntest::timeout;
 use pytest_language_server::fixtures::decorators;
 use rustpython_parser::{parse, Mode};
 
 #[test]
+#[timeout(30000)]
 fn test_is_fixture_decorator_simple() {
     let code = "@fixture\ndef my_fixture(): pass";
     let parsed = parse(code, Mode::Module, "").unwrap();
@@ -18,6 +22,7 @@ fn test_is_fixture_decorator_simple() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_is_fixture_decorator_pytest_dot() {
     let code = "@pytest.fixture\ndef my_fixture(): pass";
     let parsed = parse(code, Mode::Module, "").unwrap();
@@ -32,6 +37,7 @@ fn test_is_fixture_decorator_pytest_dot() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_is_fixture_decorator_with_args() {
     let code = "@pytest.fixture(scope='session')\ndef my_fixture(): pass";
     let parsed = parse(code, Mode::Module, "").unwrap();
@@ -46,6 +52,7 @@ fn test_is_fixture_decorator_with_args() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_not_fixture_decorator() {
     let code = "@property\ndef my_prop(): pass";
     let parsed = parse(code, Mode::Module, "").unwrap();
@@ -60,6 +67,7 @@ fn test_not_fixture_decorator() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_extract_custom_fixture_name() {
     let code = "@pytest.fixture(name='custom')\ndef my_fixture(): pass";
     let parsed = parse(code, Mode::Module, "").unwrap();
@@ -73,6 +81,7 @@ fn test_extract_custom_fixture_name() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_is_usefixtures_decorator() {
     let code = "@pytest.mark.usefixtures('f1')\ndef test_x(): pass";
     let parsed = parse(code, Mode::Module, "").unwrap();
@@ -87,6 +96,7 @@ fn test_is_usefixtures_decorator() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_extract_usefixtures() {
     let code = "@pytest.mark.usefixtures('f1', 'f2')\ndef test_x(): pass";
     let parsed = parse(code, Mode::Module, "").unwrap();
@@ -102,6 +112,7 @@ fn test_extract_usefixtures() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_is_parametrize_decorator() {
     let code = "@pytest.mark.parametrize('x', [1])\ndef test_x(x): pass";
     let parsed = parse(code, Mode::Module, "").unwrap();
@@ -116,6 +127,7 @@ fn test_is_parametrize_decorator() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_extract_parametrize_indirect() {
     let code = "@pytest.mark.parametrize('f1', ['a'], indirect=True)\ndef test_x(f1): pass";
     let parsed = parse(code, Mode::Module, "").unwrap();

@@ -121,6 +121,8 @@ pub struct UndeclaredFixture {
 pub struct FixtureDatabase {
     // Map: fixture name -> all definitions (multiple conftest.py files)
     definitions: Arc<DashMap<String, Vec<FixtureDefinition>>>,
+    // Reverse index: file path -> fixture names defined in that file (for efficient cleanup)
+    file_definitions: Arc<DashMap<PathBuf, HashSet<String>>>,
     // Map: file path -> usages in that file
     usages: Arc<DashMap<PathBuf, Vec<FixtureUsage>>>,
     // Cache of analyzed file contents
@@ -573,6 +575,12 @@ Python test discovery patterns:
     - Only fixtures in same file, conftest.py hierarchy, or site-packages are resolved
     - Usage counting now uses per-definition scoped counting instead of global name counting
     - Fixes incorrect "used X times" counts when multiple files have parameters with same name
+
+11. **Efficient file re-analysis cleanup** (improved in v0.13.1)
+    - Added `file_definitions` reverse index for O(m) cleanup instead of O(n)
+    - When re-analyzing a file, only touches fixtures defined in that file
+    - Deadlock-free design: atomically removes from reverse index, then updates definitions
+    - All tests now have timeouts (10-30 seconds) to prevent CI hangs
 
 ## LSP Spec Compliance
 

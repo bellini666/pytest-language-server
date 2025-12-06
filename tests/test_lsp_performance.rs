@@ -2,7 +2,10 @@
 //!
 //! Tests for typical editor use cases like file changes, file moves, and
 //! rapid consecutive operations that might occur in a real editor.
+//!
+//! All tests have a 10-second timeout to prevent hangs from blocking CI.
 
+use ntest::timeout;
 use pytest_language_server::FixtureDatabase;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -15,6 +18,7 @@ fn create_temp_test_file(dir: &TempDir, name: &str, content: &str) -> PathBuf {
 }
 
 #[test]
+#[timeout(10000)]
 fn test_rapid_file_changes() {
     // Simulate a user rapidly editing a file in an editor
     let temp_dir = TempDir::new().unwrap();
@@ -86,6 +90,7 @@ def test_something(another_fixture):
 }
 
 #[test]
+#[timeout(10000)]
 fn test_file_rename_scenario() {
     // Simulate renaming a test file (editor removes from one path, adds to another)
     let temp_dir = TempDir::new().unwrap();
@@ -124,6 +129,7 @@ def test_one(shared_fixture):
 }
 
 #[test]
+#[timeout(10000)]
 fn test_multiple_files_simultaneous_changes() {
     // Simulate multiple files being edited at the same time (e.g., multi-cursor edit)
     let temp_dir = TempDir::new().unwrap();
@@ -174,6 +180,7 @@ def shared_name():
 }
 
 #[test]
+#[timeout(10000)]
 fn test_large_file_incremental_changes() {
     // Test performance with a large file that gets incrementally edited
     let temp_dir = TempDir::new().unwrap();
@@ -226,6 +233,7 @@ fn test_large_file_incremental_changes() {
 }
 
 #[test]
+#[timeout(10000)]
 fn test_conftest_hierarchy_with_changes() {
     // Test that fixture resolution remains correct when conftest files change
     let temp_dir = TempDir::new().unwrap();
@@ -296,6 +304,7 @@ def new_root_fixture():
 }
 
 #[test]
+#[timeout(10000)]
 fn test_cache_effectiveness_on_repeated_access() {
     // Verify that line index caching improves performance on repeated access
     let temp_dir = TempDir::new().unwrap();
@@ -372,6 +381,7 @@ def my_fixture():
 }
 
 #[test]
+#[timeout(10000)]
 fn test_concurrent_file_modifications() {
     // Test that the database handles concurrent updates correctly
     // (simulates multiple threads/async tasks updating different files)
@@ -425,6 +435,7 @@ def fixture_{}():
 }
 
 #[test]
+#[timeout(10000)]
 fn test_cleanup_file_cache_removes_cached_data() {
     // Test that cleanup_file_cache properly removes line_index_cache and file_cache entries
     let temp_dir = TempDir::new().unwrap();
@@ -477,6 +488,7 @@ def test_one(my_fixture):
 }
 
 #[test]
+#[timeout(10000)]
 fn test_cleanup_file_cache_handles_nonexistent_file() {
     // Test that cleanup_file_cache gracefully handles files that were never analyzed
     let db = FixtureDatabase::new();

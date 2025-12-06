@@ -1,7 +1,13 @@
+//! Unit tests for the FixtureDatabase.
+//!
+//! All tests have a 30-second timeout to prevent hangs from blocking CI.
+
+use ntest::timeout;
 use pytest_language_server::FixtureDatabase;
 use std::path::PathBuf;
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_definition_detection() {
     let db = FixtureDatabase::new();
 
@@ -32,6 +38,7 @@ def another_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_usage_detection() {
     let db = FixtureDatabase::new();
 
@@ -57,6 +64,7 @@ def test_other(my_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_go_to_definition() {
     let db = FixtureDatabase::new();
 
@@ -94,6 +102,7 @@ def test_something(my_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_decorator_variations() {
     let db = FixtureDatabase::new();
 
@@ -129,6 +138,7 @@ def fixture4():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_in_test_file() {
     let db = FixtureDatabase::new();
 
@@ -180,6 +190,7 @@ def test_something(local_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_async_test_functions() {
     let db = FixtureDatabase::new();
 
@@ -218,6 +229,7 @@ def test_sync_function(my_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_extract_word_at_position() {
     let db = FixtureDatabase::new();
 
@@ -268,6 +280,7 @@ fn test_extract_word_at_position() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_extract_word_at_position_fixture_definition() {
     let db = FixtureDatabase::new();
 
@@ -319,6 +332,7 @@ fn test_extract_word_at_position_fixture_definition() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_word_detection_only_on_fixtures() {
     let db = FixtureDatabase::new();
 
@@ -369,6 +383,7 @@ def test_something(my_fixture, regular_param):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_self_referencing_fixture() {
     let db = FixtureDatabase::new();
 
@@ -415,6 +430,7 @@ def foo(foo):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_overriding_same_file() {
     let db = FixtureDatabase::new();
 
@@ -456,6 +472,7 @@ def test_something(my_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_overriding_conftest_hierarchy() {
     let db = FixtureDatabase::new();
 
@@ -524,6 +541,7 @@ def test_parent(shared_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_scoped_references() {
     let db = FixtureDatabase::new();
 
@@ -621,6 +639,7 @@ def test_sub2(shared_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_multiline_parameters() {
     let db = FixtureDatabase::new();
 
@@ -678,6 +697,7 @@ def test_xxx(
 }
 
 #[test]
+#[timeout(30000)]
 fn test_find_references_from_usage() {
     let db = FixtureDatabase::new();
 
@@ -744,6 +764,7 @@ def test_xxx(foo):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_find_references_with_ellipsis_body() {
     // This reproduces the structure from strawberry test_codegen.py
     let db = FixtureDatabase::new();
@@ -802,6 +823,7 @@ def test_xxx(foo):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_hierarchy_parent_references() {
     // Test that finding references from a parent fixture definition
     // includes child fixture definitions but NOT the child's usages
@@ -893,6 +915,7 @@ def test_two(cli_runner):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_hierarchy_child_references() {
     // Test that finding references from a child fixture definition
     // includes usages in the same directory (that resolve to the child)
@@ -967,6 +990,7 @@ def test_two(cli_runner):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_hierarchy_child_parameter_references() {
     // Test that finding references from a child fixture's parameter
     // (which references the parent) includes the child fixture definition
@@ -1030,6 +1054,7 @@ def cli_runner(cli_runner):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_hierarchy_usage_from_test() {
     // Test that finding references from a test function parameter
     // includes the definition it resolves to and other usages
@@ -1099,6 +1124,7 @@ def test_three(cli_runner):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_hierarchy_multiple_levels() {
     // Test a three-level hierarchy: grandparent -> parent -> child
     let db = FixtureDatabase::new();
@@ -1222,6 +1248,7 @@ def test_db(db):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_hierarchy_same_file_override() {
     // Test that a fixture can be overridden in the same file
     // (less common but valid pytest pattern)
@@ -1278,6 +1305,7 @@ def test_uses_override(base):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_cursor_position_on_definition_line() {
     // Debug test to understand what happens at different cursor positions
     // on a fixture definition line with a self-referencing parameter
@@ -1403,6 +1431,7 @@ def cli_runner(cli_runner):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_undeclared_fixture_detection_in_test() {
     let db = FixtureDatabase::new();
 
@@ -1437,6 +1466,7 @@ def test_example():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_undeclared_fixture_detection_in_fixture() {
     let db = FixtureDatabase::new();
 
@@ -1478,6 +1508,7 @@ def my_fixture(base_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_no_false_positive_for_declared_fixtures() {
     let db = FixtureDatabase::new();
 
@@ -1511,6 +1542,7 @@ def test_example(my_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_no_false_positive_for_non_fixtures() {
     let db = FixtureDatabase::new();
 
@@ -1534,6 +1566,7 @@ def test_example():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_undeclared_fixture_not_available_in_hierarchy() {
     let db = FixtureDatabase::new();
 
@@ -1567,6 +1600,7 @@ def test_example():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_undeclared_fixture_in_async_test() {
     let db = FixtureDatabase::new();
 
@@ -1600,6 +1634,7 @@ async def test_with_undeclared():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_undeclared_fixture_in_assert_statement() {
     let db = FixtureDatabase::new();
 
@@ -1636,6 +1671,7 @@ def test_assertion():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_no_false_positive_for_local_variable() {
     // Problem 2: Should not warn if a local variable shadows a fixture name
     let db = FixtureDatabase::new();
@@ -1672,6 +1708,7 @@ def test_with_local_variable():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_no_false_positive_for_imported_name() {
     // Problem 2: Should not warn if an imported name shadows a fixture name
     let db = FixtureDatabase::new();
@@ -1709,6 +1746,7 @@ def test_with_import():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_warn_for_fixture_used_directly() {
     // Problem 2: SHOULD warn if trying to use a fixture defined in the same file
     // This is an error because fixtures must be accessed through parameters
@@ -1742,6 +1780,7 @@ def test_using_fixture_directly():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_no_false_positive_for_module_level_assignment() {
     // Should not warn if name is assigned at module level (not a fixture)
     let db = FixtureDatabase::new();
@@ -1780,6 +1819,7 @@ def test_with_module_var():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_no_false_positive_for_function_definition() {
     // Should not warn if name is a regular function (not a fixture)
     let db = FixtureDatabase::new();
@@ -1818,6 +1858,7 @@ def test_with_function():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_no_false_positive_for_class_definition() {
     // Should not warn if name is a class
     let db = FixtureDatabase::new();
@@ -1856,6 +1897,7 @@ def test_with_class():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_line_aware_local_variable_scope() {
     // Test that local variables are only considered "in scope" AFTER they're assigned
     let db = FixtureDatabase::new();
@@ -1902,6 +1944,7 @@ def http_client():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_same_line_assignment_and_usage() {
     // Test that usage on the same line as assignment refers to the fixture
     let db = FixtureDatabase::new();
@@ -1931,6 +1974,7 @@ def http_client():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_no_false_positive_for_later_assignment() {
     // This is the actual bug we fixed - make sure local assignment later in function
     // doesn't prevent detection of undeclared fixture usage BEFORE the assignment
@@ -1973,6 +2017,7 @@ def http_client():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_resolution_priority_deterministic() {
     // Test that fixture resolution is deterministic and follows priority rules
     // This test ensures we don't randomly pick a definition from DashMap iteration
@@ -2062,6 +2107,7 @@ def test_database(db):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_resolution_prefers_parent_over_unrelated() {
     // Test that when no fixture is in same file or conftest hierarchy,
     // we prefer third-party fixtures (site-packages) over random unrelated conftest files
@@ -2111,6 +2157,7 @@ def test_custom(custom_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_resolution_hierarchy_over_third_party() {
     // Test that fixtures in the conftest hierarchy are preferred over third-party
     let db = FixtureDatabase::new();
@@ -2158,6 +2205,7 @@ def test_mocking(mocker):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_resolution_with_relative_paths() {
     // Test that fixture resolution works even when paths are stored with different representations
     // This simulates the case where analyze_file is called with relative paths vs absolute paths
@@ -2190,6 +2238,7 @@ def test_example(shared):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_resolution_deep_hierarchy() {
     // Test resolution in a deep directory hierarchy to ensure path traversal works correctly
     let db = FixtureDatabase::new();
@@ -2304,6 +2353,7 @@ def test_db(db):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_resolution_sibling_directories() {
     // Test that fixtures in sibling directories don't leak into each other
     let db = FixtureDatabase::new();
@@ -2395,6 +2445,7 @@ def test_b(module_specific, shared):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_resolution_multiple_unrelated_branches_is_deterministic() {
     // Issue #23 fix: When a fixture is defined in multiple unrelated branches,
     // and a test file is NOT in any of their hierarchies, the fixture should NOT
@@ -2471,6 +2522,7 @@ def test_in_project_a(common_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_resolution_conftest_at_various_depths() {
     // Test that conftest.py files at different depths are correctly prioritized
     let db = FixtureDatabase::new();
@@ -2569,6 +2621,7 @@ def test_mid(fixture_a, fixture_c):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_get_available_fixtures_same_file() {
     let db = FixtureDatabase::new();
 
@@ -2599,6 +2652,7 @@ def test_something():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_get_available_fixtures_conftest_hierarchy() {
     let db = FixtureDatabase::new();
 
@@ -2646,6 +2700,7 @@ def test_something():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_get_available_fixtures_no_duplicates() {
     let db = FixtureDatabase::new();
 
@@ -2697,6 +2752,7 @@ def test_something():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_is_inside_function_in_test() {
     let db = FixtureDatabase::new();
 
@@ -2729,6 +2785,7 @@ def test_example(fixture_a, fixture_b):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_is_inside_function_in_fixture() {
     let db = FixtureDatabase::new();
 
@@ -2761,6 +2818,7 @@ def my_fixture(other_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_is_inside_function_outside() {
     let db = FixtureDatabase::new();
 
@@ -2795,6 +2853,7 @@ def test_example(my_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_is_inside_function_non_test() {
     let db = FixtureDatabase::new();
 
@@ -2828,6 +2887,7 @@ def test_example():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_is_inside_async_function() {
     let db = FixtureDatabase::new();
 
@@ -2863,6 +2923,7 @@ async def test_async_example(async_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_with_simple_return_type() {
     let db = FixtureDatabase::new();
 
@@ -2882,6 +2943,7 @@ def string_fixture() -> str:
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_with_generator_return_type() {
     let db = FixtureDatabase::new();
 
@@ -2903,6 +2965,7 @@ def generator_fixture() -> Generator[str, None, None]:
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_with_iterator_return_type() {
     let db = FixtureDatabase::new();
 
@@ -2924,6 +2987,7 @@ def iterator_fixture() -> Iterator[int]:
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_without_return_type() {
     let db = FixtureDatabase::new();
 
@@ -2943,6 +3007,7 @@ def no_type_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_with_union_return_type() {
     let db = FixtureDatabase::new();
 
@@ -2966,6 +3031,7 @@ def union_fixture() -> str | int:
 // ============================================================================
 
 #[test]
+#[timeout(30000)]
 fn test_parametrized_fixture_detection() {
     let db = FixtureDatabase::new();
 
@@ -2993,6 +3059,7 @@ def letter_fixture(request):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_parametrized_fixture_usage() {
     let db = FixtureDatabase::new();
 
@@ -3026,6 +3093,7 @@ def test_with_parametrized(number_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_parametrized_fixture_with_ids() {
     let db = FixtureDatabase::new();
 
@@ -3067,6 +3135,7 @@ def complex_params(request):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_factory_fixture_pattern() {
     let db = FixtureDatabase::new();
 
@@ -3097,6 +3166,7 @@ def database_factory(db_connection):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_autouse_fixture_detection() {
     let db = FixtureDatabase::new();
 
@@ -3122,6 +3192,7 @@ def another_auto():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_autouse_fixture_not_flagged_as_undeclared() {
     let db = FixtureDatabase::new();
 
@@ -3158,6 +3229,7 @@ def test_something():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_with_scope_session() {
     let db = FixtureDatabase::new();
 
@@ -3186,6 +3258,7 @@ def class_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_pytest_asyncio_fixture() {
     let db = FixtureDatabase::new();
 
@@ -3217,6 +3290,7 @@ async def regular_async_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_name_aliasing() {
     let db = FixtureDatabase::new();
 
@@ -3244,6 +3318,7 @@ def database_connection():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_renamed_fixture_usage_detection() {
     // Test case from https://github.com/bellini666/pytest-language-server/issues/18
     let db = FixtureDatabase::new();
@@ -3276,6 +3351,7 @@ def test_example(new: int):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_class_based_test_methods_use_fixtures() {
     // Test case from https://github.com/bellini666/pytest-language-server/issues/19
     let db = FixtureDatabase::new();
@@ -3312,6 +3388,7 @@ class TestInClass:
 }
 
 #[test]
+#[timeout(30000)]
 fn test_nested_class_test_methods() {
     let db = FixtureDatabase::new();
 
@@ -3348,6 +3425,7 @@ class TestOuter:
 }
 
 #[test]
+#[timeout(30000)]
 fn test_deeply_nested_classes() {
     let db = FixtureDatabase::new();
 
@@ -3388,6 +3466,7 @@ class TestLevel1:
 }
 
 #[test]
+#[timeout(30000)]
 fn test_nested_class_with_usefixtures() {
     let db = FixtureDatabase::new();
 
@@ -3429,6 +3508,7 @@ class TestOuter:
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_in_nested_class() {
     let db = FixtureDatabase::new();
 
@@ -3492,6 +3572,7 @@ class TestOuter:
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_defined_in_class() {
     let db = FixtureDatabase::new();
 
@@ -3524,6 +3605,7 @@ class TestWithFixture:
 }
 
 #[test]
+#[timeout(30000)]
 fn test_pytest_django_builtin_fixtures() {
     let db = FixtureDatabase::new();
 
@@ -3586,6 +3668,7 @@ def test_with_django_fixtures(db, client, admin_client):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_pytest_mock_advanced_patterns() {
     let db = FixtureDatabase::new();
 
@@ -3614,6 +3697,7 @@ def patched_function(mocker):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_mixed_sync_async_fixture_dependencies() {
     let db = FixtureDatabase::new();
 
@@ -3646,6 +3730,7 @@ async def another_async(async_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_yield_fixture_with_exception_handling() {
     let db = FixtureDatabase::new();
 
@@ -3679,6 +3764,7 @@ def complex_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_yield_fixture_basic() {
     let db = FixtureDatabase::new();
 
@@ -3728,6 +3814,7 @@ def yield_none():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_yield_fixture_usage_in_test() {
     let db = FixtureDatabase::new();
 
@@ -3762,6 +3849,7 @@ def test_with_db(db_session):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_yield_fixture_with_context_manager() {
     let db = FixtureDatabase::new();
 
@@ -3794,6 +3882,7 @@ def nested_context():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_async_yield_fixture() {
     let db = FixtureDatabase::new();
 
@@ -3825,6 +3914,7 @@ async def async_client():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_indirect_parametrization() {
     let db = FixtureDatabase::new();
 
@@ -3857,6 +3947,7 @@ def test_user(user_data):
 // ============================================================================
 
 #[test]
+#[timeout(30000)]
 fn test_undeclared_fixture_in_walrus_operator() {
     let db = FixtureDatabase::new();
 
@@ -3893,6 +3984,7 @@ def test_walrus():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_undeclared_fixture_in_list_comprehension() {
     let db = FixtureDatabase::new();
 
@@ -3944,6 +4036,7 @@ def test_comprehension():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_undeclared_fixture_in_dict_comprehension() {
     let db = FixtureDatabase::new();
 
@@ -3979,6 +4072,7 @@ def test_dict_comp():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_undeclared_fixture_in_generator_expression() {
     let db = FixtureDatabase::new();
 
@@ -4015,6 +4109,7 @@ def test_generator():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_undeclared_fixture_in_f_string() {
     let db = FixtureDatabase::new();
 
@@ -4050,6 +4145,7 @@ def test_f_string():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_undeclared_fixture_in_lambda() {
     let db = FixtureDatabase::new();
 
@@ -4086,6 +4182,7 @@ def test_lambda():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_undeclared_fixture_in_nested_function() {
     let db = FixtureDatabase::new();
 
@@ -4124,6 +4221,7 @@ def test_nested():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_undeclared_fixture_in_decorator_argument() {
     let db = FixtureDatabase::new();
 
@@ -4164,6 +4262,7 @@ def test_with_timeout():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_local_variable_shadowing_fixture() {
     let db = FixtureDatabase::new();
 
@@ -4200,6 +4299,7 @@ def test_shadowing():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_comprehension_variable_shadowing_fixture() {
     let db = FixtureDatabase::new();
 
@@ -4238,6 +4338,7 @@ def test_comp_shadow():
 // ============================================================================
 
 #[test]
+#[timeout(30000)]
 fn test_decorator_with_multiple_arguments() {
     let db = FixtureDatabase::new();
 
@@ -4263,6 +4364,7 @@ def parametrized_scoped():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_parameter_with_type_hints() {
     let db = FixtureDatabase::new();
 
@@ -4292,6 +4394,7 @@ def complex_types(data: List[str]) -> List[Dict[str, int]]:
 }
 
 #[test]
+#[timeout(30000)]
 fn test_default_parameter_values() {
     let db = FixtureDatabase::new();
 
@@ -4315,6 +4418,7 @@ def optional_param(data=None):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_variadic_parameters() {
     let db = FixtureDatabase::new();
 
@@ -4349,6 +4453,7 @@ def fixture_with_both(base, *args, **kwargs):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_variadic_with_fixture_dependencies() {
     let db = FixtureDatabase::new();
 
@@ -4395,6 +4500,7 @@ def combined_fixture(base_fixture, config_fixture, *args, **kwargs):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_variadic_in_test_function() {
     let db = FixtureDatabase::new();
 
@@ -4435,6 +4541,7 @@ def test_with_variadic(my_fixture, *args, **kwargs):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_keyword_only_with_variadic() {
     let db = FixtureDatabase::new();
 
@@ -4466,6 +4573,7 @@ def complex_fixture(*args, kwonly_dep: str, **kwargs):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_class_based_fixtures() {
     let db = FixtureDatabase::new();
 
@@ -4493,6 +4601,7 @@ class TestClass:
 }
 
 #[test]
+#[timeout(30000)]
 fn test_classmethod_and_staticmethod_fixtures() {
     let db = FixtureDatabase::new();
 
@@ -4523,6 +4632,7 @@ class TestClass:
 }
 
 #[test]
+#[timeout(30000)]
 fn test_unicode_fixture_names() {
     let db = FixtureDatabase::new();
 
@@ -4589,6 +4699,7 @@ def δεδομένα_χρήστη():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_unicode_fixture_usage_detection() {
     let db = FixtureDatabase::new();
 
@@ -4620,6 +4731,7 @@ def test_unicode_usage(données):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_unicode_fixture_goto_definition() {
     let db = FixtureDatabase::new();
 
@@ -4661,6 +4773,7 @@ def test_unicode(données):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_names_with_underscores() {
     let db = FixtureDatabase::new();
 
@@ -4689,6 +4802,7 @@ def fixture__double():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_very_long_fixture_name() {
     let db = FixtureDatabase::new();
 
@@ -4715,6 +4829,7 @@ def {}():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_optional_and_union_type_hints() {
     let db = FixtureDatabase::new();
 
@@ -4745,6 +4860,7 @@ def union_fixture(value: Union[str, int, List[str]]) -> Union[str, int]:
 }
 
 #[test]
+#[timeout(30000)]
 fn test_forward_reference_type_hints() {
     let db = FixtureDatabase::new();
 
@@ -4773,6 +4889,7 @@ class MyClass:
 }
 
 #[test]
+#[timeout(30000)]
 fn test_generic_type_hints() {
     let db = FixtureDatabase::new();
 
@@ -4808,6 +4925,7 @@ def tuple_fixture() -> Tuple[str, int, bool]:
 // ============================================================================
 
 #[test]
+#[timeout(30000)]
 fn test_five_level_override_chain() {
     let db = FixtureDatabase::new();
 
@@ -4887,6 +5005,7 @@ def test_deep(deep_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_diamond_dependency_pattern() {
     let db = FixtureDatabase::new();
 
@@ -4926,6 +5045,7 @@ def diamond(branch_a, branch_b):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_ten_level_directory_depth() {
     let db = FixtureDatabase::new();
 
@@ -4954,6 +5074,7 @@ def test_deep_search(deep_search):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_chain_middle_doesnt_use_parent() {
     let db = FixtureDatabase::new();
 
@@ -5008,6 +5129,7 @@ def test_chain(chain_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_multiple_fixtures_same_name_in_file() {
     let db = FixtureDatabase::new();
 
@@ -5044,6 +5166,7 @@ def duplicate_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_sibling_directories_with_same_fixture() {
     let db = FixtureDatabase::new();
 
@@ -5097,6 +5220,7 @@ def test_b(sibling_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_with_six_level_parameter_chain() {
     let db = FixtureDatabase::new();
 
@@ -5146,6 +5270,7 @@ def level6(level5):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_circular_dependency_detection() {
     let db = FixtureDatabase::new();
 
@@ -5179,6 +5304,7 @@ def fixture_b(fixture_a):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_multiple_third_party_same_fixture_name() {
     let db = FixtureDatabase::new();
 
@@ -5234,6 +5360,7 @@ def test_event_loop(event_loop):
 // MARK: File Path Edge Cases
 
 #[test]
+#[timeout(30000)]
 fn test_unicode_characters_in_path() {
     let db = FixtureDatabase::new();
 
@@ -5254,6 +5381,7 @@ def my_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_spaces_in_path() {
     let db = FixtureDatabase::new();
 
@@ -5273,6 +5401,7 @@ def my_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_special_characters_in_path() {
     let db = FixtureDatabase::new();
 
@@ -5293,6 +5422,7 @@ def my_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_very_long_path() {
     let db = FixtureDatabase::new();
 
@@ -5322,6 +5452,7 @@ def my_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_paths_with_dots() {
     let db = FixtureDatabase::new();
 
@@ -5342,6 +5473,7 @@ def my_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_conftest_hierarchy_with_unicode_paths() {
     let db = FixtureDatabase::new();
 
@@ -5371,6 +5503,7 @@ def test_something(base_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_resolution_with_special_char_paths() {
     let db = FixtureDatabase::new();
 
@@ -5398,6 +5531,7 @@ def test_something(special_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_multiple_consecutive_slashes_in_path() {
     let db = FixtureDatabase::new();
 
@@ -5417,6 +5551,7 @@ def my_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_path_with_trailing_slash() {
     let db = FixtureDatabase::new();
 
@@ -5437,6 +5572,7 @@ def my_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_emoji_in_path() {
     let db = FixtureDatabase::new();
 
@@ -5458,6 +5594,7 @@ def my_fixture():
 // MARK: Workspace Scanning Edge Cases
 
 #[test]
+#[timeout(30000)]
 fn test_scan_workspace_nonexistent_path() {
     let db = FixtureDatabase::new();
 
@@ -5473,6 +5610,7 @@ fn test_scan_workspace_nonexistent_path() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_scan_workspace_with_no_python_files() {
     let db = FixtureDatabase::new();
     let temp_dir = std::env::temp_dir().join("test_no_python_files");
@@ -5491,6 +5629,7 @@ fn test_scan_workspace_with_no_python_files() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_scan_workspace_with_only_non_test_files() {
     let db = FixtureDatabase::new();
     let temp_dir = std::env::temp_dir().join("test_no_test_files");
@@ -5521,6 +5660,7 @@ def my_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_scan_workspace_with_deeply_nested_structure() {
     let db = FixtureDatabase::new();
     let temp_dir = std::env::temp_dir().join("test_deep_nesting");
@@ -5553,6 +5693,7 @@ def deep_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_scan_workspace_with_mixed_file_types() {
     let db = FixtureDatabase::new();
     let temp_dir = std::env::temp_dir().join("test_mixed_files");
@@ -5624,6 +5765,7 @@ def utils_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_empty_conftest_file() {
     let db = FixtureDatabase::new();
 
@@ -5637,6 +5779,7 @@ fn test_empty_conftest_file() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_conftest_with_only_imports() {
     let db = FixtureDatabase::new();
 
@@ -5653,6 +5796,7 @@ from pathlib import Path
 }
 
 #[test]
+#[timeout(30000)]
 fn test_file_with_syntax_error_in_docstring() {
     let db = FixtureDatabase::new();
 
@@ -5678,6 +5822,7 @@ def my_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_in_file_with_multiple_encodings_declared() {
     let db = FixtureDatabase::new();
 
@@ -5699,6 +5844,7 @@ def my_fixture():
 // MARK: Docstring Variation Tests
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_with_empty_docstring() {
     let db = FixtureDatabase::new();
 
@@ -5722,6 +5868,7 @@ def my_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_with_multiline_docstring() {
     let db = FixtureDatabase::new();
 
@@ -5755,6 +5902,7 @@ def my_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_with_single_quoted_docstring() {
     let db = FixtureDatabase::new();
 
@@ -5779,6 +5927,7 @@ def my_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_with_rst_formatted_docstring() {
     let db = FixtureDatabase::new();
 
@@ -5812,6 +5961,7 @@ def my_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_with_google_style_docstring() {
     let db = FixtureDatabase::new();
 
@@ -5848,6 +5998,7 @@ def my_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_with_numpy_style_docstring() {
     let db = FixtureDatabase::new();
 
@@ -5887,6 +6038,7 @@ def my_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_with_unicode_in_docstring() {
     let db = FixtureDatabase::new();
 
@@ -5915,6 +6067,7 @@ def my_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_with_code_blocks_in_docstring() {
     let db = FixtureDatabase::new();
 
@@ -5952,6 +6105,7 @@ def my_fixture():
 // MARK: Performance and Scalability Tests
 
 #[test]
+#[timeout(30000)]
 fn test_large_number_of_fixtures_in_single_file() {
     let db = FixtureDatabase::new();
 
@@ -5977,6 +6131,7 @@ fn test_large_number_of_fixtures_in_single_file() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_deeply_nested_fixture_dependencies() {
     let db = FixtureDatabase::new();
 
@@ -6006,6 +6161,7 @@ fn test_deeply_nested_fixture_dependencies() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_with_many_parameters() {
     let db = FixtureDatabase::new();
 
@@ -6044,6 +6200,7 @@ fn test_fixture_with_many_parameters() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_very_long_fixture_function_body() {
     let db = FixtureDatabase::new();
 
@@ -6064,6 +6221,7 @@ fn test_very_long_fixture_function_body() {
 }
 
 #[test]
+#[timeout(30000)]
 fn test_multiple_files_with_same_fixture_names() {
     let db = FixtureDatabase::new();
 
@@ -6087,6 +6245,7 @@ def shared_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_rapid_file_updates() {
     let db = FixtureDatabase::new();
 
@@ -6116,6 +6275,7 @@ def dynamic_fixture():
 // MARK: Virtual Environment Variation Tests
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_detection_without_venv() {
     let db = FixtureDatabase::new();
 
@@ -6142,6 +6302,7 @@ def test_example(my_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_third_party_fixture_in_site_packages() {
     let db = FixtureDatabase::new();
 
@@ -6177,6 +6338,7 @@ def test_example(third_party_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_override_from_third_party() {
     let db = FixtureDatabase::new();
 
@@ -6227,6 +6389,7 @@ def test_example(event_loop):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_multiple_third_party_plugins_same_fixture() {
     let db = FixtureDatabase::new();
 
@@ -6260,6 +6423,7 @@ def common_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_venv_fixture_with_no_usage() {
     let db = FixtureDatabase::new();
 
@@ -6288,6 +6452,7 @@ def unused_plugin_fixture():
 // MARK: Miscellaneous Edge Case Tests
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_with_property_decorator() {
     let db = FixtureDatabase::new();
 
@@ -6311,6 +6476,7 @@ def my_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_with_staticmethod() {
     let db = FixtureDatabase::new();
 
@@ -6334,6 +6500,7 @@ def my_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_with_classmethod() {
     let db = FixtureDatabase::new();
 
@@ -6357,6 +6524,7 @@ def my_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_with_contextmanager() {
     let db = FixtureDatabase::new();
 
@@ -6381,6 +6549,7 @@ def my_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_with_multiple_decorators() {
     let db = FixtureDatabase::new();
 
@@ -6403,6 +6572,7 @@ def my_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_inside_if_block_not_supported() {
     let db = FixtureDatabase::new();
 
@@ -6424,6 +6594,7 @@ if sys.version_info >= (3, 8):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_with_walrus_operator_in_body() {
     let db = FixtureDatabase::new();
 
@@ -6444,6 +6615,7 @@ def my_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_with_match_statement() {
     let db = FixtureDatabase::new();
 
@@ -6468,6 +6640,7 @@ def my_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_with_exception_group() {
     let db = FixtureDatabase::new();
 
@@ -6490,6 +6663,7 @@ def my_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_with_dataclass() {
     let db = FixtureDatabase::new();
 
@@ -6513,6 +6687,7 @@ def config_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_with_named_tuple() {
     let db = FixtureDatabase::new();
 
@@ -6536,6 +6711,7 @@ def point_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_with_protocol() {
     let db = FixtureDatabase::new();
 
@@ -6561,6 +6737,7 @@ def readable_fixture() -> Readable:
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_with_generic_type() {
     let db = FixtureDatabase::new();
 
@@ -6588,6 +6765,7 @@ def container_fixture() -> Container[str]:
 // MARK: Additional Third-Party Plugin Tests
 
 #[test]
+#[timeout(30000)]
 fn test_pytest_flask_fixtures() {
     let db = FixtureDatabase::new();
 
@@ -6618,6 +6796,7 @@ def client(app):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_pytest_httpx_fixtures() {
     let db = FixtureDatabase::new();
 
@@ -6640,6 +6819,7 @@ async def async_client():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_pytest_postgresql_fixtures() {
     let db = FixtureDatabase::new();
 
@@ -6666,6 +6846,7 @@ def postgresql_proc(postgresql):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_pytest_docker_fixtures() {
     let db = FixtureDatabase::new();
 
@@ -6692,6 +6873,7 @@ def docker_services(docker_compose_file):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_pytest_factoryboy_fixtures() {
     let db = FixtureDatabase::new();
 
@@ -6720,6 +6902,7 @@ def user_factory():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_pytest_freezegun_fixtures() {
     let db = FixtureDatabase::new();
 
@@ -6742,6 +6925,7 @@ def frozen_time():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_pytest_celery_fixtures() {
     let db = FixtureDatabase::new();
 
@@ -6775,6 +6959,7 @@ def celery_worker(celery_app):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_pytest_aiohttp_fixtures() {
     let db = FixtureDatabase::new();
 
@@ -6805,6 +6990,7 @@ async def aiohttp_server():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_pytest_benchmark_fixtures() {
     let db = FixtureDatabase::new();
 
@@ -6828,6 +7014,7 @@ def benchmark():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_pytest_playwright_fixtures() {
     let db = FixtureDatabase::new();
 
@@ -6870,6 +7057,7 @@ def context(browser):
 // =============================================================================
 
 #[test]
+#[timeout(30000)]
 fn test_keyword_only_fixture_usage_in_test() {
     let db = FixtureDatabase::new();
 
@@ -6911,6 +7099,7 @@ def test_with_kwonly(*, my_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_keyword_only_fixture_usage_with_type_annotation() {
     let db = FixtureDatabase::new();
 
@@ -6957,6 +7146,7 @@ def test_run_command(*, tmp_path: Path) -> None:
 }
 
 #[test]
+#[timeout(30000)]
 fn test_positional_only_fixture_usage() {
     let db = FixtureDatabase::new();
 
@@ -6998,6 +7188,7 @@ def test_with_posonly(my_fixture, /):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_mixed_argument_types_fixture_usage() {
     let db = FixtureDatabase::new();
 
@@ -7057,6 +7248,7 @@ def test_with_all_types(fixture_a, /, fixture_b, *, fixture_c):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_keyword_only_fixture_in_fixture_definition() {
     let db = FixtureDatabase::new();
 
@@ -7096,6 +7288,7 @@ def dependent_fixture(*, base_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_keyword_only_with_multiple_fixtures() {
     let db = FixtureDatabase::new();
 
@@ -7155,6 +7348,7 @@ def test_multi_kwonly(*, fixture_x, fixture_y, fixture_z):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_go_to_definition_for_keyword_only_fixture() {
     let db = FixtureDatabase::new();
 
@@ -7206,6 +7400,7 @@ def test_something(*, my_fixture):
 // =============================================================================
 
 #[test]
+#[timeout(30000)]
 fn test_scan_skips_node_modules() {
     use std::fs;
     use tempfile::TempDir;
@@ -7278,6 +7473,7 @@ def node_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_scan_skips_git_directory() {
     use std::fs;
     use tempfile::TempDir;
@@ -7330,6 +7526,7 @@ def git_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_scan_skips_pycache() {
     use std::fs;
     use tempfile::TempDir;
@@ -7382,6 +7579,7 @@ def cache_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_scan_skips_venv_but_scans_plugins() {
     use std::fs;
     use tempfile::TempDir;
@@ -7435,6 +7633,7 @@ def test_venv(venv_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_scan_skips_multiple_directories() {
     use std::fs;
     use tempfile::TempDir;
@@ -7515,6 +7714,7 @@ def {}_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_scan_skips_nested_node_modules() {
     use std::fs;
     use tempfile::TempDir;
@@ -7593,6 +7793,7 @@ def deep_node_fix():
 // =============================================================================
 
 #[test]
+#[timeout(30000)]
 fn test_usefixtures_decorator_on_function() {
     let db = FixtureDatabase::new();
 
@@ -7647,6 +7848,7 @@ def test_with_multiple_usefixtures():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_usefixtures_decorator_on_class() {
     let db = FixtureDatabase::new();
 
@@ -7686,6 +7888,7 @@ class TestWithSetup:
 }
 
 #[test]
+#[timeout(30000)]
 fn test_usefixtures_goto_definition() {
     let db = FixtureDatabase::new();
 
@@ -7729,6 +7932,7 @@ def test_something():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_usefixtures_affects_unused_detection() {
     let db = FixtureDatabase::new();
 
@@ -7774,6 +7978,7 @@ def test_something():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_usefixtures_with_mark_import() {
     let db = FixtureDatabase::new();
 
@@ -7813,6 +8018,7 @@ def test_with_mark():
 /// Note: Full resolution of pytest_plugins paths is not implemented
 /// This test documents the current behavior
 #[test]
+#[timeout(30000)]
 fn test_pytest_plugins_declaration_detected() {
     let db = FixtureDatabase::new();
 
@@ -7843,6 +8049,7 @@ def local_fixture():
 
 /// Test that pytest_plugins tuple syntax is also recognized
 #[test]
+#[timeout(30000)]
 fn test_pytest_plugins_tuple_syntax() {
     let db = FixtureDatabase::new();
 
@@ -7871,6 +8078,7 @@ def another_fixture():
 // =============================================================================
 
 #[test]
+#[timeout(30000)]
 fn test_parametrize_indirect_true() {
     let db = FixtureDatabase::new();
 
@@ -7908,6 +8116,7 @@ def test_with_indirect(my_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_parametrize_indirect_multiple_fixtures() {
     let db = FixtureDatabase::new();
 
@@ -7944,6 +8153,7 @@ def test_multiple_indirect(fixture_a, fixture_b):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_parametrize_indirect_list_selective() {
     let db = FixtureDatabase::new();
 
@@ -7977,6 +8187,7 @@ def test_selective_indirect(indirect_fix, direct_fix):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_parametrize_without_indirect() {
     let db = FixtureDatabase::new();
 
@@ -8006,6 +8217,7 @@ def test_normal_parametrize(value):
 // MARK: Scoping Tests - Issue #23
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_scoping_sibling_files() {
     // Test case from issue #23:
     // A fixture defined in one test file should NOT be counted as "used"
@@ -8049,6 +8261,7 @@ def test_example_fixture(my_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_scoping_with_conftest() {
     // When a fixture IS in conftest.py, sibling files CAN use it
     let db = FixtureDatabase::new();
@@ -8086,6 +8299,7 @@ def test_uses_shared(shared_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_fixture_scoping_same_file() {
     // Fixture defined in the same file should be usable
     let db = FixtureDatabase::new();
@@ -8116,6 +8330,7 @@ def test_uses_local(local_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_get_scoped_usage_count() {
     // Test the new get_scoped_usage_count method
     let db = FixtureDatabase::new();
@@ -8188,6 +8403,7 @@ def test_uses_global(global_fixture):
 // ============================================================================
 
 #[test]
+#[timeout(30000)]
 fn test_completion_context_function_signature() {
     use pytest_language_server::CompletionContext;
     let db = FixtureDatabase::new();
@@ -8228,6 +8444,7 @@ def test_something():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_completion_context_function_signature_with_params() {
     use pytest_language_server::CompletionContext;
     let db = FixtureDatabase::new();
@@ -8268,6 +8485,7 @@ def test_something(my_fixture, ):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_completion_context_function_body() {
     use pytest_language_server::CompletionContext;
     let db = FixtureDatabase::new();
@@ -8308,6 +8526,7 @@ def test_something(my_fixture):
 }
 
 #[test]
+#[timeout(30000)]
 fn test_completion_context_fixture_function() {
     use pytest_language_server::CompletionContext;
     let db = FixtureDatabase::new();
@@ -8348,6 +8567,7 @@ def dependent_fixture():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_completion_context_usefixtures_decorator() {
     use pytest_language_server::CompletionContext;
     let db = FixtureDatabase::new();
@@ -8380,6 +8600,7 @@ def test_something():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_completion_context_outside_function() {
     let db = FixtureDatabase::new();
 
@@ -8403,6 +8624,7 @@ def test_something():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_get_function_param_insertion_info_empty_params() {
     let db = FixtureDatabase::new();
 
@@ -8424,6 +8646,7 @@ def test_something():
 }
 
 #[test]
+#[timeout(30000)]
 fn test_get_function_param_insertion_info_with_params() {
     let db = FixtureDatabase::new();
 

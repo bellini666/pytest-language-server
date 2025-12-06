@@ -40,6 +40,9 @@ type LineIndexCacheEntry = (u64, Arc<Vec<usize>>);
 pub struct FixtureDatabase {
     /// Map from fixture name to all its definitions (can be in multiple conftest.py files).
     pub definitions: Arc<DashMap<String, Vec<FixtureDefinition>>>,
+    /// Reverse index: file path -> fixture names defined in that file.
+    /// Used for efficient cleanup when a file is re-analyzed.
+    pub file_definitions: Arc<DashMap<PathBuf, HashSet<String>>>,
     /// Map from file path to fixtures used in that file.
     pub usages: Arc<DashMap<PathBuf, Vec<FixtureUsage>>>,
     /// Cache of file contents for analyzed files (uses Arc for efficient sharing).
@@ -66,6 +69,7 @@ impl FixtureDatabase {
     pub fn new() -> Self {
         Self {
             definitions: Arc::new(DashMap::new()),
+            file_definitions: Arc::new(DashMap::new()),
             usages: Arc::new(DashMap::new()),
             file_cache: Arc::new(DashMap::new()),
             undeclared_fixtures: Arc::new(DashMap::new()),

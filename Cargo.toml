@@ -37,3 +37,4 @@ insta = { version = "1.44", features = ["yaml"] }
 assert_cmd = "2.0"
 predicates = "3.1"
 tempfile = "3.23.0"
+ntest = "0.9"

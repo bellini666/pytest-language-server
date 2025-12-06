@@ -415,7 +415,7 @@ jobs:
     if: false
     steps:
       - name: Bump Zed extension version
-        uses: huacnlee/zed-extension-action@v1
+        uses: huacnlee/zed-extension-action@v2
         with:
           extension-name: pytest-language-server
           extension-path: extensions/zed-extension

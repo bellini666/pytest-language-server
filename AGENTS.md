@@ -22,7 +22,7 @@ This ensures the user maintains full control over their git workflow.
 **pytest-language-server** is a Language Server Protocol (LSP) implementation for pytest fixtures, written in Rust. It provides IDE features like go-to-definition, find-references, and hover documentation for pytest fixtures.
 
 - **Language**: Rust (Edition 2021, MSRV 1.83)
-- **Lines of Code**: ~3,120 lines (2,254 in fixtures.rs, 861 in main.rs)
+- **Lines of Code**: ~4,100 lines across modular structure
 - **Architecture**: Async LSP server using tower-lsp with CLI support via clap
 - **Key Features**: Fixture go-to-definition, find-references, hover docs, **code completion**, fixture overriding, undeclared fixture diagnostics, CLI commands, `@pytest.mark.usefixtures` support, `@pytest.mark.parametrize` indirect fixtures
 
@@ -32,24 +32,52 @@ This ensures the user maintains full control over their git workflow.
 
 ```
 src/
-├── lib.rs          # Library exports (3 lines)
-├── main.rs         # LSP server implementation + CLI (861 lines)
-└── fixtures.rs     # Fixture analysis engine (2,256 lines)
+├── lib.rs              # Library exports (~7 lines)
+├── main.rs             # LanguageServer trait impl + CLI (~310 lines)
+├── fixtures/           # Fixture analysis engine
+│   ├── mod.rs          # FixtureDatabase struct + helpers (~92 lines)
+│   ├── types.rs        # Data types (~50 lines)
+│   ├── scanner.rs      # Workspace scanning (~320 lines)
+│   ├── analyzer.rs     # AST parsing (~1400 lines)
+│   ├── resolver.rs     # Query methods (~920 lines)
+│   └── cli.rs          # CLI tree printing (~360 lines)
+└── providers/          # LSP protocol handlers
+    ├── mod.rs          # Backend struct + helpers (~195 lines)
+    ├── definition.rs   # Go-to-definition (~53 lines)
+    ├── references.rs   # Find-references (~199 lines)
+    ├── hover.rs        # Hover documentation (~55 lines)
+    ├── completion.rs   # Code completion (~219 lines)
+    ├── diagnostics.rs  # Publish diagnostics (~44 lines)
+    └── code_action.rs  # Quick fixes (~171 lines)
 ```
 
 ### Key Components
 
-1. **FixtureDatabase** (`src/fixtures.rs`)
+1. **FixtureDatabase** (`src/fixtures/`)
    - Central data structure for storing fixture definitions and usages
    - Uses `DashMap` for lock-free concurrent access
-   - Handles workspace scanning, file analysis, and fixture resolution
-   - Implements pytest's fixture priority/shadowing rules
+   - Split into focused modules:
+     - `mod.rs` - Database struct and common helpers
+     - `types.rs` - Data types (FixtureDefinition, FixtureUsage, etc.)
+     - `scanner.rs` - Workspace scanning and venv fixture detection
+     - `analyzer.rs` - Python AST parsing and fixture extraction
+     - `resolver.rs` - Fixture resolution and query methods
+     - `cli.rs` - CLI tree printing for `fixtures list` command
 
-2. **Backend** (`src/main.rs`)
+2. **Backend** (`src/providers/`)
    - LSP server implementation using `tower-lsp`
-   - Handles LSP protocol requests (initialize, goto_definition, references, hover)
-   - Coordinates with FixtureDatabase for fixture information
-   - Manages text document lifecycle (did_open, did_change)
+   - Each LSP feature in its own file:
+     - `definition.rs` - Go-to-definition handler
+     - `references.rs` - Find-references handler
+     - `hover.rs` - Hover documentation handler
+     - `completion.rs` - Code completion with auto-add parameter support
+     - `diagnostics.rs` - Undeclared fixture warnings
+     - `code_action.rs` - Quick fixes to add missing parameters
+
+3. **Main** (`src/main.rs`)
+   - `LanguageServer` trait implementation delegating to providers
+   - CLI argument parsing with clap
+   - LSP server startup and shutdown logic
 
 ### Data Structures
 
@@ -149,51 +177,55 @@ This is handled by `start_char` and `end_char` in `FixtureUsage`.
 
 ## Key Methods & Logic
 
-### src/fixtures.rs
+### src/fixtures/ modules
 
-**Core Methods:**
-- `scan_workspace(&self, root_path: &Path)` - Walks directory tree, finds test files
-- `analyze_file(&self, file_path: PathBuf, content: &str)` - Parses Python AST, extracts fixtures
-- `find_fixture_definition(&self, file_path: &Path, fixture_name: &str, line: usize, char: usize)` - Resolves fixture based on priority rules
-- `find_fixture_at_position(&self, file_path: &Path, line: usize, char: usize)` - Finds fixture name at cursor
-- `find_all_references(&self, fixture_name: &str, def_file: &Path)` - Finds all usages of a fixture
-- `get_char_position_from_offset(&self, file_path: &Path, line: usize, char_offset: usize)` - Converts byte offset to character position
+**Core Methods (resolver.rs):**
+- `find_fixture_definition(&self, file_path: &Path, line: u32, char: u32)` - Resolves fixture based on priority rules
+- `find_fixture_at_position(&self, file_path: &Path, line: u32, char: u32)` - Finds fixture name at cursor
+- `find_references_for_definition(&self, definition: &FixtureDefinition)` - Finds all usages of a specific fixture
 - `get_undeclared_fixtures(&self, file_path: &Path)` - Gets all undeclared fixture usages in a file
-- `scan_function_body_for_undeclared_fixtures()` - Detects fixtures used in function bodies without parameter declaration
 - `get_completion_context(&self, file_path: &Path, line: u32, char: u32)` - Determines completion context (signature, body, decorator)
 - `get_function_param_insertion_info(&self, file_path: &Path, function_line: usize)` - Gets where to insert new parameters
 - `get_available_fixtures(&self, file_path: &Path)` - Returns all fixtures available at a file location
 
-**AST Parsing:**
+**Workspace Scanning (scanner.rs):**
+- `scan_workspace(&self, root_path: &Path)` - Walks directory tree, finds test files
+- `scan_venv_fixtures(&self, root_path: &Path)` - Scans virtual environment for third-party fixtures
+
+**AST Parsing (analyzer.rs):**
+- `analyze_file(&self, file_path: PathBuf, content: &str)` - Parses Python AST, extracts fixtures
 - Uses `rustpython-parser` to parse Python files
 - Looks for `@pytest.fixture` decorators
 - Handles assignment-style fixtures (pytest-mock pattern: `mocker = pytest.fixture()(_mocker)`)
 - Extracts function signatures, docstrings, and parameter dependencies
 - Walks function body AST to find Name expressions that reference available fixtures
 
-**Undeclared Fixture Detection:**
-- Scans test and fixture function bodies for name references
-- Checks if each name is an available fixture (respects hierarchy)
-- Excludes declared parameters and built-in names (self, request)
-- Tracks line/character position for diagnostics
-- Only reports fixtures that are actually available in the current scope
+**CLI (cli.rs):**
+- `print_fixtures_tree(&self, root_path: &Path, skip_unused: bool, only_unused: bool)` - Prints fixture tree
+- `compute_definition_usage_counts(&self, root_path: &Path)` - Computes per-definition usage counts
+
+### src/providers/ modules
+
+**LSP Handlers:**
+- `handle_goto_definition()` (definition.rs) - Go-to-definition for fixtures
+- `handle_references()` (references.rs) - Find all references, includes definition
+- `handle_hover()` (hover.rs) - Shows fixture signature and docstring in Markdown
+- `handle_completion()` (completion.rs) - Context-aware fixture completions
+- `handle_code_action()` (code_action.rs) - Quick fixes to add missing parameters
+- `publish_diagnostics_for_file()` (diagnostics.rs) - Publishes undeclared fixture warnings
+
+**Helper Methods (mod.rs):**
+- `uri_to_path()` / `path_to_uri()` - URI/path conversion with symlink handling
+- `lsp_line_to_internal()` / `internal_line_to_lsp()` - Line number conversion (0-based vs 1-based)
+- `format_fixture_documentation()` - Formats fixture info for hover/completion
 
 ### src/main.rs
 
-**LSP Handlers:**
-- `initialize()` - Scans workspace on startup
-- `goto_definition()` - Calls `find_fixture_at_position()` then `find_fixture_definition()`
-- `references()` - Finds all references, ensures current position is included (LSP spec compliance)
-- `hover()` - Shows fixture signature and docstring in Markdown format
-- `completion()` - Context-aware fixture completions with auto-add parameter support
-- `did_open()`, `did_change()` - Re-analyzes files when opened/modified, publishes diagnostics
-- `code_action()` - Provides quick fixes to add missing fixture parameters
-- `publish_diagnostics_for_file()` - Publishes warnings for undeclared fixtures
-**Completion Helpers:**
-- `format_fixture_documentation()` - Formats fixture info for hover/completion (consistent display)
-- `create_fixture_completions()` - Creates completion items for function signatures
-- `create_fixture_completions_with_auto_add()` - Creates completions that also add to parameters
-- `create_string_fixture_completions()` - Creates completions for decorator strings
+**LanguageServer trait implementation:**
+- `initialize()` - Scans workspace on startup, returns capabilities
+- `did_open()`, `did_change()` - Re-analyzes files, publishes diagnostics
+- `goto_definition()`, `hover()`, `references()`, `completion()`, `code_action()` - Delegate to providers
+- `shutdown()` - Cancels background tasks, forces exit
 
 ## Testing
 
@@ -201,13 +233,15 @@ This is handled by `start_char` and `end_char` in `FixtureUsage`.
 
 ```
 src/
-├── fixtures.rs           # Main code (2,254 lines)
-└── main.rs              # LSP server (861 lines)
+├── fixtures/            # Fixture analysis (~3140 lines total)
+├── providers/           # LSP providers (~936 lines total)
+├── main.rs              # LanguageServer impl + CLI (~310 lines)
+└── lib.rs               # Library exports (~7 lines)
 
 tests/
-├── test_fixtures.rs     # FixtureDatabase integration tests (164 tests)
-├── test_lsp.rs         # LSP protocol tests (29 tests)
-├── test_e2e.rs         # End-to-end integration tests (22 tests)
+├── test_fixtures.rs     # FixtureDatabase integration tests (218 tests)
+├── test_lsp.rs         # LSP protocol tests (34 tests)
+├── test_e2e.rs         # End-to-end integration tests (32 tests)
 └── test_project/       # Fixture test files for integration tests
     ├── conftest.py
     ├── test_example.py
@@ -411,20 +445,23 @@ Install with: `pre-commit install`
 ### Adding a New LSP Feature
 
 1. Add the capability in `main.rs` `initialize()` method's `ServerCapabilities`
-2. Implement the handler method (async trait impl)
-3. Add necessary methods to `FixtureDatabase` in `fixtures.rs`
-4. Write integration tests in `main.rs` (see existing tests for patterns)
-5. Update README.md with feature documentation
+2. Create a new file in `src/providers/` (e.g., `new_feature.rs`)
+3. Add handler method as `impl Backend` block in the new file
+4. Add `pub mod new_feature;` to `src/providers/mod.rs`
+5. Add necessary methods to `FixtureDatabase` in appropriate `src/fixtures/` module
+6. Implement the `LanguageServer` trait method in `main.rs` delegating to your handler
+7. Write integration tests in `tests/test_lsp.rs`
+8. Update README.md with feature documentation
 
 ### Modifying Fixture Resolution Logic
 
-1. Edit `src/fixtures.rs` methods:
+1. Edit `src/fixtures/resolver.rs` methods:
    - `find_fixture_definition()` for go-to-definition
-   - `find_all_references()` for find-references
-   - `analyze_file()` if changing what fixtures are detected
-2. Add test cases to `tests/test_fixtures.rs`
-3. Run `cargo test` to ensure all 73 tests pass
-4. Consider edge cases: self-referencing fixtures, multiline signatures, conftest.py hierarchy
+   - `find_references_for_definition()` for find-references
+2. Edit `src/fixtures/analyzer.rs` if changing what fixtures are detected
+3. Add test cases to `tests/test_fixtures.rs`
+4. Run `cargo test` to ensure all 284 tests pass
+5. Consider edge cases: self-referencing fixtures, multiline signatures, conftest.py hierarchy
 
 ### Debugging LSP Issues
 
@@ -562,8 +599,8 @@ Critical LSP specification requirements:
 ## Troubleshooting
 
 ### Tests failing after fixture logic changes
-- Check that all 73 tests pass: `cargo test`
-- Focus on failing tests in `fixtures.rs` (fixture resolution) or `main.rs` (LSP handlers)
+- Check that all 284 tests pass: `cargo test`
+- Focus on failing tests in `fixtures/` modules (fixture resolution) or `providers/` (LSP handlers)
 - Common issue: fixture priority rules not respecting conftest.py hierarchy
 
 ### LSP not finding fixtures

@@ -6,7 +6,7 @@
 use rustpython_parser::ast::Expr;
 
 /// Check if an expression is a @pytest.fixture decorator
-pub(crate) fn is_fixture_decorator(expr: &Expr) -> bool {
+pub fn is_fixture_decorator(expr: &Expr) -> bool {
     match expr {
         Expr::Name(name) => name.id.as_str() == "fixture",
         Expr::Attribute(attr) => {
@@ -22,7 +22,7 @@ pub(crate) fn is_fixture_decorator(expr: &Expr) -> bool {
 }
 
 /// Extracts the fixture name from a decorator's `name=` argument if present.
-pub(crate) fn extract_fixture_name_from_decorator(expr: &Expr) -> Option<String> {
+pub fn extract_fixture_name_from_decorator(expr: &Expr) -> Option<String> {
     let Expr::Call(call) = expr else { return None };
     if !is_fixture_decorator(&call.func) {
         return None;
@@ -41,7 +41,7 @@ pub(crate) fn extract_fixture_name_from_decorator(expr: &Expr) -> Option<String>
 }
 
 /// Checks if an expression is a pytest.mark.usefixtures decorator.
-pub(crate) fn is_usefixtures_decorator(expr: &Expr) -> bool {
+pub fn is_usefixtures_decorator(expr: &Expr) -> bool {
     match expr {
         Expr::Call(call) => is_usefixtures_decorator(&call.func),
         Expr::Attribute(attr) => {
@@ -64,7 +64,7 @@ pub(crate) fn is_usefixtures_decorator(expr: &Expr) -> bool {
 }
 
 /// Extracts fixture names from @pytest.mark.usefixtures("fix1", "fix2", ...) decorator.
-pub(crate) fn extract_usefixtures_names(
+pub fn extract_usefixtures_names(
     expr: &Expr,
 ) -> Vec<(String, rustpython_parser::text_size::TextRange)> {
     let Expr::Call(call) = expr else {
@@ -88,7 +88,7 @@ pub(crate) fn extract_usefixtures_names(
 }
 
 /// Checks if an expression is a pytest.mark.parametrize decorator.
-pub(crate) fn is_parametrize_decorator(expr: &Expr) -> bool {
+pub fn is_parametrize_decorator(expr: &Expr) -> bool {
     match expr {
         Expr::Call(call) => is_parametrize_decorator(&call.func),
         Expr::Attribute(attr) => {
@@ -111,7 +111,7 @@ pub(crate) fn is_parametrize_decorator(expr: &Expr) -> bool {
 }
 
 /// Extracts fixture names from @pytest.mark.parametrize when indirect=True.
-pub(crate) fn extract_parametrize_indirect_fixtures(
+pub fn extract_parametrize_indirect_fixtures(
     expr: &Expr,
 ) -> Vec<(String, rustpython_parser::text_size::TextRange)> {
     let Expr::Call(call) = expr else {

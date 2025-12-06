@@ -8,7 +8,7 @@
 
 mod analyzer;
 pub(crate) mod cli;
-mod decorators;
+pub mod decorators; // Public for testing
 mod resolver;
 mod scanner;
 pub mod types;

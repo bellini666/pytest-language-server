@@ -3,6 +3,7 @@
 //! This module contains methods for finding fixture definitions,
 //! references, and providing completion context.
 
+use super::decorators;
 use super::types::{
     CompletionContext, FixtureDefinition, FixtureUsage, ParamInsertionInfo, UndeclaredFixture,
 };
@@ -594,10 +595,10 @@ impl FixtureDatabase {
                     + 1;
 
                 if target_line >= dec_start_line && target_line <= dec_end_line {
-                    if FixtureDatabase::is_usefixtures_decorator(decorator) {
+                    if decorators::is_usefixtures_decorator(decorator) {
                         return Some(CompletionContext::UsefixuturesDecorator);
                     }
-                    if FixtureDatabase::is_parametrize_decorator(decorator) {
+                    if decorators::is_parametrize_decorator(decorator) {
                         return Some(CompletionContext::ParametrizeIndirect);
                     }
                 }
@@ -616,21 +617,7 @@ impl FixtureDatabase {
         None
     }
 
-    /// Check if an expression is a fixture decorator
-    fn is_fixture_decorator_check(expr: &Expr) -> bool {
-        match expr {
-            Expr::Name(name) => name.id.as_str() == "fixture",
-            Expr::Attribute(attr) => {
-                if let Expr::Name(value) = &*attr.value {
-                    value.id.as_str() == "pytest" && attr.attr.as_str() == "fixture"
-                } else {
-                    false
-                }
-            }
-            Expr::Call(call) => Self::is_fixture_decorator_check(&call.func),
-            _ => false,
-        }
-    }
+
 
     /// Get completion context when cursor is inside a function
     fn get_function_completion_context(
@@ -704,7 +691,7 @@ impl FixtureDatabase {
             return None;
         }
 
-        let is_fixture = decorator_list.iter().any(Self::is_fixture_decorator_check);
+        let is_fixture = decorator_list.iter().any(decorators::is_fixture_decorator);
         let is_test = func_name.as_str().starts_with("test_");
 
         if !is_test && !is_fixture {
@@ -863,7 +850,7 @@ impl FixtureDatabase {
                         let is_fixture = func_def
                             .decorator_list
                             .iter()
-                            .any(FixtureDatabase::is_fixture_decorator);
+                            .any(decorators::is_fixture_decorator);
                         let is_test = func_def.name.starts_with("test_");
 
                         // Only return if it's a test or fixture
@@ -889,7 +876,7 @@ impl FixtureDatabase {
                         let is_fixture = func_def
                             .decorator_list
                             .iter()
-                            .any(FixtureDatabase::is_fixture_decorator);
+                            .any(decorators::is_fixture_decorator);
                         let is_test = func_def.name.starts_with("test_");
 
                         if is_test || is_fixture {

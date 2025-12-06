@@ -8,6 +8,7 @@
 
 mod analyzer;
 pub(crate) mod cli;
+mod decorators;
 mod resolver;
 mod scanner;
 pub mod types;
@@ -40,6 +41,8 @@ pub struct FixtureDatabase {
     pub imports: Arc<DashMap<PathBuf, HashSet<String>>>,
     /// Cache of canonical paths to avoid repeated filesystem calls.
     pub canonical_path_cache: Arc<DashMap<PathBuf, PathBuf>>,
+    /// Cache of line indices (byte offsets) for files to avoid recomputation.
+    pub line_index_cache: Arc<DashMap<PathBuf, Arc<Vec<usize>>>>,
 }
 
 impl Default for FixtureDatabase {
@@ -58,6 +61,7 @@ impl FixtureDatabase {
             undeclared_fixtures: Arc::new(DashMap::new()),
             imports: Arc::new(DashMap::new()),
             canonical_path_cache: Arc::new(DashMap::new()),
+            line_index_cache: Arc::new(DashMap::new()),
         }
     }
 
@@ -88,5 +92,24 @@ impl FixtureDatabase {
         } else {
             std::fs::read_to_string(file_path).ok().map(Arc::new)
         }
+    }
+
+    /// Get or compute line index for a file, with caching.
+    /// Returns Arc to avoid cloning the potentially large Vec.
+    pub(crate) fn get_line_index(&self, file_path: &Path, content: &str) -> Arc<Vec<usize>> {
+        // Check cache first
+        if let Some(cached) = self.line_index_cache.get(file_path) {
+            return Arc::clone(cached.value());
+        }
+
+        // Build line index
+        let line_index = Self::build_line_index(content);
+        let arc_index = Arc::new(line_index);
+
+        // Store in cache
+        self.line_index_cache
+            .insert(file_path.to_path_buf(), Arc::clone(&arc_index));
+
+        arc_index
     }
 }

@@ -346,6 +346,7 @@ impl FixtureDatabase {
 
             let (start_char, end_char) = self.find_function_name_position(content, line, func_name);
 
+            let is_third_party = file_path.to_string_lossy().contains("site-packages");
             let definition = FixtureDefinition {
                 name: fixture_name.clone(),
                 file_path: file_path.clone(),
@@ -354,6 +355,7 @@ impl FixtureDatabase {
                 end_char,
                 docstring,
                 return_type,
+                is_third_party,
             };
 
             self.definitions
@@ -492,6 +494,8 @@ impl FixtureDatabase {
                                 fixture_name, file_path, line, start_char, end_char
                             );
 
+                            let is_third_party =
+                                file_path.to_string_lossy().contains("site-packages");
                             let definition = FixtureDefinition {
                                 name: fixture_name.to_string(),
                                 file_path: file_path.clone(),
@@ -500,6 +504,7 @@ impl FixtureDatabase {
                                 end_char,
                                 docstring: None,
                                 return_type: None,
+                                is_third_party,
                             };
 
                             self.definitions
@@ -1390,7 +1395,7 @@ impl FixtureDatabase {
                 }
 
                 // Check if it's in a virtual environment (third-party fixture)
-                if def.file_path.to_string_lossy().contains("site-packages") {
+                if def.is_third_party {
                     return true;
                 }
             }

@@ -40,12 +40,13 @@ pub fn extract_fixture_name_from_decorator(expr: &Expr) -> Option<String> {
         })
 }
 
-/// Checks if an expression is a pytest.mark.usefixtures decorator.
-pub fn is_usefixtures_decorator(expr: &Expr) -> bool {
+/// Checks if an expression is a pytest.mark.* decorator with the given marker name.
+/// This is a helper function to avoid duplicating the decorator matching logic.
+fn is_pytest_mark_decorator(expr: &Expr, marker_name: &str) -> bool {
     match expr {
-        Expr::Call(call) => is_usefixtures_decorator(&call.func),
+        Expr::Call(call) => is_pytest_mark_decorator(&call.func, marker_name),
         Expr::Attribute(attr) => {
-            if attr.attr.as_str() != "usefixtures" {
+            if attr.attr.as_str() != marker_name {
                 return false;
             }
             match &*attr.value {
@@ -61,6 +62,11 @@ pub fn is_usefixtures_decorator(expr: &Expr) -> bool {
         }
         _ => false,
     }
+}
+
+/// Checks if an expression is a pytest.mark.usefixtures decorator.
+pub fn is_usefixtures_decorator(expr: &Expr) -> bool {
+    is_pytest_mark_decorator(expr, "usefixtures")
 }
 
 /// Extracts fixture names from @pytest.mark.usefixtures("fix1", "fix2", ...) decorator.
@@ -89,25 +95,7 @@ pub fn extract_usefixtures_names(
 
 /// Checks if an expression is a pytest.mark.parametrize decorator.
 pub fn is_parametrize_decorator(expr: &Expr) -> bool {
-    match expr {
-        Expr::Call(call) => is_parametrize_decorator(&call.func),
-        Expr::Attribute(attr) => {
-            if attr.attr.as_str() != "parametrize" {
-                return false;
-            }
-            match &*attr.value {
-                Expr::Attribute(inner_attr) => {
-                    if inner_attr.attr.as_str() != "mark" {
-                        return false;
-                    }
-                    matches!(&*inner_attr.value, Expr::Name(name) if name.id.as_str() == "pytest")
-                }
-                Expr::Name(name) => name.id.as_str() == "mark",
-                _ => false,
-            }
-        }
-        _ => false,
-    }
+    is_pytest_mark_decorator(expr, "parametrize")
 }
 
 /// Extracts fixture names from @pytest.mark.parametrize when indirect=True.

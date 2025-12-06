@@ -167,7 +167,7 @@ impl FixtureDatabase {
             fixture_name
         );
         for def in definitions.iter() {
-            if def.file_path.to_string_lossy().contains("site-packages") {
+            if def.is_third_party {
                 info!(
                     "Found third-party fixture {} in site-packages: {:?}",
                     fixture_name, def.file_path
@@ -265,7 +265,7 @@ impl FixtureDatabase {
                     continue;
                 }
             }
-            if def.file_path.to_string_lossy().contains("site-packages") {
+            if def.is_third_party {
                 info!(
                     "Found third-party fixture {} in site-packages: {:?}",
                     fixture_name, def.file_path
@@ -490,9 +490,7 @@ impl FixtureDatabase {
         for entry in self.definitions.iter() {
             let fixture_name = entry.key();
             for def in entry.value().iter() {
-                if def.file_path.to_string_lossy().contains("site-packages")
-                    && !seen_names.contains(fixture_name.as_str())
-                {
+                if def.is_third_party && !seen_names.contains(fixture_name.as_str()) {
                     available_fixtures.push(def.clone());
                     seen_names.insert(fixture_name.clone());
                 }

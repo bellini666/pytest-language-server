@@ -14,6 +14,7 @@ fn test_hover_content_with_leading_newline() {
         end_char: 14,
         docstring: Some("This is a test fixture.\n\nIt does something useful.".to_string()),
         return_type: None,
+        is_third_party: false,
     };
 
     // Build hover content (same logic as hover method)
@@ -75,6 +76,7 @@ fn test_hover_content_structure_without_docstring() {
         end_char: 18,
         docstring: None,
         return_type: None,
+        is_third_party: false,
     };
 
     // Build hover content
@@ -1830,4 +1832,490 @@ def test_mixed(renamed, normal):
     assert!(normal_def.is_some());
     assert_eq!(renamed_def.unwrap().name, "renamed");
     assert_eq!(normal_def.unwrap().name, "normal");
+}
+
+// ============================================================================
+// COMPLETION PROVIDER TESTS
+// ============================================================================
+
+#[test]
+fn test_completion_context_in_function_signature() {
+    use pytest_language_server::CompletionContext;
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 42
+"#;
+    let conftest_path = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let test_content = r#"
+def test_example(my_fixture, ):
+    pass
+"#;
+    let test_path = PathBuf::from("/tmp/project/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Position after the comma in the signature (line 1, char 29)
+    // Line 2 in content = line 1 in 0-indexed LSP
+    let ctx = db.get_completion_context(&test_path, 1, 30);
+
+    assert!(ctx.is_some(), "Should detect function signature context");
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature {
+            function_name,
+            declared_params,
+            ..
+        } => {
+            assert_eq!(function_name, "test_example");
+            assert!(declared_params.contains(&"my_fixture".to_string()));
+        }
+        _ => panic!("Expected FunctionSignature context"),
+    }
+}
+
+#[test]
+fn test_completion_context_in_function_body() {
+    use pytest_language_server::CompletionContext;
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 42
+"#;
+    let conftest_path = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let test_content = r#"
+def test_example():
+    result = None
+    pass
+"#;
+    let test_path = PathBuf::from("/tmp/project/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Position inside the function body (line 3, the "pass" line)
+    let ctx = db.get_completion_context(&test_path, 3, 4);
+
+    assert!(ctx.is_some(), "Should detect function body context");
+    match ctx.unwrap() {
+        CompletionContext::FunctionBody {
+            function_name,
+            declared_params,
+            ..
+        } => {
+            assert_eq!(function_name, "test_example");
+            assert!(declared_params.is_empty());
+        }
+        _ => panic!("Expected FunctionBody context"),
+    }
+}
+
+#[test]
+fn test_completion_context_in_usefixtures_decorator() {
+    use pytest_language_server::CompletionContext;
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 42
+"#;
+    let conftest_path = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let test_content = r#"
+import pytest
+
+@pytest.mark.usefixtures("")
+def test_example():
+    pass
+"#;
+    let test_path = PathBuf::from("/tmp/project/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Position inside the usefixtures string (line 3, char 27 - inside quotes)
+    let ctx = db.get_completion_context(&test_path, 3, 27);
+
+    assert!(ctx.is_some(), "Should detect usefixtures decorator context");
+    match ctx.unwrap() {
+        CompletionContext::UsefixuturesDecorator => {}
+        _ => panic!("Expected UsefixuturesDecorator context"),
+    }
+}
+
+#[test]
+fn test_get_available_fixtures() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def fixture_one():
+    return 1
+
+@pytest.fixture
+def fixture_two():
+    return 2
+"#;
+    let conftest_path = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let test_content = r#"
+import pytest
+
+@pytest.fixture
+def local_fixture():
+    return 3
+
+def test_example():
+    pass
+"#;
+    let test_path = PathBuf::from("/tmp/project/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Get available fixtures for the test file
+    let available = db.get_available_fixtures(&test_path);
+
+    // Should include fixtures from conftest.py and local fixtures
+    let names: Vec<_> = available.iter().map(|f| f.name.as_str()).collect();
+    assert!(
+        names.contains(&"fixture_one"),
+        "Should include conftest fixtures"
+    );
+    assert!(
+        names.contains(&"fixture_two"),
+        "Should include conftest fixtures"
+    );
+    assert!(
+        names.contains(&"local_fixture"),
+        "Should include local fixtures"
+    );
+}
+
+#[test]
+fn test_get_available_fixtures_priority() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    // Parent conftest
+    let parent_conftest = r#"
+import pytest
+
+@pytest.fixture
+def shared_fixture():
+    return "parent"
+"#;
+    let parent_path = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(parent_path.clone(), parent_conftest);
+
+    // Child conftest that overrides
+    let child_conftest = r#"
+import pytest
+
+@pytest.fixture
+def shared_fixture():
+    return "child"
+"#;
+    let child_path = PathBuf::from("/tmp/project/tests/conftest.py");
+    db.analyze_file(child_path.clone(), child_conftest);
+
+    let test_content = r#"
+def test_example():
+    pass
+"#;
+    let test_path = PathBuf::from("/tmp/project/tests/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Get available fixtures for the test file
+    let available = db.get_available_fixtures(&test_path);
+
+    // Should only include one "shared_fixture" (the closest one)
+    let shared_fixtures: Vec<_> = available
+        .iter()
+        .filter(|f| f.name == "shared_fixture")
+        .collect();
+    assert_eq!(
+        shared_fixtures.len(),
+        1,
+        "Should only have one shared_fixture (closest wins)"
+    );
+
+    // The fixture should be from the child conftest (closest)
+    assert_eq!(
+        shared_fixtures[0].file_path, child_path,
+        "Should prefer closer conftest"
+    );
+}
+
+#[test]
+fn test_get_function_param_insertion_info() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+def test_with_params(existing_param):
+    pass
+
+def test_no_params():
+    pass
+"#;
+    let file_path = PathBuf::from("/tmp/project/test_example.py");
+    db.analyze_file(file_path.clone(), content);
+
+    // Test function with existing params (line 2 in 1-indexed)
+    let info = db.get_function_param_insertion_info(&file_path, 2);
+    assert!(info.is_some(), "Should find insertion info");
+    let info = info.unwrap();
+    assert!(
+        info.needs_comma,
+        "Should need comma since there's an existing param"
+    );
+    assert_eq!(info.line, 2, "Should be on line 2");
+
+    // Test function with no params (line 5 in 1-indexed)
+    let info = db.get_function_param_insertion_info(&file_path, 5);
+    assert!(
+        info.is_some(),
+        "Should find insertion info for no-param function"
+    );
+    let info = info.unwrap();
+    assert!(!info.needs_comma, "Should not need comma for empty params");
+}
+
+#[test]
+fn test_get_function_param_insertion_info_multiline() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+def test_multiline(
+    first_param,
+    second_param,
+):
+    pass
+"#;
+    let file_path = PathBuf::from("/tmp/project/test_example.py");
+    db.analyze_file(file_path.clone(), content);
+
+    // Test multiline function (starts at line 2 in 1-indexed)
+    let info = db.get_function_param_insertion_info(&file_path, 2);
+    assert!(
+        info.is_some(),
+        "Should find insertion info for multiline signature"
+    );
+}
+
+// ============================================================================
+// CODE ACTION TESTS
+// ============================================================================
+
+#[test]
+fn test_undeclared_fixture_detection() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def available_fixture():
+    return 42
+"#;
+    let conftest_path = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let test_content = r#"
+def test_undeclared():
+    result = available_fixture + 1
+    assert result == 43
+"#;
+    let test_path = PathBuf::from("/tmp/project/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Get undeclared fixtures
+    let undeclared = db.get_undeclared_fixtures(&test_path);
+
+    assert_eq!(undeclared.len(), 1, "Should detect 1 undeclared fixture");
+    assert_eq!(undeclared[0].name, "available_fixture");
+    assert_eq!(undeclared[0].function_name, "test_undeclared");
+}
+
+#[test]
+fn test_undeclared_fixture_not_detected_when_declared() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 42
+"#;
+    let conftest_path = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let test_content = r#"
+def test_declared(my_fixture):
+    result = my_fixture + 1
+    assert result == 43
+"#;
+    let test_path = PathBuf::from("/tmp/project/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Get undeclared fixtures - should be empty since my_fixture is declared
+    let undeclared = db.get_undeclared_fixtures(&test_path);
+
+    assert!(
+        undeclared.is_empty(),
+        "Should not detect fixture as undeclared when it's a parameter"
+    );
+}
+
+#[test]
+fn test_undeclared_fixture_multiple() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def fixture_a():
+    return 1
+
+@pytest.fixture
+def fixture_b():
+    return 2
+
+@pytest.fixture
+def fixture_c():
+    return 3
+"#;
+    let conftest_path = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let test_content = r#"
+def test_multiple_undeclared():
+    total = fixture_a + fixture_b + fixture_c
+    assert total == 6
+"#;
+    let test_path = PathBuf::from("/tmp/project/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Get undeclared fixtures
+    let undeclared = db.get_undeclared_fixtures(&test_path);
+
+    assert_eq!(undeclared.len(), 3, "Should detect 3 undeclared fixtures");
+    let names: Vec<_> = undeclared.iter().map(|u| u.name.as_str()).collect();
+    assert!(names.contains(&"fixture_a"));
+    assert!(names.contains(&"fixture_b"));
+    assert!(names.contains(&"fixture_c"));
+}
+
+#[test]
+fn test_undeclared_fixture_position_accuracy() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 42
+"#;
+    let conftest_path = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let test_content = r#"
+def test_position():
+    result = my_fixture + 1
+"#;
+    let test_path = PathBuf::from("/tmp/project/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    let undeclared = db.get_undeclared_fixtures(&test_path);
+    assert_eq!(undeclared.len(), 1);
+
+    let fixture = &undeclared[0];
+    assert_eq!(fixture.line, 3, "Should be on line 3 (1-indexed)");
+    assert_eq!(
+        fixture.function_line, 2,
+        "Function should start on line 2 (1-indexed)"
+    );
+    // start_char and end_char should accurately point to "my_fixture"
+    assert!(
+        fixture.start_char < fixture.end_char,
+        "Character positions should be valid"
+    );
+}
+
+#[test]
+fn test_is_third_party_fixture() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    // Third-party fixture in site-packages
+    let third_party_content = r#"
+import pytest
+
+@pytest.fixture
+def mock():
+    pass
+"#;
+    let third_party_path =
+        PathBuf::from("/tmp/.venv/lib/python3.11/site-packages/pytest_mock/plugin.py");
+    db.analyze_file(third_party_path.clone(), third_party_content);
+
+    // Local fixture
+    let local_content = r#"
+import pytest
+
+@pytest.fixture
+def local_fixture():
+    pass
+"#;
+    let local_path = PathBuf::from("/tmp/project/conftest.py");
+    db.analyze_file(local_path.clone(), local_content);
+
+    // Check the is_third_party field
+    let mock_defs = db.definitions.get("mock").unwrap();
+    assert!(
+        mock_defs.iter().all(|d| d.is_third_party),
+        "mock should be third-party"
+    );
+
+    let local_defs = db.definitions.get("local_fixture").unwrap();
+    assert!(
+        local_defs.iter().all(|d| !d.is_third_party),
+        "local_fixture should not be third-party"
+    );
 }

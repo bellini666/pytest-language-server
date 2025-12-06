@@ -95,6 +95,7 @@ pub struct FixtureDefinition {
     pub start_char: usize,  // Character position of name on line
     pub end_char: usize,    // Character position of name end on line
     pub docstring: Option<String>,
+    pub is_third_party: bool,  // True if from site-packages (cached for performance)
 }
 
 pub struct FixtureUsage {
@@ -274,13 +275,13 @@ RUST_LOG=debug cargo test          # Run with debug logging
 
 ### Test Coverage
 
-- **310 total tests passing** (as of latest)
+- **322 total tests passing** (as of latest)
   - 218 integration tests in `tests/test_fixtures.rs` (FixtureDatabase API)
-  - 34 integration tests in `tests/test_lsp.rs` (LSP protocol handlers)
+  - 46 integration tests in `tests/test_lsp.rs` (LSP protocol handlers)
   - 32 integration tests in `tests/test_e2e.rs` (End-to-end CLI and workspace tests)
   - 9 unit tests in `tests/test_decorators.rs` (Decorator utilities)
   - 7 tests in `tests/test_lsp_performance.rs` (Performance and caching)
-  - 5 embedded unit tests in `src/fixtures/string_utils.rs`
+  - 10 embedded unit tests in `src/fixtures/` modules
 
 **Key test areas:**
 
@@ -469,7 +470,7 @@ Install with: `pre-commit install`
    - `find_references_for_definition()` for find-references
 2. Edit `src/fixtures/analyzer.rs` if changing what fixtures are detected
 3. Add test cases to `tests/test_fixtures.rs`
-4. Run `cargo test` to ensure all 284 tests pass
+4. Run `cargo test` to ensure all 322 tests pass
 5. Consider edge cases: self-referencing fixtures, multiline signatures, conftest.py hierarchy
 
 ### Debugging LSP Issues
@@ -608,7 +609,7 @@ Critical LSP specification requirements:
 ## Troubleshooting
 
 ### Tests failing after fixture logic changes
-- Check that all 284 tests pass: `cargo test`
+- Check that all 322 tests pass: `cargo test`
 - Focus on failing tests in `fixtures/` modules (fixture resolution) or `providers/` (LSP handlers)
 - Common issue: fixture priority rules not respecting conftest.py hierarchy
 
@@ -685,7 +686,9 @@ The project includes extensions for three major editors/IDEs:
   - Auto-add fixture to parameters when completing in function body
   - Trigger character `"` for usefixtures decorator completions
   - Consistent documentation format between hover and completions
-  - Test suite: 284 tests (218 unit + 34 LSP + 32 E2E)
+  - Added `is_third_party` field to `FixtureDefinition` for performance optimization
+  - Extracted `is_pytest_mark_decorator` helper in decorators.rs for DRY improvement
+  - Test suite: 322 tests (218 unit + 46 LSP + 32 E2E + 9 decorators + 7 performance)
 - **v0.11.2** (December 2025)
   - Fixed fixture scoping: sibling test files no longer incorrectly share fixtures (#23)
   - Usage counting now uses per-definition scoped counting instead of global name counting

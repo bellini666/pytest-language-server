@@ -580,8 +580,6 @@ impl FixtureDatabase {
         None
     }
 
-
-
     /// Get completion context when cursor is inside a function
     fn get_function_completion_context(
         &self,

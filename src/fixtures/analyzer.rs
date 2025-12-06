@@ -87,7 +87,7 @@ impl FixtureDatabase {
 
             // Second pass: analyze fixtures and tests
             for stmt in &module.body {
-                self.visit_stmt(stmt, &file_path, is_conftest, content, &*line_index);
+                self.visit_stmt(stmt, &file_path, is_conftest, content, &line_index);
             }
         }
 
@@ -511,7 +511,6 @@ impl FixtureDatabase {
             }
         }
     }
-
 }
 
 // Second impl block for additional analyzer methods

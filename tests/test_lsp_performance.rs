@@ -89,7 +89,7 @@ def test_something(another_fixture):
 fn test_file_rename_scenario() {
     // Simulate renaming a test file (editor removes from one path, adds to another)
     let temp_dir = TempDir::new().unwrap();
-    
+
     let original_content = r#"
 import pytest
 
@@ -103,7 +103,7 @@ def test_one(shared_fixture):
 
     // Create original file
     let old_path = create_temp_test_file(&temp_dir, "test_old.py", original_content);
-    
+
     let db = FixtureDatabase::new();
     db.analyze_file(old_path.clone(), original_content);
 
@@ -118,7 +118,7 @@ def test_one(shared_fixture):
 
     // Fixture should still be in the database (from both paths until old is cleaned up)
     assert!(db.definitions.contains_key("shared_fixture"));
-    
+
     // In a real LSP scenario, the server would clean up the old file's data
     // when notified of file deletion. For this test, we verify both are accessible.
 }
@@ -127,7 +127,7 @@ def test_one(shared_fixture):
 fn test_multiple_files_simultaneous_changes() {
     // Simulate multiple files being edited at the same time (e.g., multi-cursor edit)
     let temp_dir = TempDir::new().unwrap();
-    
+
     let file1_content = r#"
 import pytest
 
@@ -135,7 +135,7 @@ import pytest
 def fixture_a():
     return 1
 "#;
-    
+
     let file2_content = r#"
 import pytest
 
@@ -177,7 +177,7 @@ def shared_name():
 fn test_large_file_incremental_changes() {
     // Test performance with a large file that gets incrementally edited
     let temp_dir = TempDir::new().unwrap();
-    
+
     // Generate a large file with many fixtures
     let mut content = String::from("import pytest\n\n");
     for i in 0..50 {
@@ -186,28 +186,28 @@ fn test_large_file_incremental_changes() {
             i, i
         ));
     }
-    
+
     let file_path = create_temp_test_file(&temp_dir, "test_large.py", &content);
-    
+
     let db = FixtureDatabase::new();
-    
+
     // Initial analysis
     let start = std::time::Instant::now();
     db.analyze_file(file_path.clone(), &content);
     let initial_duration = start.elapsed();
-    
+
     assert_eq!(db.definitions.len(), 50);
-    
+
     // Add one more fixture (simulating user typing)
     content.push_str("@pytest.fixture\ndef new_fixture():\n    return 999\n");
-    
+
     // Re-analyze
     let start = std::time::Instant::now();
     db.analyze_file(file_path.clone(), &content);
     let update_duration = start.elapsed();
-    
+
     assert_eq!(db.definitions.len(), 51);
-    
+
     // Performance check: incremental update should be reasonably fast
     // This is a regression test - if changes make it much slower, this will fail
     // Using 1 second to be generous for CI/slower systems
@@ -218,7 +218,7 @@ fn test_large_file_incremental_changes() {
         update_duration,
         MAX_UPDATE_TIME_MS
     );
-    
+
     println!(
         "Large file analysis: initial={:?}, update={:?}",
         initial_duration, update_duration
@@ -229,12 +229,12 @@ fn test_large_file_incremental_changes() {
 fn test_conftest_hierarchy_with_changes() {
     // Test that fixture resolution remains correct when conftest files change
     let temp_dir = TempDir::new().unwrap();
-    
+
     // Create directory structure
     let root = temp_dir.path();
     let subdir = root.join("subdir");
     std::fs::create_dir(&subdir).unwrap();
-    
+
     // Root conftest
     let root_conftest = r#"
 import pytest
@@ -243,31 +243,31 @@ import pytest
 def root_fixture():
     return "root"
 "#;
-    
+
     // Subdir test file using the fixture
     let test_content = r#"
 def test_something(root_fixture):
     assert root_fixture == "root"
 "#;
-    
+
     let root_conftest_path = root.join("conftest.py");
     std::fs::write(&root_conftest_path, root_conftest).unwrap();
-    
+
     let test_path = subdir.join("test_sub.py");
     std::fs::write(&test_path, test_content).unwrap();
-    
+
     let db = FixtureDatabase::new();
-    
+
     // Analyze both files
     db.analyze_file(root_conftest_path.clone(), root_conftest);
     db.analyze_file(test_path.clone(), test_content);
-    
+
     // Verify fixture is found
     assert!(db.definitions.contains_key("root_fixture"));
     let usages = db.usages.get(&test_path).unwrap();
     assert_eq!(usages.len(), 1);
     assert_eq!(usages[0].name, "root_fixture");
-    
+
     // Simulate conftest.py being edited to add another fixture
     let updated_conftest = r#"
 import pytest
@@ -280,14 +280,14 @@ def root_fixture():
 def new_root_fixture():
     return "new"
 "#;
-    
+
     db.analyze_file(root_conftest_path.clone(), updated_conftest);
-    
+
     // Both fixtures should be available now
     assert_eq!(db.definitions.len(), 2);
     assert!(db.definitions.contains_key("root_fixture"));
     assert!(db.definitions.contains_key("new_root_fixture"));
-    
+
     // Test file usages shouldn't change (only uses root_fixture)
     let usages = db.usages.get(&test_path).unwrap();
     assert_eq!(usages.len(), 1);
@@ -297,7 +297,7 @@ def new_root_fixture():
 fn test_cache_effectiveness_on_repeated_access() {
     // Verify that line index caching improves performance on repeated access
     let temp_dir = TempDir::new().unwrap();
-    
+
     let content = r#"
 import pytest
 
@@ -314,26 +314,26 @@ def test_two(my_fixture):
 def test_three(my_fixture):
     assert my_fixture == 42
 "#;
-    
+
     let file_path = create_temp_test_file(&temp_dir, "test_cache.py", content);
     let db = FixtureDatabase::new();
-    
+
     // First analysis - should populate cache
     db.analyze_file(file_path.clone(), content);
-    
+
     // Check that line index cache is populated
     assert!(db.line_index_cache.contains_key(&file_path));
-    
+
     // Perform multiple fixture lookups (simulating hover/goto operations)
     const LOOKUP_COUNT: usize = 10;
     const TEST_LINE: u32 = 7; // Line with "def test_one(my_fixture):"
     const FIXTURE_CHAR_POS: u32 = 15; // Character position of "my_fixture" parameter
-    
+
     for _ in 0..LOOKUP_COUNT {
         let result = db.find_fixture_definition(&file_path, TEST_LINE, FIXTURE_CHAR_POS);
         assert!(result.is_some());
     }
-    
+
     // Cache should still be there and should speed up operations
     assert!(db.line_index_cache.contains_key(&file_path));
 }
@@ -344,17 +344,17 @@ fn test_concurrent_file_modifications() {
     // (simulates multiple threads/async tasks updating different files)
     use std::sync::Arc;
     use std::thread;
-    
+
     let temp_dir = TempDir::new().unwrap();
     let db = Arc::new(FixtureDatabase::new());
-    
+
     let mut handles = vec![];
-    
+
     // Spawn multiple threads, each analyzing different files
     for i in 0..5 {
         let db_clone = Arc::clone(&db);
         let dir_path = temp_dir.path().to_path_buf();
-        
+
         let handle = thread::spawn(move || {
             let content = format!(
                 r#"
@@ -366,24 +366,24 @@ def fixture_{}():
 "#,
                 i, i
             );
-            
+
             let file_path = dir_path.join(format!("test_{}.py", i));
             std::fs::write(&file_path, &content).unwrap();
-            
+
             // Each thread analyzes its file multiple times
             for _ in 0..3 {
                 db_clone.analyze_file(file_path.clone(), &content);
             }
         });
-        
+
         handles.push(handle);
     }
-    
+
     // Wait for all threads to complete
     for handle in handles {
         handle.join().unwrap();
     }
-    
+
     // Verify all fixtures were recorded
     assert_eq!(db.definitions.len(), 5);
     for i in 0..5 {

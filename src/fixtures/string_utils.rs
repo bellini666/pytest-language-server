@@ -165,10 +165,7 @@ mod tests {
             extract_word_at_position(line, 4),
             Some("my_function".to_string())
         );
-        assert_eq!(
-            extract_word_at_position(line, 16),
-            Some("arg1".to_string())
-        );
+        assert_eq!(extract_word_at_position(line, 16), Some("arg1".to_string()));
         assert_eq!(extract_word_at_position(line, 20), None); // comma
     }
 

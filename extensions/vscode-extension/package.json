@@ -2,7 +2,7 @@
   "name": "pytest-language-server",
   "displayName": "pytest Language Server",
   "description": "A blazingly fast Language Server Protocol implementation for pytest fixtures",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "publisher": "bellini666",
   "license": "MIT",
   "author": "Thiago Bellini Ribeiro <hackedbellini@gmail.com>",
@@ -89,18 +89,18 @@
     "compile": "webpack",
     "watch": "webpack --watch",
     "package": "webpack --mode production --devtool hidden-source-map",
-    "lint": "eslint src --ext ts"
+    "lint": "eslint src"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
+    "@eslint/js": "^9.0.0",
+    "@types/node": "^22.0.0",
     "@types/vscode": "^1.75.0",
-    "@typescript-eslint/eslint-plugin": "^6.0.0",
-    "@typescript-eslint/parser": "^6.0.0",
-    "eslint": "^8.0.0",
+    "eslint": "^9.0.0",
     "ts-loader": "^9.4.0",
     "typescript": "^5.0.0",
+    "typescript-eslint": "^8.0.0",
     "webpack": "^5.88.0",
-    "webpack-cli": "^5.1.0"
+    "webpack-cli": "^6.0.0"
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.0"

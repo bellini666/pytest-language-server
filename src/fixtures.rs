@@ -1,4 +1,5 @@
 use dashmap::DashMap;
+use rayon::prelude::*;
 use rustpython_parser::ast::{ArgWithDefault, Arguments, Expr, Ranged, Stmt};
 use rustpython_parser::{parse, Mode};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -228,8 +229,9 @@ impl FixtureDatabase {
             );
             return;
         }
-        let mut file_count = 0;
-        let mut error_count = 0;
+
+        // Phase 1: Collect all file paths (sequential, fast)
+        let mut files_to_process: Vec<PathBuf> = Vec::new();
         let mut skipped_dirs = 0;
 
         // Use WalkDir with filter to skip large/irrelevant directories
@@ -261,7 +263,6 @@ impl FixtureDatabase {
                         );
                     } else {
                         debug!("Error during workspace scan: {}", err);
-                        error_count += 1;
                     }
                     continue;
                 }
@@ -285,21 +286,7 @@ impl FixtureDatabase {
                     || filename.starts_with("test_") && filename.ends_with(".py")
                     || filename.ends_with("_test.py")
                 {
-                    debug!("Found test/conftest file: {:?}", path);
-                    match std::fs::read_to_string(path) {
-                        Ok(content) => {
-                            self.analyze_file(path.to_path_buf(), &content);
-                            file_count += 1;
-                        }
-                        Err(err) => {
-                            if err.kind() == std::io::ErrorKind::PermissionDenied {
-                                warn!("Permission denied reading file: {:?}", path);
-                            } else {
-                                error!("Failed to read file {:?}: {}", path, err);
-                                error_count += 1;
-                            }
-                        }
-                    }
+                    files_to_process.push(path.to_path_buf());
                 }
             }
         }
@@ -308,11 +295,37 @@ impl FixtureDatabase {
             debug!("Skipped {} entries in filtered directories", skipped_dirs);
         }
 
-        if error_count > 0 {
-            warn!("Workspace scan completed with {} errors", error_count);
+        let total_files = files_to_process.len();
+        info!("Found {} test/conftest files to process", total_files);
+
+        // Phase 2: Process files in parallel using rayon
+        // Use analyze_file_fresh since this is initial scan (no previous definitions to clean)
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let error_count = AtomicUsize::new(0);
+
+        files_to_process.par_iter().for_each(|path| {
+            debug!("Found test/conftest file: {:?}", path);
+            match std::fs::read_to_string(path) {
+                Ok(content) => {
+                    self.analyze_file_fresh(path.clone(), &content);
+                }
+                Err(err) => {
+                    if err.kind() == std::io::ErrorKind::PermissionDenied {
+                        warn!("Permission denied reading file: {:?}", path);
+                    } else {
+                        error!("Failed to read file {:?}: {}", path, err);
+                        error_count.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+        });
+
+        let errors = error_count.load(Ordering::Relaxed);
+        if errors > 0 {
+            warn!("Workspace scan completed with {} errors", errors);
         }
 
-        info!("Workspace scan complete. Processed {} files", file_count);
+        info!("Workspace scan complete. Processed {} files", total_files);
 
         // Also scan virtual environment for pytest plugins
         self.scan_venv_fixtures(root_path);
@@ -582,6 +595,17 @@ impl FixtureDatabase {
 
     /// Analyze a single Python file for fixtures using AST parsing
     pub fn analyze_file(&self, file_path: PathBuf, content: &str) {
+        self.analyze_file_internal(file_path, content, true);
+    }
+
+    /// Analyze a file without cleaning up previous definitions.
+    /// Used during initial workspace scan when we know the database is empty.
+    fn analyze_file_fresh(&self, file_path: PathBuf, content: &str) {
+        self.analyze_file_internal(file_path, content, false);
+    }
+
+    /// Internal file analysis with optional cleanup of previous definitions
+    fn analyze_file_internal(&self, file_path: PathBuf, content: &str, cleanup_previous: bool) {
         // Use cached canonical path to avoid repeated filesystem calls
         let file_path = self.get_canonical_path(file_path);
 
@@ -610,42 +634,45 @@ impl FixtureDatabase {
         // Clear previous imports for this file
         self.imports.remove(&file_path);
 
-        // Clear previous fixture definitions from this file
-        // We need to remove definitions that were in this file
-        // IMPORTANT: Collect keys first to avoid deadlock. The issue is that
-        // iter() holds read locks on the DashMap, and if we try to call .get() or
-        // .insert() on the same map while iterating, we'll deadlock due to lock
-        // contention. Collecting keys first releases the iterator locks before
-        // we start mutating the map.
-        let keys: Vec<String> = {
-            let mut k = Vec::new();
-            for entry in self.definitions.iter() {
-                k.push(entry.key().clone());
-            }
-            k
-        }; // Iterator dropped here, all locks released
+        // Clear previous fixture definitions from this file (only when re-analyzing)
+        // Skip this during initial workspace scan for performance
+        if cleanup_previous {
+            // We need to remove definitions that were in this file
+            // IMPORTANT: Collect keys first to avoid deadlock. The issue is that
+            // iter() holds read locks on the DashMap, and if we try to call .get() or
+            // .insert() on the same map while iterating, we'll deadlock due to lock
+            // contention. Collecting keys first releases the iterator locks before
+            // we start mutating the map.
+            let keys: Vec<String> = {
+                let mut k = Vec::new();
+                for entry in self.definitions.iter() {
+                    k.push(entry.key().clone());
+                }
+                k
+            }; // Iterator dropped here, all locks released
 
-        // Now process each key individually
-        for key in keys {
-            // Get current definitions for this key
-            let current_defs = match self.definitions.get(&key) {
-                Some(defs) => defs.clone(),
-                None => continue,
-            };
+            // Now process each key individually
+            for key in keys {
+                // Get current definitions for this key
+                let current_defs = match self.definitions.get(&key) {
+                    Some(defs) => defs.clone(),
+                    None => continue,
+                };
 
-            // Filter out definitions from this file
-            let filtered: Vec<FixtureDefinition> = current_defs
-                .iter()
-                .filter(|def| def.file_path != file_path)
-                .cloned()
-                .collect();
+                // Filter out definitions from this file
+                let filtered: Vec<FixtureDefinition> = current_defs
+                    .iter()
+                    .filter(|def| def.file_path != file_path)
+                    .cloned()
+                    .collect();
 
-            // Update or remove
-            if filtered.is_empty() {
-                self.definitions.remove(&key);
-            } else if filtered.len() != current_defs.len() {
-                // Only update if something changed
-                self.definitions.insert(key, filtered);
+                // Update or remove
+                if filtered.is_empty() {
+                    self.definitions.remove(&key);
+                } else if filtered.len() != current_defs.len() {
+                    // Only update if something changed
+                    self.definitions.insert(key, filtered);
+                }
             }
         }
 
@@ -3425,6 +3452,91 @@ impl FixtureDatabase {
         None
     }
 
+    /// Compute usage counts for all fixture definitions efficiently.
+    /// This iterates all usages once and resolves each to its definition,
+    /// rather than iterating all usages for each definition.
+    fn compute_definition_usage_counts(&self) -> HashMap<(PathBuf, String), usize> {
+        let mut counts: HashMap<(PathBuf, String), usize> = HashMap::new();
+
+        // Initialize all definitions with 0 count
+        for entry in self.definitions.iter() {
+            let fixture_name = entry.key();
+            for def in entry.value().iter() {
+                counts.insert((def.file_path.clone(), fixture_name.clone()), 0);
+            }
+        }
+
+        // Cache for resolved definitions: (usage_file, fixture_name) -> resolved_def_file
+        // This avoids re-resolving the same fixture for multiple usages in the same file.
+        // Note: Self-referencing fixtures bypass this cache since they need special handling.
+        let mut resolution_cache: HashMap<(PathBuf, String), Option<PathBuf>> = HashMap::new();
+
+        // Pre-compute fixture definition lines per file for fast lookup
+        // This avoids calling get_fixture_definition_at_line for each usage
+        let mut fixture_def_lines: HashMap<PathBuf, HashMap<usize, FixtureDefinition>> =
+            HashMap::new();
+        for entry in self.definitions.iter() {
+            for def in entry.value().iter() {
+                fixture_def_lines
+                    .entry(def.file_path.clone())
+                    .or_default()
+                    .insert(def.line, def.clone());
+            }
+        }
+
+        // Iterate all usages once and resolve each to its definition
+        for entry in self.usages.iter() {
+            let file_path = entry.key();
+            let usages = entry.value();
+            let file_def_lines = fixture_def_lines.get(file_path);
+
+            for usage in usages.iter() {
+                // Fast lookup: check if this usage is on a fixture definition line
+                let fixture_def_at_line = file_def_lines
+                    .and_then(|lines| lines.get(&usage.line))
+                    .cloned();
+
+                let is_self_referencing = fixture_def_at_line
+                    .as_ref()
+                    .is_some_and(|def| def.name == usage.name);
+
+                let resolved_def = if is_self_referencing {
+                    // Self-referencing parameter - must resolve without cache
+                    self.find_closest_definition_excluding(
+                        file_path,
+                        &usage.name,
+                        fixture_def_at_line.as_ref(),
+                    )
+                } else {
+                    // Use cache for normal resolution
+                    let cache_key = (file_path.clone(), usage.name.clone());
+                    if let Some(cached) = resolution_cache.get(&cache_key) {
+                        // Return cached result
+                        cached.as_ref().and_then(|def_path| {
+                            // Look up the full definition from the cached path
+                            self.definitions.get(&usage.name).and_then(|defs| {
+                                defs.iter().find(|d| &d.file_path == def_path).cloned()
+                            })
+                        })
+                    } else {
+                        // Resolve and cache
+                        let def = self.find_closest_definition(file_path, &usage.name);
+                        resolution_cache
+                            .insert(cache_key, def.as_ref().map(|d| d.file_path.clone()));
+                        def
+                    }
+                };
+
+                if let Some(def) = resolved_def {
+                    let key = (def.file_path.clone(), usage.name.clone());
+                    *counts.entry(key).or_insert(0) += 1;
+                }
+            }
+        }
+
+        counts
+    }
+
     /// Print fixtures as a tree structure
     /// Shows directory hierarchy with fixtures defined in each file
     pub fn print_fixtures_tree(&self, root_path: &Path, skip_unused: bool, only_unused: bool) {
@@ -3447,16 +3559,11 @@ impl FixtureDatabase {
         // Each definition's usage count is based on references that actually resolve to it,
         // not just any usage of the same fixture name globally.
         // Key: (file_path, fixture_name) -> usage_count
-        let mut definition_usage_counts: HashMap<(PathBuf, String), usize> = HashMap::new();
-
-        for entry in self.definitions.iter() {
-            let fixture_name = entry.key();
-            for def in entry.value().iter() {
-                let refs = self.find_references_for_definition(def);
-                definition_usage_counts
-                    .insert((def.file_path.clone(), fixture_name.clone()), refs.len());
-            }
-        }
+        //
+        // OPTIMIZATION: Instead of calling find_references_for_definition for each definition
+        // (which iterates all usages each time), we iterate usages once and resolve each to
+        // its definition, then count per-definition.
+        let definition_usage_counts = self.compute_definition_usage_counts();
 
         // Build a tree structure from paths
         let mut tree: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();

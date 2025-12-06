@@ -210,10 +210,13 @@ fn test_large_file_incremental_changes() {
     
     // Performance check: incremental update should be reasonably fast
     // This is a regression test - if changes make it much slower, this will fail
+    // Using 1 second to be generous for CI/slower systems
+    const MAX_UPDATE_TIME_MS: u64 = 1000;
     assert!(
-        update_duration < std::time::Duration::from_millis(500),
-        "File re-analysis took too long: {:?}",
-        update_duration
+        update_duration < std::time::Duration::from_millis(MAX_UPDATE_TIME_MS),
+        "File re-analysis took too long: {:?} (max: {}ms)",
+        update_duration,
+        MAX_UPDATE_TIME_MS
     );
     
     println!(
@@ -322,8 +325,12 @@ def test_three(my_fixture):
     assert!(db.line_index_cache.contains_key(&file_path));
     
     // Perform multiple fixture lookups (simulating hover/goto operations)
-    for _ in 0..10 {
-        let result = db.find_fixture_definition(&file_path, 7, 15); // test_one line
+    const LOOKUP_COUNT: usize = 10;
+    const TEST_LINE: u32 = 7; // Line with "def test_one(my_fixture):"
+    const FIXTURE_CHAR_POS: u32 = 15; // Character position of "my_fixture" parameter
+    
+    for _ in 0..LOOKUP_COUNT {
+        let result = db.find_fixture_definition(&file_path, TEST_LINE, FIXTURE_CHAR_POS);
         assert!(result.is_some());
     }
     

@@ -274,9 +274,12 @@ def test_something(root_fixture):
 
     // Verify fixture is found
     assert!(db.definitions.contains_key("root_fixture"));
-    let usages = db.usages.get(&test_path).unwrap();
-    assert_eq!(usages.len(), 1);
-    assert_eq!(usages[0].name, "root_fixture");
+    {
+        // Scope the DashMap reference to avoid holding read lock across analyze_file
+        let usages = db.usages.get(&test_path).unwrap();
+        assert_eq!(usages.len(), 1);
+        assert_eq!(usages[0].name, "root_fixture");
+    }
 
     // Simulate conftest.py being edited to add another fixture
     let updated_conftest = r#"

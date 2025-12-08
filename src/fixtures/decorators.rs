@@ -5,13 +5,14 @@
 
 use rustpython_parser::ast::Expr;
 
-/// Check if an expression is a @pytest.fixture decorator
+/// Check if an expression is a @pytest.fixture or @pytest_asyncio.fixture decorator
 pub fn is_fixture_decorator(expr: &Expr) -> bool {
     match expr {
         Expr::Name(name) => name.id.as_str() == "fixture",
         Expr::Attribute(attr) => {
             if let Expr::Name(value) = &*attr.value {
-                value.id.as_str() == "pytest" && attr.attr.as_str() == "fixture"
+                (value.id.as_str() == "pytest" || value.id.as_str() == "pytest_asyncio")
+                    && attr.attr.as_str() == "fixture"
             } else {
                 false
             }

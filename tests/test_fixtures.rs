@@ -3277,15 +3277,13 @@ async def regular_async_fixture():
     let file_path = PathBuf::from("/tmp/test/conftest.py");
     db.analyze_file(file_path.clone(), content);
 
-    // Currently, @pytest_asyncio.fixture is NOT detected (limitation)
-    // Only @pytest.fixture and bare @fixture are supported
-    // See src/fixtures.rs:653 is_fixture_decorator()
+    // @pytest_asyncio.fixture is now supported
     assert!(
-        !db.definitions.contains_key("async_fixture"),
-        "pytest_asyncio.fixture not currently supported - this is a known limitation"
+        db.definitions.contains_key("async_fixture"),
+        "pytest_asyncio.fixture should be detected"
     );
 
-    // Regular async fixtures with @pytest.fixture ARE detected
+    // Regular async fixtures with @pytest.fixture are also detected
     assert!(db.definitions.contains_key("regular_async_fixture"));
 }
 

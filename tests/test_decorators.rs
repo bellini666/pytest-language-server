@@ -53,6 +53,38 @@ fn test_is_fixture_decorator_with_args() {
 
 #[test]
 #[timeout(30000)]
+fn test_is_fixture_decorator_pytest_asyncio() {
+    // Test @pytest_asyncio.fixture (no parens)
+    let code = "@pytest_asyncio.fixture\nasync def my_fixture(): pass";
+    let parsed = parse(code, Mode::Module, "").unwrap();
+
+    if let rustpython_parser::ast::Mod::Module(module) = parsed {
+        if let rustpython_parser::ast::Stmt::AsyncFunctionDef(func_def) = &module.body[0] {
+            assert!(decorators::is_fixture_decorator(
+                &func_def.decorator_list[0]
+            ));
+        }
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_is_fixture_decorator_pytest_asyncio_with_args() {
+    // Test @pytest_asyncio.fixture(scope='session')
+    let code = "@pytest_asyncio.fixture(scope='session')\nasync def my_fixture(): pass";
+    let parsed = parse(code, Mode::Module, "").unwrap();
+
+    if let rustpython_parser::ast::Mod::Module(module) = parsed {
+        if let rustpython_parser::ast::Stmt::AsyncFunctionDef(func_def) = &module.body[0] {
+            assert!(decorators::is_fixture_decorator(
+                &func_def.decorator_list[0]
+            ));
+        }
+    }
+}
+
+#[test]
+#[timeout(30000)]
 fn test_not_fixture_decorator() {
     let code = "@property\ndef my_prop(): pass";
     let parsed = parse(code, Mode::Module, "").unwrap();

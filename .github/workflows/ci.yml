@@ -160,3 +160,21 @@ jobs:
           grep -q "^version = " extension.toml
           grep -q "^schema_version = " extension.toml
           echo "extension.toml validation passed"
+
+  check-homebrew-formula:
+    name: Check Homebrew Formula
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Validate formula syntax
+        run: brew style Formula/pytest-language-server.rb
+
+      - name: Verify formula has valid checksums
+        run: |
+          # Check that formula doesn't have placeholder checksums
+          if grep -q "REPLACE_WITH" Formula/pytest-language-server.rb; then
+            echo "❌ Formula contains placeholder checksums"
+            exit 1
+          fi
+          echo "✅ Formula checksums look valid"

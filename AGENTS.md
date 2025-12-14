@@ -53,7 +53,8 @@ src/
     ├── diagnostics.rs  # Publish diagnostics (~44 lines)
     ├── code_action.rs  # Quick fixes (~171 lines)
     ├── code_lens.rs    # Usage count lenses (~65 lines)
-    └── inlay_hint.rs   # Type hints for fixture parameters (~85 lines)
+    ├── inlay_hint.rs   # Type hints for fixture parameters (~85 lines)
+    └── call_hierarchy.rs # Call hierarchy for fixture dependencies (~150 lines)
 ```
 
 ### Key Components
@@ -83,6 +84,7 @@ src/
      - `code_action.rs` - Quick fixes to add missing parameters
      - `code_lens.rs` - Usage count lenses above fixtures
      - `inlay_hint.rs` - Type hints for fixture parameters
+     - `call_hierarchy.rs` - Fixture dependency call hierarchy
 
 3. **Main** (`src/main.rs`)
    - `LanguageServer` trait implementation delegating to providers
@@ -212,6 +214,8 @@ This is handled by `start_char` and `end_char` in `FixtureUsage`.
 - `get_completion_context(&self, file_path: &Path, line: u32, char: u32)` - Determines completion context (signature, body, decorator)
 - `get_function_param_insertion_info(&self, file_path: &Path, function_line: usize)` - Gets where to insert new parameters
 - `get_available_fixtures(&self, file_path: &Path)` - Returns all fixtures available at a file location
+- `resolve_fixture_for_file(&self, file_path: &Path, name: &str)` - Resolves fixture by name using priority rules
+- `find_containing_function(&self, file_path: &Path, line: usize)` - Finds function/fixture containing a line
 
 **Workspace Scanning (scanner.rs):**
 - `scan_workspace(&self, root_path: &Path)` - Walks directory tree, finds test files
@@ -240,6 +244,9 @@ This is handled by `start_char` and `end_char` in `FixtureUsage`.
 - `handle_code_action()` (code_action.rs) - Quick fixes to add missing parameters
 - `handle_code_lens()` (code_lens.rs) - Shows "N usages" above fixture definitions
 - `publish_diagnostics_for_file()` (diagnostics.rs) - Publishes undeclared fixture warnings
+- `handle_prepare_call_hierarchy()` (call_hierarchy.rs) - Returns CallHierarchyItem for fixture at cursor
+- `handle_incoming_calls()` (call_hierarchy.rs) - Returns fixtures/tests that use this fixture
+- `handle_outgoing_calls()` (call_hierarchy.rs) - Returns fixtures this fixture depends on
 
 **Helper Methods (mod.rs):**
 - `uri_to_path()` / `path_to_uri()` - URI/path conversion with symlink handling
@@ -738,7 +745,10 @@ The project includes extensions for three major editors/IDEs:
   - Added Go to Implementation for generator fixtures (jump to yield statement)
   - Added `yield_line` field to `FixtureDefinition`
   - Added `implementation.rs` provider
-  - Test suite: 370 tests
+  - Added Call Hierarchy support for fixture dependencies
+  - Added `call_hierarchy.rs` provider with prepare, incoming, and outgoing calls
+  - Added `resolve_fixture_for_file()` and `find_containing_function()` resolver methods
+  - Test suite: 373 tests
 - **v0.14.0** (December 2025)
   - Added `fixtures unused` CLI command with CI-friendly exit codes
   - Added circular dependency detection with cached iterative DFS

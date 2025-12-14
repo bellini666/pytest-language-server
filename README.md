@@ -19,6 +19,7 @@ documentation, diagnostics, and more!
 - [Features](#features)
   - [Go to Definition](#-go-to-definition)
   - [Go to Implementation](#-go-to-implementation)
+  - [Call Hierarchy](#-call-hierarchy)
   - [Code Completion](#-code-completion)
   - [Find References](#-find-references)
   - [Hover Documentation](#-hover-documentation)
@@ -75,6 +76,20 @@ def database():
     conn = connect()
     yield conn      # <-- Go to Implementation jumps here
     conn.close()    # Teardown code after yield
+```
+
+### 🔗 Call Hierarchy
+Explore fixture dependencies with Call Hierarchy support:
+- **Incoming Calls**: See which tests and fixtures depend on a fixture
+- **Outgoing Calls**: See which fixtures a fixture depends on
+- Works with your editor's "Show Call Hierarchy" command
+- Helps understand complex fixture dependency chains
+
+```python
+@pytest.fixture
+def database():        # <-- Call Hierarchy shows:
+    ...                #     Incoming: test_query, test_insert (tests using this)
+                       #     Outgoing: connection (fixtures this depends on)
 ```
 
 ### ✨ Code Completion

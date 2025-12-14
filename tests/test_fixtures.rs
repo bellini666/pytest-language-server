@@ -9343,3 +9343,112 @@ def conditional_fixture():
     // First yield on line 7
     assert_eq!(fixture.yield_line, Some(7));
 }
+
+// ============ Call Hierarchy Tests ============
+
+#[test]
+#[timeout(30000)]
+fn test_find_containing_function_simple() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 42
+
+def test_something(my_fixture):
+    assert my_fixture == 42
+"#;
+
+    let path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(path.clone(), content);
+
+    // Line 9 is inside test_something (the assert line)
+    assert_eq!(
+        db.find_containing_function(&path, 9),
+        Some("test_something".to_string())
+    );
+
+    // Line 8 is the def line of test_something
+    assert_eq!(
+        db.find_containing_function(&path, 8),
+        Some("test_something".to_string())
+    );
+
+    // Line 6 is inside my_fixture (the return line)
+    assert_eq!(
+        db.find_containing_function(&path, 6),
+        Some("my_fixture".to_string())
+    );
+
+    // Line 10 is empty - outside any function
+    assert_eq!(db.find_containing_function(&path, 10), None);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_resolve_fixture_for_file_same_file() {
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def shared_fixture():
+    return "parent"
+"#;
+
+    let test_content = r#"
+import pytest
+
+@pytest.fixture
+def shared_fixture():
+    return "local"
+
+def test_it(shared_fixture):
+    pass
+"#;
+
+    let conftest_path = PathBuf::from("/tmp/test/conftest.py");
+    let test_path = PathBuf::from("/tmp/test/test_example.py");
+
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    // From test file, should resolve to local fixture
+    let resolved = db.resolve_fixture_for_file(&test_path, "shared_fixture");
+    assert!(resolved.is_some());
+    assert_eq!(resolved.unwrap().file_path, test_path);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_resolve_fixture_for_file_conftest() {
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def parent_fixture():
+    return "parent"
+"#;
+
+    let test_content = r#"
+def test_it(parent_fixture):
+    pass
+"#;
+
+    let conftest_path = PathBuf::from("/tmp/test/conftest.py");
+    let test_path = PathBuf::from("/tmp/test/test_example.py");
+
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    // From test file, should resolve to conftest fixture
+    let resolved = db.resolve_fixture_for_file(&test_path, "parent_fixture");
+    assert!(resolved.is_some());
+    assert_eq!(resolved.unwrap().file_path, conftest_path);
+}

@@ -2,6 +2,7 @@
 //!
 //! This module contains the Backend struct and LSP protocol handlers organized by provider type.
 
+pub mod call_hierarchy;
 pub mod code_action;
 pub mod code_lens;
 pub mod completion;

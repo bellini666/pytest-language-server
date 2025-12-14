@@ -1014,4 +1014,126 @@ impl FixtureDatabase {
 
         mismatches
     }
+
+    /// Resolve a fixture by name for a given file using priority rules.
+    ///
+    /// Returns the best matching FixtureDefinition based on pytest's
+    /// fixture shadowing rules: same file > conftest hierarchy > third-party.
+    pub fn resolve_fixture_for_file(
+        &self,
+        file_path: &Path,
+        fixture_name: &str,
+    ) -> Option<FixtureDefinition> {
+        let definitions = self.definitions.get(fixture_name)?;
+
+        // Priority 1: Same file
+        if let Some(def) = definitions.iter().find(|d| d.file_path == file_path) {
+            return Some(def.clone());
+        }
+
+        // Priority 2: conftest.py in parent directories (closest first)
+        let file_path = self.get_canonical_path(file_path.to_path_buf());
+        let mut best_conftest: Option<&FixtureDefinition> = None;
+        let mut best_depth = usize::MAX;
+
+        for def in definitions.iter() {
+            if def.is_third_party {
+                continue;
+            }
+            if def.file_path.ends_with("conftest.py") {
+                if let Some(parent) = def.file_path.parent() {
+                    if file_path.starts_with(parent) {
+                        let depth = parent.components().count();
+                        if depth > best_depth {
+                            // Deeper = closer conftest
+                            best_conftest = Some(def);
+                            best_depth = depth;
+                        } else if best_conftest.is_none() {
+                            best_conftest = Some(def);
+                            best_depth = depth;
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(def) = best_conftest {
+            return Some(def.clone());
+        }
+
+        // Priority 3: Third-party (site-packages)
+        if let Some(def) = definitions.iter().find(|d| d.is_third_party) {
+            return Some(def.clone());
+        }
+
+        // Fallback: first definition
+        definitions.first().cloned()
+    }
+
+    /// Find the name of the function/fixture containing a given line.
+    ///
+    /// Used for call hierarchy to identify callers.
+    pub fn find_containing_function(&self, file_path: &Path, line: usize) -> Option<String> {
+        let content = self.get_file_content(file_path)?;
+
+        // Parse the file to find function definitions
+        let parsed =
+            rustpython_parser::parse(&content, rustpython_parser::Mode::Module, "").ok()?;
+
+        if let rustpython_parser::ast::Mod::Module(module) = parsed {
+            // Build line index for position calculations
+            let line_index = Self::build_line_index(&content);
+
+            for stmt in &module.body {
+                if let Some(name) = self.find_function_containing_line(stmt, line, &line_index) {
+                    return Some(name);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Recursively search for a function containing the given line.
+    fn find_function_containing_line(
+        &self,
+        stmt: &Stmt,
+        target_line: usize,
+        line_index: &[usize],
+    ) -> Option<String> {
+        match stmt {
+            Stmt::FunctionDef(func_def) => {
+                let start_line =
+                    self.get_line_from_offset(func_def.range.start().to_usize(), line_index);
+                let end_line =
+                    self.get_line_from_offset(func_def.range.end().to_usize(), line_index);
+
+                if target_line >= start_line && target_line <= end_line {
+                    return Some(func_def.name.to_string());
+                }
+            }
+            Stmt::AsyncFunctionDef(func_def) => {
+                let start_line =
+                    self.get_line_from_offset(func_def.range.start().to_usize(), line_index);
+                let end_line =
+                    self.get_line_from_offset(func_def.range.end().to_usize(), line_index);
+
+                if target_line >= start_line && target_line <= end_line {
+                    return Some(func_def.name.to_string());
+                }
+            }
+            Stmt::ClassDef(class_def) => {
+                // Check methods inside the class
+                for class_stmt in &class_def.body {
+                    if let Some(name) =
+                        self.find_function_containing_line(class_stmt, target_line, line_index)
+                    {
+                        return Some(name);
+                    }
+                }
+            }
+            _ => {}
+        }
+        None
+    }
 }

@@ -2,7 +2,7 @@
   "name": "pytest-language-server",
   "displayName": "pytest Language Server",
   "description": "A blazingly fast Language Server Protocol implementation for pytest fixtures",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "publisher": "bellini666",
   "license": "MIT",
   "author": "Thiago Bellini Ribeiro <hackedbellini@gmail.com>",

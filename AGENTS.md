@@ -32,8 +32,10 @@ This ensures the user maintains full control over their git workflow.
 
 ```
 src/
-├── lib.rs              # Library exports (~7 lines)
-├── main.rs             # LanguageServer trait impl + CLI (~310 lines)
+├── lib.rs              # Library exports (~10 lines)
+├── main.rs             # LanguageServer trait impl + CLI (~320 lines)
+├── config/             # Configuration file support
+│   └── mod.rs          # Config struct + TOML parsing (~170 lines)
 ├── fixtures/           # Fixture analysis engine
 │   ├── mod.rs          # FixtureDatabase struct + helpers (~135 lines)
 │   ├── types.rs        # Data types (~50 lines)
@@ -304,13 +306,14 @@ RUST_LOG=debug cargo test          # Run with debug logging
 
 ### Test Coverage
 
-- **356 total tests passing** (as of latest)
-  - 226 integration tests in `tests/test_fixtures.rs` (FixtureDatabase API)
+- **386 total tests passing** (as of latest)
+  - 243 integration tests in `tests/test_fixtures.rs` (FixtureDatabase API)
   - 63 integration tests in `tests/test_lsp.rs` (LSP protocol handlers)
   - 37 integration tests in `tests/test_e2e.rs` (End-to-end CLI and workspace tests)
+  - 13 integration tests in `tests/test_config.rs` (Configuration file support)
   - 11 unit tests in `tests/test_decorators.rs` (Decorator utilities)
   - 9 tests in `tests/test_lsp_performance.rs` (Performance and caching)
-  - 10 embedded unit tests in `src/fixtures/` modules
+  - 10 embedded unit tests in `src/config/` and `src/fixtures/` modules
 
 **Key test areas:**
 
@@ -748,7 +751,12 @@ The project includes extensions for three major editors/IDEs:
   - Added Call Hierarchy support for fixture dependencies
   - Added `call_hierarchy.rs` provider with prepare, incoming, and outgoing calls
   - Added `resolve_fixture_for_file()` and `find_containing_function()` resolver methods
-  - Test suite: 373 tests
+  - Added Configuration file support via `pyproject.toml [tool.pytest-language-server]`
+  - Added `src/config/mod.rs` with Config struct, TOML parsing, glob pattern exclusions
+  - Added `disabled_diagnostics` config option to suppress specific diagnostic codes
+  - Added `exclude` config option for glob patterns to exclude from scanning
+  - Added `scan_workspace_with_excludes()` method in scanner.rs
+  - Test suite: 386 tests (13 new config tests)
 - **v0.14.0** (December 2025)
   - Added `fixtures unused` CLI command with CI-friendly exit codes
   - Added circular dependency detection with cached iterative DFS

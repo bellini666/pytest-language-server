@@ -1,3 +1,4 @@
+mod config;
 mod fixtures;
 mod providers;
 
@@ -43,9 +44,15 @@ impl LanguageServer for Backend {
                     .unwrap_or_else(|_| root_path.clone());
                 *self.workspace_root.write().await = Some(canonical_root.clone());
 
+                // Load configuration from pyproject.toml
+                let config = config::Config::load(&root_path);
+                info!("Loaded config: {:?}", config);
+                *self.config.write().await = config;
+
                 // Clone references for the background task
                 let fixture_db = Arc::clone(&self.fixture_db);
                 let client = self.client.clone();
+                let exclude_patterns = self.config.read().await.exclude.clone();
 
                 // Spawn workspace scanning in a background task
                 // This allows the LSP to respond immediately while scanning continues
@@ -59,7 +66,7 @@ impl LanguageServer for Backend {
 
                     // Run the synchronous scan in a blocking task to avoid blocking the async runtime
                     let scan_result = tokio::task::spawn_blocking(move || {
-                        fixture_db.scan_workspace(&root_path);
+                        fixture_db.scan_workspace_with_excludes(&root_path, &exclude_patterns);
                     })
                     .await;
 

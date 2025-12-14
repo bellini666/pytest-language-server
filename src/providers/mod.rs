@@ -15,6 +15,7 @@ pub mod inlay_hint;
 pub mod references;
 pub mod workspace_symbol;
 
+use crate::config::Config;
 use crate::fixtures::FixtureDatabase;
 use dashmap::DashMap;
 use std::path::PathBuf;
@@ -36,6 +37,8 @@ pub struct Backend {
     /// Cache mapping canonical paths to original URIs from the client
     /// This ensures we respond with URIs the client recognizes
     pub uri_cache: Arc<DashMap<PathBuf, Uri>>,
+    /// Configuration loaded from pyproject.toml
+    pub config: Arc<tokio::sync::RwLock<Config>>,
 }
 
 impl Backend {
@@ -48,6 +51,7 @@ impl Backend {
             original_workspace_root: Arc::new(tokio::sync::RwLock::new(None)),
             scan_task: Arc::new(tokio::sync::Mutex::new(None)),
             uri_cache: Arc::new(DashMap::new()),
+            config: Arc::new(tokio::sync::RwLock::new(Config::default())),
         }
     }
 

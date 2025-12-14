@@ -32,6 +32,9 @@ clap = { version = "4.5.53", features = ["derive"] }
 colored = "3.0"
 rayon = "1.11.0"
 memchr = "2.7.6"
+toml = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+glob = "0.3"
 
 [dev-dependencies]
 insta = { version = "1.44", features = ["yaml"] }

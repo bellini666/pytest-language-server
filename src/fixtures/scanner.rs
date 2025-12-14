@@ -1,6 +1,7 @@
 //! Workspace and virtual environment scanning for fixture definitions.
 
 use super::FixtureDatabase;
+use glob::Pattern;
 use rayon::prelude::*;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -59,7 +60,13 @@ impl FixtureDatabase {
     }
 
     /// Scan a workspace directory for test files and conftest.py files.
+    /// Optionally accepts exclude patterns from configuration.
     pub fn scan_workspace(&self, root_path: &Path) {
+        self.scan_workspace_with_excludes(root_path, &[]);
+    }
+
+    /// Scan a workspace directory with custom exclude patterns.
+    pub fn scan_workspace_with_excludes(&self, root_path: &Path, exclude_patterns: &[Pattern]) {
         info!("Scanning workspace: {:?}", root_path);
 
         // Defensive check: ensure the root path exists
@@ -119,6 +126,18 @@ impl FixtureDatabase {
             }) {
                 skipped_dirs += 1;
                 continue;
+            }
+
+            // Skip files matching user-configured exclude patterns
+            // Patterns are matched against paths relative to workspace root
+            if !exclude_patterns.is_empty() {
+                if let Ok(relative_path) = path.strip_prefix(root_path) {
+                    let relative_str = relative_path.to_string_lossy();
+                    if exclude_patterns.iter().any(|p| p.matches(&relative_str)) {
+                        debug!("Skipping excluded path: {:?}", path);
+                        continue;
+                    }
+                }
             }
 
             // Look for conftest.py or test_*.py or *_test.py files

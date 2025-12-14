@@ -364,6 +364,40 @@ Any editor with LSP support can use pytest-language-server. Configure it to run 
 
 ## Configuration
 
+### pyproject.toml
+
+Configure pytest-language-server via your project's `pyproject.toml`:
+
+```toml
+[tool.pytest-language-server]
+# Glob patterns for files/directories to exclude from scanning
+exclude = ["build/**", "dist/**", ".tox/**"]
+
+# Disable specific diagnostics
+# Valid codes: "undeclared-fixture", "scope-mismatch", "circular-dependency"
+disabled_diagnostics = ["undeclared-fixture"]
+
+# Additional directories to scan for fixtures (planned feature)
+fixture_paths = ["fixtures/", "shared/fixtures/"]
+
+# Third-party plugins to skip when scanning venv (planned feature)
+skip_plugins = ["pytest-xdist"]
+```
+
+**Available Options:**
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `exclude` | `string[]` | Glob patterns for paths to exclude from workspace scanning |
+| `disabled_diagnostics` | `string[]` | Diagnostic codes to suppress |
+| `fixture_paths` | `string[]` | Additional fixture directories *(planned)* |
+| `skip_plugins` | `string[]` | Third-party plugins to skip *(planned)* |
+
+**Diagnostic Codes:**
+- `undeclared-fixture` - Fixture used in function body but not declared as parameter
+- `scope-mismatch` - Broader-scoped fixture depends on narrower-scoped fixture
+- `circular-dependency` - Circular fixture dependency detected
+
 ### Logging
 
 Control log verbosity with the `RUST_LOG` environment variable:

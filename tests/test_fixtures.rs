@@ -9227,3 +9227,119 @@ def session_fix():
         FixtureScope::Session
     );
 }
+
+// ============ Yield Line Extraction Tests ============
+
+#[test]
+#[timeout(30000)]
+fn test_yield_line_simple_generator_fixture() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def db_connection():
+    conn = connect()
+    yield conn
+    conn.close()
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    let fixture = &db.definitions.get("db_connection").unwrap()[0];
+    // Line 7 is where "yield conn" is (1-indexed)
+    assert_eq!(fixture.yield_line, Some(7));
+}
+
+#[test]
+#[timeout(30000)]
+fn test_yield_line_no_yield() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def simple_fixture():
+    return 42
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    let fixture = &db.definitions.get("simple_fixture").unwrap()[0];
+    assert_eq!(fixture.yield_line, None);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_yield_line_in_with_block() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def resource():
+    with open("/tmp/file") as f:
+        yield f
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    let fixture = &db.definitions.get("resource").unwrap()[0];
+    // Line 7 is where "yield f" is (1-indexed)
+    assert_eq!(fixture.yield_line, Some(7));
+}
+
+#[test]
+#[timeout(30000)]
+fn test_yield_line_in_try_block() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def safe_resource():
+    try:
+        resource = create()
+        yield resource
+    finally:
+        cleanup()
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    let fixture = &db.definitions.get("safe_resource").unwrap()[0];
+    // Line 8 is where "yield resource" is (1-indexed)
+    assert_eq!(fixture.yield_line, Some(8));
+}
+
+#[test]
+#[timeout(30000)]
+fn test_yield_line_in_if_block() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def conditional_fixture():
+    if True:
+        yield 42
+    else:
+        yield 0
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    let fixture = &db.definitions.get("conditional_fixture").unwrap()[0];
+    // First yield on line 7
+    assert_eq!(fixture.yield_line, Some(7));
+}

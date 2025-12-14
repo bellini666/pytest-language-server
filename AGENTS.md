@@ -46,6 +46,7 @@ src/
 └── providers/          # LSP protocol handlers
     ├── mod.rs          # Backend struct + helpers (~195 lines)
     ├── definition.rs   # Go-to-definition (~53 lines)
+    ├── implementation.rs # Go-to-implementation for yield (~75 lines)
     ├── references.rs   # Find-references (~199 lines)
     ├── hover.rs        # Hover documentation (~55 lines)
     ├── completion.rs   # Code completion (~219 lines)
@@ -74,6 +75,7 @@ src/
    - LSP server implementation using `tower-lsp-server`
    - Each LSP feature in its own file:
      - `definition.rs` - Go-to-definition handler
+     - `implementation.rs` - Go-to-implementation (yield line) handler
      - `references.rs` - Find-references handler
      - `hover.rs` - Hover documentation handler
      - `completion.rs` - Code completion with auto-add parameter support
@@ -102,6 +104,7 @@ pub struct FixtureDefinition {
     pub is_third_party: bool,  // True if from site-packages (cached for performance)
     pub dependencies: Vec<String>,  // Names of fixtures this fixture depends on
     pub scope: FixtureScope,  // Fixture scope (function, class, module, package, session)
+    pub yield_line: Option<usize>,  // Line number of yield statement (for go-to-implementation)
 }
 
 /// Pytest fixture scope, ordered from narrowest to broadest.
@@ -230,6 +233,7 @@ This is handled by `start_char` and `end_char` in `FixtureUsage`.
 
 **LSP Handlers:**
 - `handle_goto_definition()` (definition.rs) - Go-to-definition for fixtures
+- `handle_goto_implementation()` (implementation.rs) - Go-to-implementation (yield line) for generator fixtures
 - `handle_references()` (references.rs) - Find all references, includes definition
 - `handle_hover()` (hover.rs) - Shows fixture signature and docstring in Markdown
 - `handle_completion()` (completion.rs) - Context-aware fixture completions
@@ -653,7 +657,7 @@ Critical LSP specification requirements:
 ## Troubleshooting
 
 ### Tests failing after fixture logic changes
-- Check that all 365 tests pass: `cargo test`
+- Check that all 370 tests pass: `cargo test`
 - Focus on failing tests in `fixtures/` modules (fixture resolution) or `providers/` (LSP handlers)
 - Common issue: fixture priority rules not respecting conftest.py hierarchy
 
@@ -731,7 +735,10 @@ The project includes extensions for three major editors/IDEs:
   - Added `scope` field to `FixtureDefinition`
   - Added `ScopeMismatch` struct and `detect_scope_mismatches_in_file()` resolver method
   - Added `extract_fixture_scope()` to decorators.rs
-  - Test suite: 365 tests
+  - Added Go to Implementation for generator fixtures (jump to yield statement)
+  - Added `yield_line` field to `FixtureDefinition`
+  - Added `implementation.rs` provider
+  - Test suite: 370 tests
 - **v0.14.0** (December 2025)
   - Added `fixtures unused` CLI command with CI-friendly exit codes
   - Added circular dependency detection with cached iterative DFS

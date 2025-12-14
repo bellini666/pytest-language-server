@@ -399,6 +399,7 @@ impl FixtureDatabase {
                 is_third_party,
                 dependencies: dependencies.clone(),
                 scope,
+                yield_line: self.find_yield_line(body, line_index),
             };
 
             self.record_fixture_definition(definition);
@@ -539,6 +540,7 @@ impl FixtureDatabase {
                                 is_third_party,
                                 dependencies: Vec::new(), // Assignment-style fixtures don't have explicit dependencies
                                 scope: FixtureScope::default(), // Assignment-style fixtures default to function scope
+                                yield_line: None, // Assignment-style fixtures don't have yield statements
                             };
 
                             self.record_fixture_definition(definition);
@@ -632,6 +634,138 @@ impl FixtureDatabase {
         func_name: &str,
     ) -> (usize, usize) {
         super::string_utils::find_function_name_position(content, line, func_name)
+    }
+
+    /// Find the line number of the first yield statement in a function body.
+    /// Returns None if no yield statement is found.
+    fn find_yield_line(&self, body: &[Stmt], line_index: &[usize]) -> Option<usize> {
+        for stmt in body {
+            if let Some(line) = self.find_yield_in_stmt(stmt, line_index) {
+                return Some(line);
+            }
+        }
+        None
+    }
+
+    /// Recursively search for yield statements in a statement.
+    fn find_yield_in_stmt(&self, stmt: &Stmt, line_index: &[usize]) -> Option<usize> {
+        match stmt {
+            Stmt::Expr(expr_stmt) => self.find_yield_in_expr(&expr_stmt.value, line_index),
+            Stmt::If(if_stmt) => {
+                // Check body
+                for s in &if_stmt.body {
+                    if let Some(line) = self.find_yield_in_stmt(s, line_index) {
+                        return Some(line);
+                    }
+                }
+                // Check elif/else
+                for s in &if_stmt.orelse {
+                    if let Some(line) = self.find_yield_in_stmt(s, line_index) {
+                        return Some(line);
+                    }
+                }
+                None
+            }
+            Stmt::With(with_stmt) => {
+                for s in &with_stmt.body {
+                    if let Some(line) = self.find_yield_in_stmt(s, line_index) {
+                        return Some(line);
+                    }
+                }
+                None
+            }
+            Stmt::AsyncWith(with_stmt) => {
+                for s in &with_stmt.body {
+                    if let Some(line) = self.find_yield_in_stmt(s, line_index) {
+                        return Some(line);
+                    }
+                }
+                None
+            }
+            Stmt::Try(try_stmt) => {
+                for s in &try_stmt.body {
+                    if let Some(line) = self.find_yield_in_stmt(s, line_index) {
+                        return Some(line);
+                    }
+                }
+                for handler in &try_stmt.handlers {
+                    let rustpython_parser::ast::ExceptHandler::ExceptHandler(h) = handler;
+                    for s in &h.body {
+                        if let Some(line) = self.find_yield_in_stmt(s, line_index) {
+                            return Some(line);
+                        }
+                    }
+                }
+                for s in &try_stmt.orelse {
+                    if let Some(line) = self.find_yield_in_stmt(s, line_index) {
+                        return Some(line);
+                    }
+                }
+                for s in &try_stmt.finalbody {
+                    if let Some(line) = self.find_yield_in_stmt(s, line_index) {
+                        return Some(line);
+                    }
+                }
+                None
+            }
+            Stmt::For(for_stmt) => {
+                for s in &for_stmt.body {
+                    if let Some(line) = self.find_yield_in_stmt(s, line_index) {
+                        return Some(line);
+                    }
+                }
+                for s in &for_stmt.orelse {
+                    if let Some(line) = self.find_yield_in_stmt(s, line_index) {
+                        return Some(line);
+                    }
+                }
+                None
+            }
+            Stmt::AsyncFor(for_stmt) => {
+                for s in &for_stmt.body {
+                    if let Some(line) = self.find_yield_in_stmt(s, line_index) {
+                        return Some(line);
+                    }
+                }
+                for s in &for_stmt.orelse {
+                    if let Some(line) = self.find_yield_in_stmt(s, line_index) {
+                        return Some(line);
+                    }
+                }
+                None
+            }
+            Stmt::While(while_stmt) => {
+                for s in &while_stmt.body {
+                    if let Some(line) = self.find_yield_in_stmt(s, line_index) {
+                        return Some(line);
+                    }
+                }
+                for s in &while_stmt.orelse {
+                    if let Some(line) = self.find_yield_in_stmt(s, line_index) {
+                        return Some(line);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Find yield expression and return its line number.
+    fn find_yield_in_expr(&self, expr: &Expr, line_index: &[usize]) -> Option<usize> {
+        match expr {
+            Expr::Yield(yield_expr) => {
+                let line =
+                    self.get_line_from_offset(yield_expr.range.start().to_usize(), line_index);
+                Some(line)
+            }
+            Expr::YieldFrom(yield_from) => {
+                let line =
+                    self.get_line_from_offset(yield_from.range.start().to_usize(), line_index);
+                Some(line)
+            }
+            _ => None,
+        }
     }
 }
 

@@ -7,6 +7,7 @@ use providers::Backend;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tower_lsp_server::jsonrpc::Result;
+use tower_lsp_server::ls_types::request::{GotoImplementationParams, GotoImplementationResponse};
 use tower_lsp_server::ls_types::*;
 use tower_lsp_server::{LanguageServer, LspService, Server};
 use tracing::{error, info, warn};
@@ -131,6 +132,7 @@ impl LanguageServer for Backend {
                     resolve_provider: Some(false),
                 }),
                 inlay_hint_provider: Some(OneOf::Left(true)),
+                implementation_provider: Some(ImplementationProviderCapability::Simple(true)),
                 ..Default::default()
             },
         })
@@ -189,6 +191,13 @@ impl LanguageServer for Backend {
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
         self.handle_goto_definition(params).await
+    }
+
+    async fn goto_implementation(
+        &self,
+        params: GotoImplementationParams,
+    ) -> Result<Option<GotoImplementationResponse>> {
+        self.handle_goto_implementation(params).await
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {

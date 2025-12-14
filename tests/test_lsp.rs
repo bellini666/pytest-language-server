@@ -23,6 +23,7 @@ fn test_hover_content_with_leading_newline() {
         is_third_party: false,
         dependencies: vec![],
         scope: pytest_language_server::FixtureScope::Function,
+        yield_line: None,
     };
 
     // Build hover content (same logic as hover method)
@@ -88,6 +89,7 @@ fn test_hover_content_structure_without_docstring() {
         is_third_party: false,
         dependencies: vec![],
         scope: pytest_language_server::FixtureScope::Function,
+        yield_line: None,
     };
 
     // Build hover content

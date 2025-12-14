@@ -18,6 +18,7 @@ documentation, diagnostics, and more!
 
 - [Features](#features)
   - [Go to Definition](#-go-to-definition)
+  - [Go to Implementation](#-go-to-implementation)
   - [Code Completion](#-code-completion)
   - [Find References](#-find-references)
   - [Hover Documentation](#-hover-documentation)
@@ -60,6 +61,21 @@ Jump directly to fixture definitions from anywhere they're used:
 - Fixtures in `conftest.py` files
 - Third-party fixtures from pytest plugins (pytest-mock, pytest-asyncio, etc.)
 - Respects pytest's fixture shadowing/priority rules
+
+### 🔧 Go to Implementation
+Jump to the yield statement in generator fixtures:
+- **Generator fixtures**: Navigates to where `yield` produces the fixture value
+- **Teardown navigation**: Useful for reviewing fixture cleanup logic
+- **Non-generator fallback**: Falls back to definition for simple return-based fixtures
+
+Example:
+```python
+@pytest.fixture
+def database():
+    conn = connect()
+    yield conn      # <-- Go to Implementation jumps here
+    conn.close()    # Teardown code after yield
+```
 
 ### ✨ Code Completion
 Smart auto-completion for pytest fixtures:

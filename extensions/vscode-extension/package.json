@@ -93,7 +93,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.0.0",
-    "@types/node": "^24.10.1",
+    "@types/node": "^25.0.2",
     "@types/vscode": "^1.106.1",
     "eslint": "^9.0.0",
     "ts-loader": "^9.4.0",

@@ -168,7 +168,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download binaries
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           pattern: binary-*
           path: binaries
@@ -248,13 +248,13 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Download wheel artifacts
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           pattern: wheels-*
           path: wheels
 
       - name: Download standalone binaries
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           pattern: binary-*
           path: binaries
@@ -378,7 +378,7 @@ jobs:
         with:
           node-version: '20'
       - name: Download all binaries
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           pattern: binary-*
           path: extensions/vscode-extension/bin
@@ -415,7 +415,7 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
       - name: Download all binaries
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           pattern: binary-*
           path: extensions/intellij-plugin/src/main/resources/bin

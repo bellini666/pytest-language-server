@@ -16,7 +16,7 @@
   "homepage": "https://github.com/bellini666/pytest-language-server#readme",
   "icon": "icon.png",
   "engines": {
-    "vscode": "^1.106.0"
+    "vscode": "^1.107.0"
   },
   "categories": [
     "Programming Languages",

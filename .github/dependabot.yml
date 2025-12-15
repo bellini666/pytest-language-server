@@ -11,9 +11,6 @@ updates:
     open-pull-requests-limit: 10
     reviewers:
       - "bellini666"
-    labels:
-      - "dependencies"
-      - "rust"
     commit-message:
       prefix: "deps"
       include: "scope"
@@ -36,10 +33,6 @@ updates:
     open-pull-requests-limit: 5
     reviewers:
       - "bellini666"
-    labels:
-      - "dependencies"
-      - "rust"
-      - "zed-extension"
     commit-message:
       prefix: "deps(zed)"
       include: "scope"
@@ -55,10 +48,6 @@ updates:
     open-pull-requests-limit: 10
     reviewers:
       - "bellini666"
-    labels:
-      - "dependencies"
-      - "javascript"
-      - "vscode-extension"
     commit-message:
       prefix: "deps(vscode)"
       include: "scope"
@@ -81,10 +70,6 @@ updates:
     open-pull-requests-limit: 5
     reviewers:
       - "bellini666"
-    labels:
-      - "dependencies"
-      - "kotlin"
-      - "intellij-plugin"
     commit-message:
       prefix: "deps(intellij)"
       include: "scope"
@@ -100,9 +85,6 @@ updates:
     open-pull-requests-limit: 5
     reviewers:
       - "bellini666"
-    labels:
-      - "dependencies"
-      - "python"
     commit-message:
       prefix: "deps(python)"
       include: "scope"
@@ -118,9 +100,6 @@ updates:
     open-pull-requests-limit: 5
     reviewers:
       - "bellini666"
-    labels:
-      - "dependencies"
-      - "github-actions"
     commit-message:
       prefix: "ci"
       include: "scope"

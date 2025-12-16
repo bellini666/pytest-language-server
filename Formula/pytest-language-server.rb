@@ -1,26 +1,26 @@
 class PytestLanguageServer < Formula
   desc "Blazingly fast Language Server Protocol implementation for pytest"
   homepage "https://github.com/bellini666/pytest-language-server"
-  version "0.16.1"
+  version "0.16.2"
   license "MIT"
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/bellini666/pytest-language-server/releases/download/v0.16.1/pytest-language-server-aarch64-apple-darwin"
-      sha256 "37f9a2dfdf473e3b5625e735b60769eb7cd848a3a6f2b7dca4580180bdff2eff"
+      url "https://github.com/bellini666/pytest-language-server/releases/download/v0.16.2/pytest-language-server-aarch64-apple-darwin"
+      sha256 "a23eb0fa355963c6e8e16ddd49dc2c7159243475eeb9e2ba4d46a547b9fc2be1"
     else
-      url "https://github.com/bellini666/pytest-language-server/releases/download/v0.16.1/pytest-language-server-x86_64-apple-darwin"
-      sha256 "aa83137be26a3d3e43119020225ad70d7cc6aa18edf46f51ad10dea0330ca0dc"
+      url "https://github.com/bellini666/pytest-language-server/releases/download/v0.16.2/pytest-language-server-x86_64-apple-darwin"
+      sha256 "d486ea1bf45970c358aceaac9d0be2d7f29c24216c57a32931fecd94a4457b49"
     end
   end
 
   on_linux do
     if Hardware::CPU.arm? && Hardware::CPU.is_64_bit?
-      url "https://github.com/bellini666/pytest-language-server/releases/download/v0.16.1/pytest-language-server-aarch64-unknown-linux-gnu"
-      sha256 "e39fb6f73fa7fb53443ef9ffc71352ae9bcc31e74dcd0e149290042eab85623a"
+      url "https://github.com/bellini666/pytest-language-server/releases/download/v0.16.2/pytest-language-server-aarch64-unknown-linux-gnu"
+      sha256 "9b9980c5a76a92d1ccefc68cc62ec903c33fc641ace9de4d9f12dae690d1cddd"
     else
-      url "https://github.com/bellini666/pytest-language-server/releases/download/v0.16.1/pytest-language-server-x86_64-unknown-linux-gnu"
-      sha256 "368ab3d0547a0797b412e70cb03575cca771c141a2d15f2df320e0a966a3559e"
+      url "https://github.com/bellini666/pytest-language-server/releases/download/v0.16.2/pytest-language-server-x86_64-unknown-linux-gnu"
+      sha256 "6daaecec3b8ce525acd143892091c92a6bdd2623bc84d0be255c78b68ad33a00"
     end
   end
 

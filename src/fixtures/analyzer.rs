@@ -462,8 +462,8 @@ impl FixtureDatabase {
                         arg.def.range.start().to_usize(),
                         line_index,
                     );
-                    let end_char = self
-                        .get_char_position_from_offset(arg.def.range.end().to_usize(), line_index);
+                    // Use parameter name length, not AST range (which includes type annotation)
+                    let end_char = start_char + arg_name.len();
 
                     info!(
                         "Found fixture dependency: {} at {:?}:{}:{}",
@@ -509,8 +509,8 @@ impl FixtureDatabase {
                     let arg_offset = arg.def.range.start().to_usize();
                     let arg_line = self.get_line_from_offset(arg_offset, line_index);
                     let start_char = self.get_char_position_from_offset(arg_offset, line_index);
-                    let end_char = self
-                        .get_char_position_from_offset(arg.def.range.end().to_usize(), line_index);
+                    // Use parameter name length, not AST range (which includes type annotation)
+                    let end_char = start_char + arg_name.len();
 
                     debug!(
                         "Parameter {} at offset {}, calculated line {}, char {}",

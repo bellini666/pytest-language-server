@@ -3076,6 +3076,298 @@ def union_type() -> str | int:
 }
 
 // =============================================================================
+// Inlay Hints - Annotation Detection Tests
+// =============================================================================
+
+#[test]
+#[timeout(30000)]
+fn test_inlay_hints_skip_annotated_params() {
+    // Test that inlay hints are correctly skipped for already-annotated parameters
+    // and shown for unannotated parameters
+    use pytest_language_server::FixtureDatabase;
+    use std::path::PathBuf;
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_inlay_skip/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_inlay_skip/test_example.py");
+
+    let conftest_content = r#"
+import pytest
+from typer import Typer
+
+@pytest.fixture
+def cli_app() -> Typer:
+    return Typer()
+
+@pytest.fixture
+def cli_runner() -> CliRunner:
+    return CliRunner()
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // Test with mixed annotated and unannotated parameters
+    let test_content = r#"
+def test_with_annotation(cli_app: Typer):
+    pass
+
+def test_without_annotation(cli_app):
+    pass
+
+def test_mixed(cli_app: Typer, cli_runner):
+    pass
+"#;
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Get usages and check their positions
+    let usages = db.usages.get(&test_path).unwrap();
+
+    // Verify usages exist
+    assert_eq!(usages.len(), 4, "Should have 4 fixture usages");
+
+    // Get content lines for verification
+    let lines: Vec<&str> = test_content.lines().collect();
+
+    // Line 2: "def test_with_annotation(cli_app: Typer):" - cli_app is annotated
+    let line2_usage = usages.iter().find(|u| u.line == 2).unwrap();
+    let line2 = lines.get(1).unwrap();
+    let after_param2 = &line2[line2_usage.end_char..];
+    assert!(
+        after_param2.trim_start().starts_with(':'),
+        "Line 2 should have annotation, after='{}', line='{}'",
+        after_param2,
+        line2
+    );
+
+    // Line 5: "def test_without_annotation(cli_app):" - cli_app is NOT annotated
+    let line5_usage = usages.iter().find(|u| u.line == 5).unwrap();
+    let line5 = lines.get(4).unwrap();
+    let after_param5 = &line5[line5_usage.end_char..];
+    assert!(
+        !after_param5.trim_start().starts_with(':'),
+        "Line 5 should NOT have annotation, after='{}', line='{}'",
+        after_param5,
+        line5
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_inlay_hints_usage_end_char_accuracy() {
+    // Test that usage end_char values correctly point to the end of the parameter name
+    use pytest_language_server::FixtureDatabase;
+    use std::path::PathBuf;
+
+    let db = FixtureDatabase::new();
+    let test_path = PathBuf::from("/tmp/test_end_char/test_example.py");
+
+    let test_content = r#"
+def test_example(my_fixture):
+    pass
+"#;
+    db.analyze_file(test_path.clone(), test_content);
+
+    let usages = db.usages.get(&test_path).unwrap();
+    assert_eq!(usages.len(), 1);
+
+    let usage = &usages[0];
+    assert_eq!(usage.name, "my_fixture");
+    assert_eq!(usage.line, 2);
+
+    // Verify end_char points to right after "my_fixture"
+    let lines: Vec<&str> = test_content.lines().collect();
+    let line = lines[1]; // "def test_example(my_fixture):"
+
+    // The character at end_char should be ')' (right after my_fixture)
+    let char_at_end = line.chars().nth(usage.end_char);
+    assert_eq!(
+        char_at_end,
+        Some(')'),
+        "end_char should point to ')' after parameter name, got {:?} at pos {} in '{}'",
+        char_at_end,
+        usage.end_char,
+        line
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_inlay_hints_no_return_types_early_return() {
+    // Test that when no fixtures have return types, we get an empty hints list
+    use pytest_language_server::FixtureDatabase;
+    use std::path::PathBuf;
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_no_return/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_no_return/test_example.py");
+
+    // Fixtures WITHOUT return type annotations
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return "value"
+
+@pytest.fixture
+def another_fixture():
+    return 123
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let test_content = r#"
+def test_example(my_fixture, another_fixture):
+    pass
+"#;
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Verify fixtures exist but have no return types
+    let available = db.get_available_fixtures(&test_path);
+    let my_fixture = available.iter().find(|f| f.name == "my_fixture").unwrap();
+    assert!(
+        my_fixture.return_type.is_none(),
+        "my_fixture should have no return type"
+    );
+
+    let another = available
+        .iter()
+        .find(|f| f.name == "another_fixture")
+        .unwrap();
+    assert!(
+        another.return_type.is_none(),
+        "another_fixture should have no return type"
+    );
+
+    // Usages should still be tracked
+    let usages = db.usages.get(&test_path).unwrap();
+    assert_eq!(usages.len(), 2, "Should have 2 fixture usages");
+}
+
+#[test]
+#[timeout(30000)]
+fn test_inlay_hints_unicode_parameter_names() {
+    // Test that Unicode parameter names are handled correctly
+    // Note: Python 3 allows Unicode identifiers (PEP 3131)
+    use pytest_language_server::FixtureDatabase;
+    use std::path::PathBuf;
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_unicode/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_unicode/test_example.py");
+
+    // Fixture with Unicode name and return type
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def データベース() -> Database:
+    return Database()
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let test_content = r#"
+def test_example(データベース):
+    pass
+"#;
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Verify the fixture is found
+    let definitions = db.definitions.get("データベース");
+    assert!(definitions.is_some(), "Unicode fixture should be found");
+
+    // Verify usage is tracked
+    let usages = db.usages.get(&test_path).unwrap();
+    assert_eq!(usages.len(), 1);
+    assert_eq!(usages[0].name, "データベース");
+
+    // The end_char calculation uses byte length, which for "データベース" (5 chars, 15 bytes)
+    // means end_char = start_char + 15. This is consistent with LSP's UTF-16 handling
+    // for the common case where editors normalize to byte offsets.
+    let usage = &usages[0];
+    let expected_byte_length = "データベース".len(); // 15 bytes
+    assert_eq!(
+        usage.end_char - usage.start_char,
+        expected_byte_length,
+        "end_char - start_char should equal byte length of Unicode name"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_inlay_hints_mixed_annotated_unannotated_multiline() {
+    // Test multiline function signatures with mixed annotations
+    use pytest_language_server::FixtureDatabase;
+    use std::path::PathBuf;
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_multiline/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_multiline/test_example.py");
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def fixture_a() -> TypeA:
+    return TypeA()
+
+@pytest.fixture
+def fixture_b() -> TypeB:
+    return TypeB()
+
+@pytest.fixture
+def fixture_c() -> TypeC:
+    return TypeC()
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // Multiline function with mixed annotations
+    let test_content = r#"
+def test_multiline(
+    fixture_a: TypeA,
+    fixture_b,
+    fixture_c: TypeC,
+):
+    pass
+"#;
+    db.analyze_file(test_path.clone(), test_content);
+
+    let usages = db.usages.get(&test_path).unwrap();
+    assert_eq!(usages.len(), 3, "Should have 3 fixture usages");
+
+    // Get lines for annotation checking
+    let lines: Vec<&str> = test_content.lines().collect();
+
+    // fixture_a on line 3 (1-indexed) should have annotation
+    let fixture_a_usage = usages.iter().find(|u| u.name == "fixture_a").unwrap();
+    assert_eq!(fixture_a_usage.line, 3);
+    let line_a = lines[2]; // 0-indexed
+    let after_a = &line_a[fixture_a_usage.end_char..];
+    assert!(
+        after_a.trim_start().starts_with(':'),
+        "fixture_a should have annotation"
+    );
+
+    // fixture_b on line 4 should NOT have annotation
+    let fixture_b_usage = usages.iter().find(|u| u.name == "fixture_b").unwrap();
+    assert_eq!(fixture_b_usage.line, 4);
+    let line_b = lines[3];
+    let after_b = &line_b[fixture_b_usage.end_char..];
+    assert!(
+        !after_b.trim_start().starts_with(':'),
+        "fixture_b should NOT have annotation"
+    );
+
+    // fixture_c on line 5 should have annotation
+    let fixture_c_usage = usages.iter().find(|u| u.name == "fixture_c").unwrap();
+    assert_eq!(fixture_c_usage.line, 5);
+    let line_c = lines[4];
+    let after_c = &line_c[fixture_c_usage.end_char..];
+    assert!(
+        after_c.trim_start().starts_with(':'),
+        "fixture_c should have annotation"
+    );
+}
+
+// =============================================================================
 // Call Hierarchy Tests
 // =============================================================================
 

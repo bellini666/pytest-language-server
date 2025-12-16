@@ -181,6 +181,16 @@ impl LanguageServer for Backend {
 
                 // Publish diagnostics for undeclared fixtures
                 self.publish_diagnostics_for_file(&uri, &file_path).await;
+
+                // Request inlay hint refresh so editors update hints after edits
+                // (e.g., when user adds/removes type annotations)
+                if let Err(e) = self.client.inlay_hint_refresh().await {
+                    // Not all clients support this, so just log and continue
+                    info!(
+                        "Inlay hint refresh request failed (client may not support it): {}",
+                        e
+                    );
+                }
             }
         }
     }

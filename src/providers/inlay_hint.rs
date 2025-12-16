@@ -4,6 +4,7 @@
 //! when the fixture has an explicit return type annotation.
 
 use super::Backend;
+use crate::fixtures::string_utils::parameter_has_annotation;
 use std::collections::HashMap;
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
@@ -15,6 +16,8 @@ impl Backend {
     /// Returns type hints for fixture parameters when the fixture has an explicit
     /// return type annotation. This helps developers understand what type each
     /// fixture provides without having to navigate to its definition.
+    ///
+    /// Skips parameters that already have a type annotation to avoid redundancy.
     pub async fn handle_inlay_hint(
         &self,
         params: InlayHintParams,
@@ -31,6 +34,22 @@ impl Backend {
         let Some(usages) = self.fixture_db.usages.get(&file_path) else {
             return Ok(None);
         };
+
+        // Get current file content to check for existing annotations.
+        // The file_cache is updated on every `textDocument/didChange` notification,
+        // which editors send before requesting inlay hints. This ensures we check
+        // against the current buffer state, not stale disk content.
+        // Note: If an editor doesn't follow the LSP spec and requests hints before
+        // sending didChange, hints might be shown/hidden incorrectly until the next sync.
+        let content = self
+            .fixture_db
+            .file_cache
+            .get(&file_path)
+            .map(|c| c.clone());
+        let lines: Vec<&str> = content
+            .as_ref()
+            .map(|c| c.lines().collect())
+            .unwrap_or_default();
 
         // Pre-compute a map of fixture name -> definition for O(1) lookup.
         // This avoids calling find_closest_definition for each usage.
@@ -63,6 +82,12 @@ impl Backend {
 
             // Look up return type from pre-computed map
             if let Some(&return_type) = fixture_map.get(usage.name.as_str()) {
+                // Check if this parameter already has a type annotation
+                // by looking at the text after the parameter name in the current buffer
+                if parameter_has_annotation(&lines, usage.line, usage.end_char) {
+                    continue;
+                }
+
                 let lsp_line = Self::internal_line_to_lsp(usage.line);
 
                 hints.push(InlayHint {
@@ -78,7 +103,7 @@ impl Backend {
                         usage.name, return_type
                     ))),
                     padding_left: Some(false),
-                    padding_right: Some(true),
+                    padding_right: Some(false),
                     data: None,
                 });
             }

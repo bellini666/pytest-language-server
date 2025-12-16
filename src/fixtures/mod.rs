@@ -12,7 +12,7 @@ pub mod decorators; // Public for testing
 mod docstring;
 mod resolver;
 mod scanner;
-mod string_utils;
+pub(crate) mod string_utils; // pub(crate) for inlay_hint provider access
 pub mod types;
 mod undeclared;
 

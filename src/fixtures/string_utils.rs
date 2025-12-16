@@ -134,6 +134,46 @@ pub(crate) fn find_function_name_position(
     (0, func_name.len())
 }
 
+/// Check if a parameter at the given position already has a type annotation.
+///
+/// Looks at the text after the parameter name (at `end_char`) to see if there's
+/// a `:` before the next `,`, `)`, or `=` (default value). This handles:
+/// - `def test(param)` -> no annotation
+/// - `def test(param: Type)` -> has annotation
+/// - `def test(param: Type = default)` -> has annotation
+/// - `def test(param = default)` -> no annotation
+///
+/// # Arguments
+/// * `lines` - The lines of the file content
+/// * `line` - The 1-based line number
+/// * `end_char` - The 0-based character position where the parameter name ends
+///
+/// Note: This function is used by the inlay_hint provider in main.rs (binary crate).
+/// The #[allow(dead_code)] is needed because the lib crate doesn't use it directly.
+#[allow(dead_code)]
+pub fn parameter_has_annotation(lines: &[&str], line: usize, end_char: usize) -> bool {
+    // Convert 1-based line to 0-based index
+    let line_idx = line.saturating_sub(1);
+
+    let Some(line_text) = lines.get(line_idx) else {
+        return false;
+    };
+
+    // Get the text after the parameter name
+    let after_param = if end_char < line_text.len() {
+        &line_text[end_char..]
+    } else {
+        return false;
+    };
+
+    // Look for `:` before `,`, `)`, or `=`
+    // Skip any whitespace first
+    let trimmed = after_param.trim_start();
+
+    // If the next non-whitespace character is `:`, there's an annotation
+    trimmed.starts_with(':')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,5 +215,83 @@ mod tests {
         let (start, end) = find_function_name_position(content, 1, "my_function");
         assert_eq!(start, 4);
         assert_eq!(end, 15);
+    }
+
+    #[test]
+    fn test_parameter_has_annotation_no_annotation() {
+        let lines: Vec<&str> = vec!["def test_example(my_fixture):"];
+        // "my_fixture" ends at position 27 (after the 'e')
+        assert!(!parameter_has_annotation(&lines, 1, 27));
+    }
+
+    #[test]
+    fn test_parameter_has_annotation_with_annotation() {
+        let lines: Vec<&str> = vec!["def test_example(my_fixture: Database):"];
+        // "my_fixture" ends at position 27
+        assert!(parameter_has_annotation(&lines, 1, 27));
+    }
+
+    #[test]
+    fn test_parameter_has_annotation_with_space_before_colon() {
+        let lines: Vec<&str> = vec!["def test_example(my_fixture : Database):"];
+        // "my_fixture" ends at position 27, but there's a space before the colon
+        assert!(parameter_has_annotation(&lines, 1, 27));
+    }
+
+    #[test]
+    fn test_parameter_has_annotation_with_default_no_annotation() {
+        let lines: Vec<&str> = vec!["def test_example(my_fixture = None):"];
+        // "my_fixture" ends at position 27
+        assert!(!parameter_has_annotation(&lines, 1, 27));
+    }
+
+    #[test]
+    fn test_parameter_has_annotation_with_default_and_annotation() {
+        let lines: Vec<&str> = vec!["def test_example(my_fixture: Database = None):"];
+        // "my_fixture" ends at position 27
+        assert!(parameter_has_annotation(&lines, 1, 27));
+    }
+
+    #[test]
+    fn test_parameter_has_annotation_multiple_params_first() {
+        let lines: Vec<&str> = vec!["def test_example(fixture_a: TypeA, fixture_b):"];
+        // "fixture_a" ends at position 26
+        assert!(parameter_has_annotation(&lines, 1, 26));
+    }
+
+    #[test]
+    fn test_parameter_has_annotation_multiple_params_second() {
+        let lines: Vec<&str> = vec!["def test_example(fixture_a: TypeA, fixture_b):"];
+        // "fixture_b" starts at position 35, ends at 35 + 9 = 44
+        assert!(!parameter_has_annotation(&lines, 1, 44));
+    }
+
+    #[test]
+    fn test_parameter_has_annotation_multiline() {
+        let lines: Vec<&str> = vec![
+            "def test_example(",
+            "    fixture_a: TypeA,",
+            "    fixture_b,",
+            "):",
+        ];
+        // Line 2 (1-indexed), "fixture_a" ends at position 13
+        assert!(parameter_has_annotation(&lines, 2, 13));
+        // Line 3 (1-indexed), "fixture_b" ends at position 13
+        assert!(!parameter_has_annotation(&lines, 3, 13));
+    }
+
+    #[test]
+    fn test_parameter_has_annotation_out_of_bounds() {
+        let lines: Vec<&str> = vec!["def test_example(my_fixture):"];
+        // Line out of bounds
+        assert!(!parameter_has_annotation(&lines, 10, 27));
+        // Character out of bounds
+        assert!(!parameter_has_annotation(&lines, 1, 100));
+    }
+
+    #[test]
+    fn test_parameter_has_annotation_empty_lines() {
+        let lines: Vec<&str> = vec![];
+        assert!(!parameter_has_annotation(&lines, 1, 0));
     }
 }

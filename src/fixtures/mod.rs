@@ -10,6 +10,7 @@ mod analyzer;
 pub(crate) mod cli;
 pub mod decorators; // Public for testing
 mod docstring;
+mod imports;
 mod resolver;
 mod scanner;
 pub(crate) mod string_utils; // pub(crate) for inlay_hint provider access

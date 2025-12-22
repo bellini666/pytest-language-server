@@ -171,7 +171,7 @@ impl FixtureDatabase {
     /// Internal helper that implements pytest priority rules with a custom filter.
     /// Priority order:
     /// 1. Same file (highest priority, last definition wins)
-    /// 2. Closest conftest.py in parent directories
+    /// 2. Closest conftest.py in parent directories (including imported fixtures)
     /// 3. Third-party fixtures from site-packages
     fn find_closest_definition_with_filter<F>(
         &self,
@@ -213,11 +213,32 @@ impl FixtureDatabase {
             let conftest_path = current_dir.join("conftest.py");
             debug!("  Checking conftest.py at: {:?}", conftest_path);
 
+            // First check if the fixture is defined directly in this conftest
             for def in definitions.iter() {
                 if def.file_path == conftest_path && filter(def) {
                     info!(
                         "Found fixture {} in conftest.py: {:?}",
                         fixture_name, conftest_path
+                    );
+                    return Some(def.clone());
+                }
+            }
+
+            // Then check if the conftest imports this fixture
+            if conftest_path.exists()
+                && self.is_fixture_imported_in_file(fixture_name, &conftest_path)
+            {
+                // The fixture is imported in this conftest, so it's available here
+                // Return the original definition (pytest makes it available at conftest scope)
+                debug!(
+                    "Fixture {} is imported in conftest.py: {:?}",
+                    fixture_name, conftest_path
+                );
+                // Get any matching definition that passes the filter
+                if let Some(def) = definitions.iter().find(|def| filter(def)) {
+                    info!(
+                        "Found imported fixture {} via conftest.py: {:?} (original: {:?})",
+                        fixture_name, conftest_path, def.file_path
                     );
                     return Some(def.clone());
                 }
@@ -466,11 +487,12 @@ impl FixtureDatabase {
             }
         }
 
-        // Priority 2: Fixtures in conftest.py files
+        // Priority 2: Fixtures in conftest.py files (including imported fixtures)
         if let Some(mut current_dir) = file_path.parent() {
             loop {
                 let conftest_path = current_dir.join("conftest.py");
 
+                // First add fixtures defined directly in the conftest
                 for entry in self.definitions.iter() {
                     let fixture_name = entry.key();
                     for def in entry.value().iter() {
@@ -479,6 +501,24 @@ impl FixtureDatabase {
                         {
                             available_fixtures.push(def.clone());
                             seen_names.insert(fixture_name.clone());
+                        }
+                    }
+                }
+
+                // Then add fixtures imported into the conftest
+                if self.file_cache.contains_key(&conftest_path) {
+                    let mut visited = HashSet::new();
+                    let imported_fixtures =
+                        self.get_imported_fixtures(&conftest_path, &mut visited);
+                    for fixture_name in imported_fixtures {
+                        if !seen_names.contains(&fixture_name) {
+                            // Get the original definition for this imported fixture
+                            if let Some(definitions) = self.definitions.get(&fixture_name) {
+                                if let Some(def) = definitions.first() {
+                                    available_fixtures.push(def.clone());
+                                    seen_names.insert(fixture_name);
+                                }
+                            }
                         }
                     }
                 }

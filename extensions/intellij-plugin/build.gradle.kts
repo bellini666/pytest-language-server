@@ -15,12 +15,11 @@ repositories {
 
 dependencies {
     intellijPlatform {
-        create("PC", "2024.2") // PyCharm Community
-        bundledPlugins("PythonCore")
+        // Target PyCharm Professional for native LSP support (available since 2023.2)
+        // PY = PyCharm Professional (includes Python plugin and LSP support)
+        create("PY", "2023.2")
 
-        // Add LSP4IJ dependency from JetBrains Marketplace
-        // Use version 0.18.0 which is compatible with PyCharm 2024.2+
-        plugin("com.redhat.devtools.lsp4ij", "0.18.0")
+        // No LSP4IJ dependency - using native IntelliJ LSP API
 
         pluginVerifier()
     }
@@ -36,7 +35,7 @@ intellijPlatform {
 
     pluginConfiguration {
         ideaVersion {
-            sinceBuild = "242"
+            sinceBuild = "232"  // IntelliJ/PyCharm 2023.2+
             untilBuild = provider { null } // Support all future versions
         }
     }

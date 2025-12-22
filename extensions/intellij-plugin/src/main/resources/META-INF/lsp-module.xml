@@ -1,0 +1,9 @@
+<idea-plugin>
+    <!-- Native LSP support via com.intellij.modules.lsp (available since 2025.2) -->
+    <!-- This is the preferred module for newer IDEs -->
+
+    <extensions defaultExtensionNs="com.intellij">
+        <platform.lsp.serverSupportProvider
+                implementation="com.github.bellini666.pytestlsp.PytestLspServerSupportProvider"/>
+    </extensions>
+</idea-plugin>

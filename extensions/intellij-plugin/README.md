@@ -2,6 +2,14 @@
 
 A blazingly fast Language Server Protocol implementation for pytest fixtures, written in Rust.
 
+## Requirements
+
+- **PyCharm Professional 2023.2** or later
+- **IntelliJ IDEA Ultimate 2023.2** or later (with Python plugin)
+- **Unified PyCharm 2025.1** or later (free tier)
+
+> **Note:** This plugin uses IntelliJ's native LSP support which provides better performance than third-party LSP clients. Native LSP is available in commercial JetBrains IDEs since 2023.2, and in the unified PyCharm distribution since 2025.1.
+
 ## Features
 
 - **Go to Definition**: Jump to fixture definitions from usage
@@ -20,12 +28,12 @@ A blazingly fast Language Server Protocol implementation for pytest fixtures, wr
 
 ## Architecture
 
-This plugin uses [LSP4IJ](https://github.com/redhat-developer/lsp4ij), the standard Language Server Protocol client for IntelliJ Platform. LSP4IJ provides:
+This plugin uses IntelliJ's **native LSP API** (available since 2023.2, significantly improved in 2025.2+). This provides:
 
-- Automatic LSP protocol handling
-- Built-in LSP console for debugging
-- Server configuration UI
-- Trace/debug level controls
+- Best-in-class performance with native IDE integration
+- No external plugin dependencies
+- Built-in Language Services status bar widget
+- Automatic server lifecycle management
 - Seamless integration with IntelliJ's code intelligence features
 
 ## Configuration
@@ -46,35 +54,21 @@ If you want to use your own installation instead of the bundled binary, you can 
 -Dpytest.lsp.executable=/path/to/pytest-language-server
 ```
 
-### LSP4IJ Features
-
-The plugin automatically provides:
-
-- **LSP Console**: View → Tool Windows → LSP Console
-  - Monitor LSP requests/responses
-  - Debug server communication
-  - Configure trace levels
-- **Language Server Settings**: Settings → Languages & Frameworks → Language Servers
-  - View server status
-  - Configure debug options
-  - Manage server lifecycle
-
-## Requirements
+## Installation
 
 ### For End Users
 
-None! The plugin includes pre-built binaries for:
+Install from the [JetBrains Marketplace](https://plugins.jetbrains.com/plugin/24608-pytest-language-server):
+1. Open Settings → Plugins → Marketplace
+2. Search for "pytest Language Server"
+3. Click Install
+
+The plugin includes pre-built binaries for:
 - macOS (Intel and Apple Silicon)
 - Linux (x86_64 and ARM64)
 - Windows (x86_64)
 
 The plugin works out of the box with no additional setup required.
-
-### For Developers
-
-- Java 17 or later
-- Gradle 8.10+ (wrapper included)
-- pytest-language-server binary (for local testing)
 
 ## Usage
 
@@ -89,10 +83,14 @@ No additional configuration is needed. The language server starts on-demand when
 
 ### Prerequisites
 
+- Java 21 or later
+- Gradle 8.10+ (wrapper included)
+- pytest-language-server binary (for local testing)
+
 ```bash
-# Install Java 17+ (macOS with Homebrew)
-brew install openjdk@17
-export PATH="/opt/homebrew/opt/openjdk@17/bin:$PATH"
+# Install Java 21+ (macOS with Homebrew)
+brew install openjdk@21
+export PATH="/opt/homebrew/opt/openjdk@21/bin:$PATH"
 
 # Verify Java version
 java -version
@@ -147,22 +145,22 @@ cd extensions/intellij-plugin
 1. Launch the IDE: `./gradlew runIde`
 2. Open a Python test project
 3. Open a test file (`test_*.py` or `conftest.py`)
-4. View LSP communication: **View → Tool Windows → LSP Console**
-5. Check server logs in the IDE log: **Help → Show Log in Finder/Explorer**
+4. Check the Language Services widget in the status bar
+5. Check IDE logs: **Help → Show Log in Finder/Explorer**
+6. Enable debug logging: **Help → Diagnostic Tools → Debug Log Settings** → add `#com.intellij.platform.lsp`
 
 ### Code Structure
 
 ```
 src/main/java/com/github/bellini666/pytestlsp/
-├── PytestLanguageServerFactory.kt           # LSP4IJ factory
-├── PytestLanguageServerConnectionProvider.kt # Server process management
-├── PytestLanguageServerService.kt           # Binary location resolution
-└── PytestLanguageServerListener.kt          # Lifecycle logging
+├── PytestLspServerSupportProvider.kt    # Native LSP server provider
+├── PytestLanguageServerService.kt       # Binary location resolution
+└── PytestLanguageServerListener.kt      # Lifecycle logging
 
 src/main/resources/
 ├── META-INF/
-│   ├── plugin.xml              # Plugin descriptor with LSP4IJ extensions
-│   └── python-support.xml      # Python-specific configuration
+│   ├── plugin.xml              # Plugin descriptor with native LSP extensions
+│   └── python-support.xml      # Python-specific configuration (optional)
 └── bin/                        # Platform-specific binaries (CI/CD only)
     ├── pytest-language-server-x86_64-apple-darwin
     ├── pytest-language-server-aarch64-apple-darwin
@@ -178,22 +176,26 @@ src/main/resources/
 2. System PATH: `-Dpytest.lsp.useSystemPath=true`
 3. Bundled binary (default)
 
-**LSP4IJ Integration:**
-- `plugin.xml` declares language server via `com.redhat.devtools.lsp4ij.server` extension
-- Language mapping connects Python files to pytest language server
-- `PytestLanguageServerFactory` creates connection provider and client
-- `ProcessStreamConnectionProvider` handles stdio communication
+**Native LSP Integration:**
+- `plugin.xml` declares language server via `com.intellij.platform.lsp.serverSupportProvider` extension
+- `PytestLspServerSupportProvider` implements `LspServerSupportProvider`
+- `PytestLspServerDescriptor` extends `ProjectWideLspServerDescriptor`
+- File matching is done in `isSupportedFile()` method
 
 **Forward Compatibility:**
-- `sinceBuild="242"` (PyCharm 2024.2+)
+- `sinceBuild="252"` (PyCharm 2025.2+)
 - `untilBuild=""` (all future versions)
-- LSP4IJ provides stable API across IntelliJ versions
+- Native LSP API provides stable interface across IntelliJ versions
 
 ## Troubleshooting
 
 ### Language Server Not Starting
 
-1. **Check binary exists:**
+1. **Check IDE version:**
+   - Requires PyCharm 2025.2+ or IntelliJ IDEA Ultimate 2025.2+
+   - PyCharm Community Edition before 2025.1 is not supported
+
+2. **Check binary exists:**
    ```bash
    # For system PATH mode
    which pytest-language-server
@@ -202,23 +204,37 @@ src/main/resources/
    # Check plugin installation directory
    ```
 
-2. **Check LSP Console:**
-   - View → Tool Windows → LSP Console
-   - Look for error messages or server startup issues
+3. **Check Language Services widget:**
+   - Look at the status bar for LSP status indicators
+   - Click to see connected language servers
 
-3. **Check IDE logs:**
+4. **Check IDE logs:**
    - Help → Show Log in Finder/Explorer
-   - Search for "pytest-language-server" or "LSP4IJ"
+   - Search for "pytest-language-server" or "LspServer"
 
-4. **Verify VM options:**
+5. **Enable debug logging:**
+   - Help → Diagnostic Tools → Debug Log Settings
+   - Add: `#com.intellij.platform.lsp`
+   - Restart IDE and reproduce the issue
+
+6. **Verify VM options:**
    - Help → Edit Custom VM Options
    - Ensure `-Dpytest.lsp.useSystemPath=true` or custom path is set
 
 ### Build Issues
 
 - **Gradle version:** Ensure Gradle 8.10+ (check with `./gradlew --version`)
-- **Java version:** Ensure Java 17+ (check with `java -version`)
-- **LSP4IJ dependency:** Uses version 0.18.0 for PyCharm 2024.2+ compatibility
+- **Java version:** Ensure Java 21+ (check with `java -version`)
+- **IDE target:** Uses IntelliJ IDEA Ultimate 2025.2 for LSP module access
+
+## Migration from Previous Versions
+
+If you were using the previous version of this plugin (which used LSP4IJ), note:
+
+1. **IDE requirements changed**: Now requires PyCharm Professional/IntelliJ Ultimate 2023.2+ (or unified PyCharm 2025.1+)
+2. **No external dependencies**: LSP4IJ is no longer required
+3. **Better performance**: Native LSP integration is faster and more responsive
+4. **No configuration changes needed**: Your existing settings will continue to work
 
 ## CI/CD and Releases
 

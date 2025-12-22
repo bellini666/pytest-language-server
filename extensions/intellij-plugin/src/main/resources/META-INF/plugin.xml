@@ -3,8 +3,6 @@
     <name>pytest Language Server</name>
     <vendor email="hackedbellini@gmail.com" url="https://github.com/bellini666/pytest-language-server">Thiago Bellini Ribeiro</vendor>
 
-
-
     <description><![CDATA[
         A blazingly fast Language Server Protocol implementation for pytest fixtures, written in Rust.
         <br/><br/>
@@ -21,6 +19,9 @@
         <br/>
         The plugin includes pre-built binaries for macOS (Intel and Apple Silicon), Linux (x86_64 and ARM64),
         and Windows (x86_64). No additional setup required!
+        <br/><br/>
+        <b>Requirements:</b> PyCharm Professional 2023.2+ or IntelliJ IDEA Ultimate 2023.2+ (uses native LSP support for best performance).
+        Also works with unified PyCharm (free tier) starting from 2025.1.
     ]]></description>
 
     <change-notes><![CDATA[
@@ -32,35 +33,28 @@
     <category>Code editing</category>
     <url>https://github.com/bellini666/pytest-language-server</url>
 
-    <idea-version since-build="242"/>
+    <!-- Requires IntelliJ 2023.2+ for native LSP support -->
+    <idea-version since-build="232"/>
 
     <!-- Required dependencies -->
     <depends>com.intellij.modules.platform</depends>
-    <depends>com.redhat.devtools.lsp4ij</depends>
+
+    <!-- Native LSP support: use modules.lsp (2025.2+) or fall back to ultimate (2023.2+) -->
+    <depends optional="true" config-file="lsp-module.xml">com.intellij.modules.lsp</depends>
+    <depends optional="true" config-file="ultimate-module.xml">com.intellij.modules.ultimate</depends>
+
     <!-- Python support is optional - works with PyCharm or IntelliJ IDEA + Python plugin -->
     <depends optional="true" config-file="python-support.xml">com.intellij.modules.python</depends>
 
-    <!-- LSP4IJ Extension Points -->
-    <extensions defaultExtensionNs="com.redhat.devtools.lsp4ij">
-        <server id="pytestLanguageServer"
-                name="pytest Language Server"
-                factoryClass="com.github.bellini666.pytestlsp.PytestLanguageServerFactory">
-            <description><![CDATA[
-                A blazingly fast Language Server Protocol implementation for pytest fixtures, written in Rust.
-                Provides go-to-definition, code completion, find-references, hover documentation, diagnostics,
-                and code actions for pytest fixtures.
-            ]]></description>
-        </server>
-    </extensions>
-
-    <!-- IntelliJ Platform Extensions -->
+    <!-- IntelliJ Platform Extensions (non-LSP) -->
     <extensions defaultExtensionNs="com.intellij">
+        <!-- Project service for executable resolution -->
         <projectService serviceImplementation="com.github.bellini666.pytestlsp.PytestLanguageServerService"/>
-        <notificationGroup id="pytest Language Server" displayType="BALLOON"/>
-    </extensions>
 
-    <!-- Startup activity for logging and diagnostics -->
-    <extensions defaultExtensionNs="com.intellij">
+        <!-- Notifications -->
+        <notificationGroup id="pytest Language Server" displayType="BALLOON"/>
+
+        <!-- Startup activity for logging and diagnostics -->
         <projectActivity implementation="com.github.bellini666.pytestlsp.PytestLanguageServerListener"/>
     </extensions>
 </idea-plugin>

@@ -7,7 +7,7 @@ import com.intellij.openapi.startup.ProjectActivity
 /**
  * Startup activity for project lifecycle events.
  *
- * Note: LSP4IJ handles the actual language server lifecycle automatically.
+ * The native IntelliJ LSP API handles the language server lifecycle automatically.
  * This activity is only for logging and diagnostics.
  */
 class PytestLanguageServerListener : ProjectActivity {
@@ -18,7 +18,7 @@ class PytestLanguageServerListener : ProjectActivity {
         LOG.info("pytest Language Server plugin activated for project: ${project.name}")
 
         // Verify that the executable can be found
-        // LSP4IJ will handle starting the server automatically when needed
+        // The native LSP API will handle starting the server automatically when pytest files are opened
         val service = PytestLanguageServerService.getInstance(project)
         val executablePath = service.getExecutablePath()
 

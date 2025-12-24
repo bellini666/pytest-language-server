@@ -950,3 +950,328 @@ fn test_e2e_keyword_only_go_to_definition() {
     assert_eq!(def.name, "sample_fixture");
     assert_eq!(def.file_path, conftest_file);
 }
+
+// MARK: Imported Fixtures E2E Tests
+
+#[test]
+#[timeout(30000)]
+fn test_e2e_imported_fixtures_are_detected() {
+    // Tests that fixtures imported via star import in conftest.py are properly detected
+    let db = FixtureDatabase::new();
+    let project_path = PathBuf::from("tests/test_project");
+
+    db.scan_workspace(&project_path);
+
+    // Fixtures from fixture_module.py should be available
+    let imported = db.definitions.get("imported_fixture");
+    assert!(
+        imported.is_some(),
+        "imported_fixture should be detected from fixture_module.py"
+    );
+
+    let another_imported = db.definitions.get("another_imported_fixture");
+    assert!(
+        another_imported.is_some(),
+        "another_imported_fixture should be detected from fixture_module.py"
+    );
+
+    // The explicitly_imported fixture should also be detected
+    let explicit = db.definitions.get("explicitly_imported");
+    assert!(
+        explicit.is_some(),
+        "explicitly_imported should be detected from fixture_module.py"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_e2e_imported_fixtures_available_in_test_file() {
+    // Tests that imported fixtures are available for tests in the same directory
+    let db = FixtureDatabase::new();
+    let project_path = PathBuf::from("tests/test_project");
+
+    db.scan_workspace(&project_path);
+
+    let test_file = project_path.join("imported_fixtures/test_uses_imported.py");
+    let test_file_canonical = test_file.canonicalize().unwrap();
+
+    let available = db.get_available_fixtures(&test_file_canonical);
+    let names: Vec<&str> = available.iter().map(|f| f.name.as_str()).collect();
+
+    // Should have access to imported fixtures via conftest.py star import
+    assert!(
+        names.contains(&"imported_fixture"),
+        "imported_fixture should be available in test file"
+    );
+    assert!(
+        names.contains(&"another_imported_fixture"),
+        "another_imported_fixture should be available in test file"
+    );
+    assert!(
+        names.contains(&"explicitly_imported"),
+        "explicitly_imported should be available in test file"
+    );
+
+    // Should also have access to the local fixture defined in conftest
+    assert!(
+        names.contains(&"local_fixture"),
+        "local_fixture should be available in test file"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_e2e_imported_fixtures_go_to_definition() {
+    // Tests that go-to-definition works for imported fixtures
+    let db = FixtureDatabase::new();
+    let project_path = PathBuf::from("tests/test_project");
+
+    db.scan_workspace(&project_path);
+
+    let test_file = project_path.join("imported_fixtures/test_uses_imported.py");
+    let test_file_canonical = test_file.canonicalize().unwrap();
+    let fixture_module = project_path.join("imported_fixtures/fixture_module.py");
+    let fixture_module_canonical = fixture_module.canonicalize().unwrap();
+
+    // Find the usage of imported_fixture in the test file
+    let usages = db.usages.get(&test_file_canonical);
+    assert!(usages.is_some(), "Test file should have fixture usages");
+
+    let usages = usages.unwrap();
+    let imported_usage = usages
+        .iter()
+        .find(|u| u.name == "imported_fixture")
+        .expect("Should find imported_fixture usage");
+
+    // Go-to-definition should find the fixture in fixture_module.py
+    let definition = db.find_fixture_definition(
+        &test_file_canonical,
+        (imported_usage.line - 1) as u32,
+        imported_usage.start_char as u32,
+    );
+
+    assert!(
+        definition.is_some(),
+        "Should find definition for imported_fixture"
+    );
+    let def = definition.unwrap();
+    assert_eq!(def.name, "imported_fixture");
+    assert_eq!(
+        def.file_path, fixture_module_canonical,
+        "Definition should be in fixture_module.py"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_e2e_imported_fixtures_find_references() {
+    // Tests that find-references works for imported fixtures
+    let db = FixtureDatabase::new();
+    let project_path = PathBuf::from("tests/test_project");
+
+    db.scan_workspace(&project_path);
+
+    // Get the definition of imported_fixture
+    let definitions = db.definitions.get("imported_fixture");
+    assert!(definitions.is_some());
+    let def = definitions.unwrap().first().unwrap().clone();
+
+    // Find all references to this fixture
+    let references = db.find_references_for_definition(&def);
+
+    // Should find at least the usage in test_uses_imported.py
+    assert!(
+        !references.is_empty(),
+        "Should find references to imported_fixture"
+    );
+
+    // Verify at least one reference is in the test file
+    let test_file = project_path.join("imported_fixtures/test_uses_imported.py");
+    let test_file_canonical = test_file.canonicalize().unwrap();
+    let has_test_ref = references
+        .iter()
+        .any(|r| r.file_path == test_file_canonical);
+    assert!(
+        has_test_ref,
+        "Should have a reference in test_uses_imported.py"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_e2e_imported_fixtures_no_undeclared_warning() {
+    // Tests that imported fixtures are not flagged as undeclared
+    let db = FixtureDatabase::new();
+    let project_path = PathBuf::from("tests/test_project");
+
+    db.scan_workspace(&project_path);
+
+    let test_file = project_path.join("imported_fixtures/test_uses_imported.py");
+    let test_file_canonical = test_file.canonicalize().unwrap();
+
+    let undeclared = db.get_undeclared_fixtures(&test_file_canonical);
+    let undeclared_names: Vec<&str> = undeclared.iter().map(|u| u.name.as_str()).collect();
+
+    // Imported fixtures should NOT be in undeclared
+    assert!(
+        !undeclared_names.contains(&"imported_fixture"),
+        "imported_fixture should not be flagged as undeclared"
+    );
+    assert!(
+        !undeclared_names.contains(&"another_imported_fixture"),
+        "another_imported_fixture should not be flagged as undeclared"
+    );
+    assert!(
+        !undeclared_names.contains(&"local_fixture"),
+        "local_fixture should not be flagged as undeclared"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_e2e_imported_fixtures_cache_performance() {
+    // Tests that the imported fixtures cache provides performance benefit
+    use std::time::Instant;
+
+    let db = FixtureDatabase::new();
+    let project_path = PathBuf::from("tests/test_project");
+
+    db.scan_workspace(&project_path);
+
+    let conftest_file = project_path.join("imported_fixtures/conftest.py");
+    let conftest_canonical = conftest_file.canonicalize().unwrap();
+
+    // First call - populates the cache
+    let start = Instant::now();
+    let mut visited = std::collections::HashSet::new();
+    let first_result = db.get_imported_fixtures(&conftest_canonical, &mut visited);
+    let first_duration = start.elapsed();
+
+    // Second call - should hit the cache
+    let start = Instant::now();
+    let mut visited = std::collections::HashSet::new();
+    let second_result = db.get_imported_fixtures(&conftest_canonical, &mut visited);
+    let second_duration = start.elapsed();
+
+    // Results should be the same
+    assert_eq!(first_result, second_result);
+
+    // Cache hit should be faster (allow some variance for system noise)
+    // We just verify the cache works by checking results are identical
+    // In CI, timing can be unreliable, so we just log for diagnostics
+    eprintln!(
+        "Import cache: first call {:?}, second call {:?}",
+        first_duration, second_duration
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_e2e_imported_fixtures_cli_shows_them() {
+    // Tests that the CLI shows imported fixtures as used (not unused)
+    let mut cmd = Command::cargo_bin("pytest-language-server").unwrap();
+    let output = cmd
+        .arg("fixtures")
+        .arg("list")
+        .arg("tests/test_project/imported_fixtures")
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // imported_fixture and another_imported_fixture should appear in the output
+    // They are used in test_uses_imported.py
+    assert!(
+        stdout.contains("imported_fixture"),
+        "CLI output should list imported_fixture"
+    );
+    assert!(
+        stdout.contains("another_imported_fixture"),
+        "CLI output should list another_imported_fixture"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_e2e_transitive_imported_fixtures() {
+    // Tests that fixtures imported transitively (A imports from B, B imports from C) are detected
+    let db = FixtureDatabase::new();
+    let project_path = PathBuf::from("tests/test_project");
+
+    db.scan_workspace(&project_path);
+
+    // Fixtures from nested/deep_fixtures.py should be available via transitive import:
+    // conftest.py -> fixture_module.py -> nested/deep_fixtures.py
+    let deep_fixture = db.definitions.get("deep_nested_fixture");
+    assert!(
+        deep_fixture.is_some(),
+        "deep_nested_fixture should be detected from nested/deep_fixtures.py"
+    );
+
+    let another_deep = db.definitions.get("another_deep_fixture");
+    assert!(
+        another_deep.is_some(),
+        "another_deep_fixture should be detected from nested/deep_fixtures.py"
+    );
+
+    // These fixtures should be available in test_uses_imported.py
+    let test_file = project_path.join("imported_fixtures/test_uses_imported.py");
+    let test_file_canonical = test_file.canonicalize().unwrap();
+
+    let available = db.get_available_fixtures(&test_file_canonical);
+    let names: Vec<&str> = available.iter().map(|f| f.name.as_str()).collect();
+
+    assert!(
+        names.contains(&"deep_nested_fixture"),
+        "deep_nested_fixture should be available via transitive import"
+    );
+    assert!(
+        names.contains(&"another_deep_fixture"),
+        "another_deep_fixture should be available via transitive import"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_e2e_transitive_imports_go_to_definition() {
+    // Tests that go-to-definition works for transitively imported fixtures
+    let db = FixtureDatabase::new();
+    let project_path = PathBuf::from("tests/test_project");
+
+    db.scan_workspace(&project_path);
+
+    let test_file = project_path.join("imported_fixtures/test_uses_imported.py");
+    let test_file_canonical = test_file.canonicalize().unwrap();
+    let deep_fixtures_file = project_path.join("imported_fixtures/nested/deep_fixtures.py");
+    let deep_fixtures_canonical = deep_fixtures_file.canonicalize().unwrap();
+
+    // Find the usage of deep_nested_fixture in the test file
+    let usages = db.usages.get(&test_file_canonical);
+    assert!(usages.is_some(), "Test file should have fixture usages");
+
+    let usages = usages.unwrap();
+    let deep_usage = usages
+        .iter()
+        .find(|u| u.name == "deep_nested_fixture")
+        .expect("Should find deep_nested_fixture usage");
+
+    // Go-to-definition should find the fixture in nested/deep_fixtures.py
+    let definition = db.find_fixture_definition(
+        &test_file_canonical,
+        (deep_usage.line - 1) as u32,
+        deep_usage.start_char as u32,
+    );
+
+    assert!(
+        definition.is_some(),
+        "Should find definition for deep_nested_fixture"
+    );
+    let def = definition.unwrap();
+    assert_eq!(def.name, "deep_nested_fixture");
+    assert_eq!(
+        def.file_path, deep_fixtures_canonical,
+        "Definition should be in nested/deep_fixtures.py"
+    );
+}

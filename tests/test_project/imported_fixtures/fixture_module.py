@@ -2,6 +2,9 @@
 
 import pytest
 
+# Re-export fixtures from nested module (transitive import test)
+from .nested.deep_fixtures import *  # noqa: F403
+
 
 @pytest.fixture
 def imported_fixture():

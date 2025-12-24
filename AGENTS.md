@@ -90,10 +90,27 @@ When adding new LSP features, update the feature lists in all extension READMEs:
 
 Keep them in sync with the main `README.md` features section.
 
+### Imported Fixtures
+Fixtures imported via star imports in `conftest.py` are discovered:
+```python
+# conftest.py
+from .fixtures import *  # Fixtures from fixtures.py are now available
+```
+
+The scanner:
+1. First scans `conftest.py` and test files
+2. Then iteratively discovers modules imported by conftest files
+3. Handles transitive imports (A → B → C)
+
+Performance optimizations:
+- `imported_fixtures_cache` stores results with dual invalidation (content hash + definitions version)
+- `is_standard_library_module()` uses O(1) HashSet lookup instead of linear array search
+- Iterative module scanning prevents redundant AST parsing
+
 ## Known Limitations
 
 - Fixtures defined inside `if` blocks are not detected
-- Only scans `conftest.py`, `test_*.py`, `*_test.py` files
+- Only scans `conftest.py`, `test_*.py`, `*_test.py` files (but also scans modules imported by conftest)
 
 ## Tests
 

@@ -6,6 +6,9 @@ Fixtures tree for: <TEST_PROJECT_PATH>
 
 conftest.py (1 fixtures)
 └── iterator_fixture (unused)
+imported_fixtures/
+├── fixture_module.py (1 fixtures)
+│   └── explicitly_imported (unused)
 utils/
 └── conftest.py (3 fixtures)
     ├── auto_cleanup (unused)

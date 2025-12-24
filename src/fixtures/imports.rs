@@ -8,10 +8,100 @@
 //! conftest.py itself.
 
 use super::FixtureDatabase;
+use once_cell::sync::Lazy;
 use rustpython_parser::ast::Stmt;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracing::{debug, info};
+
+/// Static HashSet of standard library module names for O(1) lookup.
+static STDLIB_MODULES: Lazy<HashSet<&'static str>> = Lazy::new(|| {
+    [
+        "os",
+        "sys",
+        "re",
+        "json",
+        "typing",
+        "collections",
+        "functools",
+        "itertools",
+        "pathlib",
+        "datetime",
+        "time",
+        "math",
+        "random",
+        "copy",
+        "io",
+        "abc",
+        "contextlib",
+        "dataclasses",
+        "enum",
+        "logging",
+        "unittest",
+        "asyncio",
+        "concurrent",
+        "multiprocessing",
+        "threading",
+        "subprocess",
+        "shutil",
+        "tempfile",
+        "glob",
+        "fnmatch",
+        "pickle",
+        "sqlite3",
+        "urllib",
+        "http",
+        "email",
+        "html",
+        "xml",
+        "socket",
+        "ssl",
+        "select",
+        "signal",
+        "struct",
+        "codecs",
+        "textwrap",
+        "string",
+        "difflib",
+        "inspect",
+        "dis",
+        "traceback",
+        "warnings",
+        "weakref",
+        "types",
+        "importlib",
+        "pkgutil",
+        "pprint",
+        "reprlib",
+        "numbers",
+        "decimal",
+        "fractions",
+        "statistics",
+        "hashlib",
+        "hmac",
+        "secrets",
+        "base64",
+        "binascii",
+        "zlib",
+        "gzip",
+        "bz2",
+        "lzma",
+        "zipfile",
+        "tarfile",
+        "csv",
+        "configparser",
+        "argparse",
+        "getopt",
+        "getpass",
+        "platform",
+        "errno",
+        "ctypes",
+        "__future__",
+    ]
+    .into_iter()
+    .collect()
+});
 
 /// Represents a fixture import in a Python file.
 #[derive(Debug, Clone)]
@@ -102,92 +192,10 @@ impl FixtureDatabase {
     }
 
     /// Check if a module is a standard library module that can't contain fixtures.
+    /// Uses a static HashSet for O(1) lookup instead of linear array search.
     fn is_standard_library_module(&self, module: &str) -> bool {
-        let stdlib_prefixes = [
-            "os",
-            "sys",
-            "re",
-            "json",
-            "typing",
-            "collections",
-            "functools",
-            "itertools",
-            "pathlib",
-            "datetime",
-            "time",
-            "math",
-            "random",
-            "copy",
-            "io",
-            "abc",
-            "contextlib",
-            "dataclasses",
-            "enum",
-            "logging",
-            "unittest",
-            "asyncio",
-            "concurrent",
-            "multiprocessing",
-            "threading",
-            "subprocess",
-            "shutil",
-            "tempfile",
-            "glob",
-            "fnmatch",
-            "pickle",
-            "sqlite3",
-            "urllib",
-            "http",
-            "email",
-            "html",
-            "xml",
-            "socket",
-            "ssl",
-            "select",
-            "signal",
-            "struct",
-            "codecs",
-            "textwrap",
-            "string",
-            "difflib",
-            "inspect",
-            "dis",
-            "traceback",
-            "warnings",
-            "weakref",
-            "types",
-            "importlib",
-            "pkgutil",
-            "pprint",
-            "reprlib",
-            "numbers",
-            "decimal",
-            "fractions",
-            "statistics",
-            "hashlib",
-            "hmac",
-            "secrets",
-            "base64",
-            "binascii",
-            "zlib",
-            "gzip",
-            "bz2",
-            "lzma",
-            "zipfile",
-            "tarfile",
-            "csv",
-            "configparser",
-            "argparse",
-            "getopt",
-            "getpass",
-            "platform",
-            "errno",
-            "ctypes",
-            "__future__",
-        ];
-
         let first_part = module.split('.').next().unwrap_or(module);
-        stdlib_prefixes.contains(&first_part)
+        STDLIB_MODULES.contains(first_part)
     }
 
     /// Resolve a module path to a file path.
@@ -308,6 +316,7 @@ impl FixtureDatabase {
     /// Get fixtures that are re-exported from a file via imports.
     /// This handles `from .module import *` patterns that bring fixtures into scope.
     ///
+    /// Results are cached with content-hash and definitions-version based invalidation.
     /// Returns fixture names that are available in `file_path` via imports.
     pub fn get_imported_fixtures(
         &self,
@@ -323,26 +332,70 @@ impl FixtureDatabase {
         }
         visited.insert(canonical_path.clone());
 
+        // Get the file content first (needed for cache validation)
+        let Some(content) = self.get_file_content(&canonical_path) else {
+            return HashSet::new();
+        };
+
+        let content_hash = Self::hash_content(&content);
+        let current_version = self
+            .definitions_version
+            .load(std::sync::atomic::Ordering::SeqCst);
+
+        // Check cache - valid if both content hash and definitions version match
+        if let Some(cached) = self.imported_fixtures_cache.get(&canonical_path) {
+            let (cached_content_hash, cached_version, cached_fixtures) = cached.value();
+            if *cached_content_hash == content_hash && *cached_version == current_version {
+                debug!("Cache hit for imported fixtures in {:?}", canonical_path);
+                return cached_fixtures.as_ref().clone();
+            }
+        }
+
+        // Compute imported fixtures
+        let imported_fixtures = self.compute_imported_fixtures(&canonical_path, &content, visited);
+
+        // Store in cache
+        self.imported_fixtures_cache.insert(
+            canonical_path.clone(),
+            (
+                content_hash,
+                current_version,
+                Arc::new(imported_fixtures.clone()),
+            ),
+        );
+
+        info!(
+            "Found {} imported fixtures for {:?}: {:?}",
+            imported_fixtures.len(),
+            file_path,
+            imported_fixtures
+        );
+
+        imported_fixtures
+    }
+
+    /// Internal method to compute imported fixtures without caching.
+    fn compute_imported_fixtures(
+        &self,
+        canonical_path: &Path,
+        content: &str,
+        visited: &mut HashSet<PathBuf>,
+    ) -> HashSet<String> {
         let mut imported_fixtures = HashSet::new();
 
-        // Get the file content and parse it
-        let Some(content) = self.get_file_content(&canonical_path) else {
+        let Some(parsed) = self.get_parsed_ast(canonical_path, content) else {
             return imported_fixtures;
         };
 
-        let Some(parsed) = self.get_parsed_ast(&canonical_path, &content) else {
-            return imported_fixtures;
-        };
-
-        let line_index = self.get_line_index(&canonical_path, &content);
+        let line_index = self.get_line_index(canonical_path, content);
 
         if let rustpython_parser::ast::Mod::Module(module) = parsed.as_ref() {
-            let imports = self.extract_fixture_imports(&module.body, &canonical_path, &line_index);
+            let imports = self.extract_fixture_imports(&module.body, canonical_path, &line_index);
 
             for import in imports {
                 // Resolve the import to a file path
                 let Some(resolved_path) =
-                    self.resolve_module_to_file(&import.module_path, &canonical_path)
+                    self.resolve_module_to_file(&import.module_path, canonical_path)
                 else {
                     debug!(
                         "Could not resolve module '{}' from {:?}",
@@ -380,13 +433,6 @@ impl FixtureDatabase {
                 }
             }
         }
-
-        info!(
-            "Found {} imported fixtures for {:?}: {:?}",
-            imported_fixtures.len(),
-            file_path,
-            imported_fixtures
-        );
 
         imported_fixtures
     }

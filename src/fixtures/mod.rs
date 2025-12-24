@@ -47,6 +47,10 @@ type CycleCacheEntry = (u64, Arc<Vec<types::FixtureCycle>>);
 /// The version is incremented when definitions change to invalidate the cache.
 type AvailableFixturesCacheEntry = (u64, Arc<Vec<FixtureDefinition>>);
 
+/// Cache entry for imported fixtures: (content_hash, definitions_version, imported_fixture_names).
+/// Invalidated when either the file content or fixture definitions change.
+type ImportedFixturesCacheEntry = (u64, u64, Arc<HashSet<String>>);
+
 /// The central database for fixture definitions and usages.
 ///
 /// Uses `DashMap` for lock-free concurrent access during workspace scanning.
@@ -85,6 +89,9 @@ pub struct FixtureDatabase {
     /// Cache of available fixtures per file.
     /// Stores (definitions_version, fixtures) to invalidate when definitions change.
     pub available_fixtures_cache: Arc<DashMap<PathBuf, AvailableFixturesCacheEntry>>,
+    /// Cache of imported fixtures per file.
+    /// Stores (content_hash, definitions_version, fixture_names) for invalidation.
+    pub imported_fixtures_cache: Arc<DashMap<PathBuf, ImportedFixturesCacheEntry>>,
 }
 
 impl Default for FixtureDatabase {
@@ -110,6 +117,7 @@ impl FixtureDatabase {
             definitions_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cycle_cache: Arc::new(DashMap::new()),
             available_fixtures_cache: Arc::new(DashMap::new()),
+            imported_fixtures_cache: Arc::new(DashMap::new()),
         }
     }
 
@@ -235,6 +243,9 @@ impl FixtureDatabase {
 
         // Remove from available_fixtures_cache (this file's cached available fixtures)
         self.available_fixtures_cache.remove(&canonical);
+
+        // Remove from imported_fixtures_cache
+        self.imported_fixtures_cache.remove(&canonical);
 
         // Note: We don't remove from canonical_path_cache because:
         // 1. It's keyed by original path, not canonical path

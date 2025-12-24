@@ -225,7 +225,9 @@ impl FixtureDatabase {
             }
 
             // Then check if the conftest imports this fixture
-            if conftest_path.exists()
+            // Check both filesystem and file cache for conftest existence
+            let conftest_in_cache = self.file_cache.contains_key(&conftest_path);
+            if (conftest_path.exists() || conftest_in_cache)
                 && self.is_fixture_imported_in_file(fixture_name, &conftest_path)
             {
                 // The fixture is imported in this conftest, so it's available here

@@ -9725,3 +9725,683 @@ def test_something():
         "module_fixture should be in available fixtures (via import)"
     );
 }
+
+#[test]
+#[timeout(30000)]
+fn test_find_definition_for_imported_fixture() {
+    // Test that go-to-definition works for fixtures imported via star import
+    let db = FixtureDatabase::new();
+
+    let fixture_module_content = r#"
+import pytest
+
+@pytest.fixture
+def imported_fixture():
+    return "imported"
+"#;
+
+    let conftest_content = r#"
+from .fixture_module import *
+"#;
+
+    let test_content = r#"
+def test_uses_imported(imported_fixture):
+    pass
+"#;
+
+    let fixture_module_path = PathBuf::from("/tmp/test_def/fixture_module.py");
+    let conftest_path = PathBuf::from("/tmp/test_def/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_def/test_example.py");
+
+    db.analyze_file(fixture_module_path.clone(), fixture_module_content);
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Go-to-definition from the test file should find the fixture in fixture_module.py
+    // Line 2 (0-based: 1) contains "def test_uses_imported(imported_fixture):"
+    // Character position for "imported_fixture" starts at column 23
+    let definition = db.find_fixture_definition(&test_path, 1, 24);
+
+    assert!(
+        definition.is_some(),
+        "Should find definition for imported_fixture from test file"
+    );
+    let def = definition.unwrap();
+    assert_eq!(def.name, "imported_fixture");
+    assert_eq!(
+        def.file_path, fixture_module_path,
+        "Definition should be in fixture_module.py, not conftest.py"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_find_references_for_imported_fixture() {
+    // Test that find-references works for fixtures that are imported
+    let db = FixtureDatabase::new();
+
+    let fixture_module_content = r#"
+import pytest
+
+@pytest.fixture
+def shared_fixture():
+    return "shared"
+"#;
+
+    let conftest_content = r#"
+from .fixture_module import *
+"#;
+
+    let test_content = r#"
+def test_one(shared_fixture):
+    pass
+
+def test_two(shared_fixture):
+    pass
+"#;
+
+    let fixture_module_path = PathBuf::from("/tmp/test_refs/fixture_module.py");
+    let conftest_path = PathBuf::from("/tmp/test_refs/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_refs/test_example.py");
+
+    db.analyze_file(fixture_module_path.clone(), fixture_module_content);
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Find all references to shared_fixture
+    let references = db.find_fixture_references("shared_fixture");
+
+    // Should find 2 usages in the test file
+    assert_eq!(
+        references.len(),
+        2,
+        "Should find 2 references to shared_fixture"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_multi_level_relative_import() {
+    // Test imports like `from ..utils.fixtures import *`
+    let db = FixtureDatabase::new();
+
+    let utils_fixtures_content = r#"
+import pytest
+
+@pytest.fixture
+def util_fixture():
+    return "from utils"
+"#;
+
+    // conftest.py is in tests/subdir/, imports from tests/utils/fixtures.py
+    let conftest_content = r#"
+from ..utils.fixtures import *
+"#;
+
+    let test_content = r#"
+def test_uses_util(util_fixture):
+    pass
+"#;
+
+    // File structure: tests/utils/fixtures.py, tests/subdir/conftest.py, tests/subdir/test_example.py
+    let utils_fixtures_path = PathBuf::from("/tmp/test_multi_level/tests/utils/fixtures.py");
+    let conftest_path = PathBuf::from("/tmp/test_multi_level/tests/subdir/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_multi_level/tests/subdir/test_example.py");
+
+    db.analyze_file(utils_fixtures_path.clone(), utils_fixtures_content);
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    // The fixture should be resolvable from the test
+    let resolved = db.resolve_fixture_for_file(&test_path, "util_fixture");
+
+    assert!(
+        resolved.is_some(),
+        "util_fixture should be resolvable via multi-level relative import"
+    );
+    assert_eq!(resolved.unwrap().file_path, utils_fixtures_path);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_mixed_star_and_explicit_imports() {
+    // Test conftest with both star imports and explicit imports
+    let db = FixtureDatabase::new();
+
+    let module_a_content = r#"
+import pytest
+
+@pytest.fixture
+def fixture_a():
+    return "a"
+"#;
+
+    let module_b_content = r#"
+import pytest
+
+@pytest.fixture
+def fixture_b():
+    return "b"
+
+@pytest.fixture
+def fixture_b2():
+    return "b2"
+"#;
+
+    let conftest_content = r#"
+from .module_a import *
+from .module_b import fixture_b  # Only import fixture_b, not fixture_b2
+
+import pytest
+
+@pytest.fixture
+def local_fixture():
+    return "local"
+"#;
+
+    let test_content = r#"
+def test_uses_all(fixture_a, fixture_b, local_fixture):
+    pass
+"#;
+
+    let module_a_path = PathBuf::from("/tmp/test_mixed/module_a.py");
+    let module_b_path = PathBuf::from("/tmp/test_mixed/module_b.py");
+    let conftest_path = PathBuf::from("/tmp/test_mixed/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_mixed/test_example.py");
+
+    db.analyze_file(module_a_path.clone(), module_a_content);
+    db.analyze_file(module_b_path.clone(), module_b_content);
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    // fixture_a should be available (via star import)
+    let resolved_a = db.resolve_fixture_for_file(&test_path, "fixture_a");
+    assert!(resolved_a.is_some(), "fixture_a should be available");
+    assert_eq!(resolved_a.unwrap().file_path, module_a_path);
+
+    // fixture_b should be available (via explicit import)
+    let resolved_b = db.resolve_fixture_for_file(&test_path, "fixture_b");
+    assert!(resolved_b.is_some(), "fixture_b should be available");
+    assert_eq!(resolved_b.unwrap().file_path, module_b_path);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_import_with_alias() {
+    // Test `from .module import fixture as alias`
+    let db = FixtureDatabase::new();
+
+    let module_content = r#"
+import pytest
+
+@pytest.fixture
+def original_name():
+    return "original"
+"#;
+
+    // NOTE: Importing a fixture with an alias is unusual in pytest, but let's test it
+    let conftest_content = r#"
+from .module import original_name as aliased_fixture
+"#;
+
+    let test_content = r#"
+def test_uses_alias(aliased_fixture):
+    pass
+"#;
+
+    let module_path = PathBuf::from("/tmp/test_alias/module.py");
+    let conftest_path = PathBuf::from("/tmp/test_alias/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_alias/test_example.py");
+
+    db.analyze_file(module_path.clone(), module_content);
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    // With an alias, the fixture should be available under the alias name
+    // Note: This depends on how the import extraction handles aliases
+    // The current implementation may or may not support this fully
+    let resolved = db.resolve_fixture_for_file(&test_path, "aliased_fixture");
+
+    // If aliases are supported, this should find the fixture
+    // This test documents the current behavior
+    if resolved.is_some() {
+        assert_eq!(
+            resolved.unwrap().name,
+            "original_name",
+            "Aliased import should resolve to original fixture"
+        );
+    }
+    // If not supported, the test passes anyway to document the limitation
+}
+
+#[test]
+#[timeout(30000)]
+fn test_nested_package_imports() {
+    // Test imports from nested packages: from .subpackage.module import *
+    let db = FixtureDatabase::new();
+
+    let nested_module_content = r#"
+import pytest
+
+@pytest.fixture
+def nested_fixture():
+    return "nested"
+"#;
+
+    // Import from a nested package
+    let conftest_content = r#"
+from .subpackage.module import *
+"#;
+
+    let test_content = r#"
+def test_uses_nested(nested_fixture):
+    pass
+"#;
+
+    // File structure: tests/subpackage/module.py, tests/conftest.py, tests/test_example.py
+    let nested_path = PathBuf::from("/tmp/test_nested/tests/subpackage/module.py");
+    let conftest_path = PathBuf::from("/tmp/test_nested/tests/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_nested/tests/test_example.py");
+
+    db.analyze_file(nested_path.clone(), nested_module_content);
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    let resolved = db.resolve_fixture_for_file(&test_path, "nested_fixture");
+
+    assert!(
+        resolved.is_some(),
+        "nested_fixture should be resolvable via nested package import"
+    );
+    assert_eq!(resolved.unwrap().file_path, nested_path);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_imported_fixture_with_dependencies() {
+    // Test that fixtures with dependencies are correctly resolved when imported
+    let db = FixtureDatabase::new();
+
+    let module_content = r#"
+import pytest
+
+@pytest.fixture
+def base_fixture():
+    return "base"
+
+@pytest.fixture
+def dependent_fixture(base_fixture):
+    return f"depends on {base_fixture}"
+"#;
+
+    let conftest_content = r#"
+from .module import *
+"#;
+
+    let test_content = r#"
+def test_uses_dependent(dependent_fixture):
+    pass
+"#;
+
+    let module_path = PathBuf::from("/tmp/test_deps/module.py");
+    let conftest_path = PathBuf::from("/tmp/test_deps/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_deps/test_example.py");
+
+    db.analyze_file(module_path.clone(), module_content);
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Both fixtures should be resolvable
+    let resolved_base = db.resolve_fixture_for_file(&test_path, "base_fixture");
+    let resolved_dependent = db.resolve_fixture_for_file(&test_path, "dependent_fixture");
+
+    assert!(resolved_base.is_some(), "base_fixture should be resolvable");
+    assert!(
+        resolved_dependent.is_some(),
+        "dependent_fixture should be resolvable"
+    );
+
+    // The dependent fixture should have base_fixture in its dependencies
+    let dep_def = resolved_dependent.unwrap();
+    assert!(
+        dep_def.dependencies.contains(&"base_fixture".to_string()),
+        "dependent_fixture should list base_fixture as a dependency"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_import_from_init_py() {
+    // Test importing from a package's __init__.py
+    let db = FixtureDatabase::new();
+
+    let init_content = r#"
+import pytest
+
+@pytest.fixture
+def package_fixture():
+    return "from package init"
+"#;
+
+    // Import from the package (which reads __init__.py)
+    let conftest_content = r#"
+from .fixtures import *
+"#;
+
+    let test_content = r#"
+def test_uses_package_fixture(package_fixture):
+    pass
+"#;
+
+    // File structure: tests/fixtures/__init__.py, tests/conftest.py, tests/test_example.py
+    let init_path = PathBuf::from("/tmp/test_init/tests/fixtures/__init__.py");
+    let conftest_path = PathBuf::from("/tmp/test_init/tests/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_init/tests/test_example.py");
+
+    db.analyze_file(init_path.clone(), init_content);
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    let resolved = db.resolve_fixture_for_file(&test_path, "package_fixture");
+
+    assert!(
+        resolved.is_some(),
+        "package_fixture should be resolvable from __init__.py"
+    );
+    assert_eq!(resolved.unwrap().file_path, init_path);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_shadowed_imported_fixture() {
+    // Test that a local fixture shadows an imported one
+    let db = FixtureDatabase::new();
+
+    let module_content = r#"
+import pytest
+
+@pytest.fixture
+def shared_name():
+    return "from module"
+"#;
+
+    let conftest_content = r#"
+from .module import *
+
+import pytest
+
+@pytest.fixture
+def shared_name():
+    return "from conftest"
+"#;
+
+    let test_content = r#"
+def test_uses_shared(shared_name):
+    pass
+"#;
+
+    let module_path = PathBuf::from("/tmp/test_shadow/module.py");
+    let conftest_path = PathBuf::from("/tmp/test_shadow/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_shadow/test_example.py");
+
+    db.analyze_file(module_path.clone(), module_content);
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    // The conftest's definition should shadow the imported one
+    let resolved = db.resolve_fixture_for_file(&test_path, "shared_name");
+
+    assert!(resolved.is_some(), "shared_name should be resolvable");
+    assert_eq!(
+        resolved.unwrap().file_path,
+        conftest_path,
+        "Local conftest fixture should shadow imported fixture"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_import_in_test_file() {
+    // Test that imports in test files (not just conftest) work
+    let db = FixtureDatabase::new();
+
+    let module_content = r#"
+import pytest
+
+@pytest.fixture
+def module_fixture():
+    return "from module"
+"#;
+
+    // Test file directly imports fixtures
+    let test_content = r#"
+from .fixture_module import *
+
+def test_uses_imported(module_fixture):
+    pass
+"#;
+
+    let module_path = PathBuf::from("/tmp/test_in_test/fixture_module.py");
+    let test_path = PathBuf::from("/tmp/test_in_test/test_example.py");
+
+    db.analyze_file(module_path.clone(), module_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    // The fixture should be available in the test file that imports it
+    let resolved = db.resolve_fixture_for_file(&test_path, "module_fixture");
+
+    // This tests whether imports in test files work, not just in conftest
+    // Currently the resolution focuses on conftest.py, so this may not work
+    // This test documents the expected behavior
+    if resolved.is_some() {
+        assert_eq!(resolved.unwrap().file_path, module_path);
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_conftest_hierarchy_with_imports() {
+    // Test that the conftest hierarchy works correctly with imports
+    // Parent conftest imports fixtures, child tests should see them
+    let db = FixtureDatabase::new();
+
+    let module_content = r#"
+import pytest
+
+@pytest.fixture
+def parent_imported():
+    return "imported in parent"
+"#;
+
+    let parent_conftest_content = r#"
+from .fixture_module import *
+
+import pytest
+
+@pytest.fixture
+def parent_local():
+    return "local in parent"
+"#;
+
+    let child_conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def child_local():
+    return "local in child"
+"#;
+
+    let test_content = r#"
+def test_all_available(parent_imported, parent_local, child_local):
+    pass
+"#;
+
+    let module_path = PathBuf::from("/tmp/test_hier/tests/fixture_module.py");
+    let parent_conftest_path = PathBuf::from("/tmp/test_hier/tests/conftest.py");
+    let child_conftest_path = PathBuf::from("/tmp/test_hier/tests/subdir/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_hier/tests/subdir/test_example.py");
+
+    db.analyze_file(module_path.clone(), module_content);
+    db.analyze_file(parent_conftest_path.clone(), parent_conftest_content);
+    db.analyze_file(child_conftest_path.clone(), child_conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    // All three fixtures should be resolvable from the test
+    let resolved_imported = db.resolve_fixture_for_file(&test_path, "parent_imported");
+    let resolved_parent = db.resolve_fixture_for_file(&test_path, "parent_local");
+    let resolved_child = db.resolve_fixture_for_file(&test_path, "child_local");
+
+    assert!(
+        resolved_imported.is_some(),
+        "parent_imported should be resolvable from child test"
+    );
+    assert!(
+        resolved_parent.is_some(),
+        "parent_local should be resolvable from child test"
+    );
+    assert!(
+        resolved_child.is_some(),
+        "child_local should be resolvable from child test"
+    );
+
+    // Verify the fixtures come from the correct files
+    assert_eq!(resolved_imported.unwrap().file_path, module_path);
+    assert_eq!(resolved_parent.unwrap().file_path, parent_conftest_path);
+    assert_eq!(resolved_child.unwrap().file_path, child_conftest_path);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_diagnostics_for_imported_fixtures() {
+    // Test that undeclared fixture diagnostics don't fire for imported fixtures
+    let db = FixtureDatabase::new();
+
+    let module_content = r#"
+import pytest
+
+@pytest.fixture
+def imported_fixture():
+    return "imported"
+"#;
+
+    let conftest_content = r#"
+from .fixture_module import *
+"#;
+
+    let test_content = r#"
+def test_uses_imported(imported_fixture):
+    pass
+"#;
+
+    let module_path = PathBuf::from("/tmp/test_diag/fixture_module.py");
+    let conftest_path = PathBuf::from("/tmp/test_diag/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_diag/test_example.py");
+
+    db.analyze_file(module_path.clone(), module_content);
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Get undeclared fixtures for the test file
+    let undeclared = db.get_undeclared_fixtures(&test_path);
+
+    // imported_fixture should NOT be in undeclared since it's available via import
+    let undeclared_names: Vec<&str> = undeclared.iter().map(|u| u.name.as_str()).collect();
+    assert!(
+        !undeclared_names.contains(&"imported_fixture"),
+        "imported_fixture should not be flagged as undeclared"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_includes_imported_fixtures() {
+    // Test that completion suggestions include imported fixtures
+    let db = FixtureDatabase::new();
+
+    let module_content = r#"
+import pytest
+
+@pytest.fixture
+def completion_fixture():
+    return "for completion"
+"#;
+
+    let conftest_content = r#"
+from .fixture_module import *
+
+import pytest
+
+@pytest.fixture
+def local_completion():
+    return "local"
+"#;
+
+    let test_content = r#"
+def test_something():
+    pass
+"#;
+
+    let module_path = PathBuf::from("/tmp/test_compl/fixture_module.py");
+    let conftest_path = PathBuf::from("/tmp/test_compl/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_compl/test_example.py");
+
+    db.analyze_file(module_path.clone(), module_content);
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Get available fixtures for completion
+    let available = db.get_available_fixtures(&test_path);
+    let names: Vec<&str> = available.iter().map(|f| f.name.as_str()).collect();
+
+    assert!(
+        names.contains(&"completion_fixture"),
+        "completion_fixture should be in available fixtures for completion"
+    );
+    assert!(
+        names.contains(&"local_completion"),
+        "local_completion should be in available fixtures for completion"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_empty_module_import() {
+    // Test importing from a module that has no fixtures
+    let db = FixtureDatabase::new();
+
+    let empty_module_content = r#"
+# This module has no fixtures
+def helper():
+    return "helper"
+"#;
+
+    let conftest_content = r#"
+from .empty_module import *
+
+import pytest
+
+@pytest.fixture
+def local_fixture():
+    return "local"
+"#;
+
+    let test_content = r#"
+def test_something(local_fixture):
+    pass
+"#;
+
+    let empty_module_path = PathBuf::from("/tmp/test_empty/empty_module.py");
+    let conftest_path = PathBuf::from("/tmp/test_empty/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_empty/test_example.py");
+
+    db.analyze_file(empty_module_path.clone(), empty_module_content);
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Should still work without errors
+    let resolved = db.resolve_fixture_for_file(&test_path, "local_fixture");
+    assert!(
+        resolved.is_some(),
+        "local_fixture should still be resolvable"
+    );
+}

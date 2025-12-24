@@ -186,11 +186,138 @@ impl FixtureDatabase {
 
         info!("Workspace scan complete. Processed {} files", total_files);
 
+        // Phase 3: Scan modules imported by conftest.py files
+        // This ensures fixtures defined in separate modules (imported via star import) are discovered
+        self.scan_imported_fixture_modules(root_path);
+
         // Also scan virtual environment for pytest plugins
         self.scan_venv_fixtures(root_path);
 
         info!("Total fixtures defined: {}", self.definitions.len());
         info!("Total files with fixture usages: {}", self.usages.len());
+    }
+
+    /// Scan Python modules that are imported by conftest.py files.
+    /// This discovers fixtures defined in separate modules that are re-exported via star imports.
+    /// Handles transitive imports (A imports B, B imports C) by iteratively scanning until no new modules are found.
+    fn scan_imported_fixture_modules(&self, _root_path: &Path) {
+        use std::collections::HashSet;
+
+        info!("Scanning for imported fixture modules");
+
+        // Track all files we've already processed to find imports from
+        let mut processed_files: HashSet<std::path::PathBuf> = HashSet::new();
+
+        // Start with conftest.py files
+        let mut files_to_check: Vec<std::path::PathBuf> = self
+            .file_cache
+            .iter()
+            .filter(|entry| {
+                entry
+                    .key()
+                    .file_name()
+                    .map(|n| n == "conftest.py")
+                    .unwrap_or(false)
+            })
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        if files_to_check.is_empty() {
+            debug!("No conftest.py files found, skipping import scan");
+            return;
+        }
+
+        info!(
+            "Starting import scan with {} conftest.py files",
+            files_to_check.len()
+        );
+
+        // Iteratively process files until no new modules are discovered
+        let mut iteration = 0;
+        while !files_to_check.is_empty() {
+            iteration += 1;
+            debug!(
+                "Import scan iteration {}: checking {} files",
+                iteration,
+                files_to_check.len()
+            );
+
+            let mut new_modules: HashSet<std::path::PathBuf> = HashSet::new();
+
+            for file_path in &files_to_check {
+                if processed_files.contains(file_path) {
+                    continue;
+                }
+                processed_files.insert(file_path.clone());
+
+                // Get the file content
+                let Some(content) = self.get_file_content(file_path) else {
+                    continue;
+                };
+
+                // Parse the AST
+                let Some(parsed) = self.get_parsed_ast(file_path, &content) else {
+                    continue;
+                };
+
+                let line_index = self.get_line_index(file_path, &content);
+
+                // Extract imports
+                if let rustpython_parser::ast::Mod::Module(module) = parsed.as_ref() {
+                    let imports =
+                        self.extract_fixture_imports(&module.body, file_path, &line_index);
+
+                    for import in imports {
+                        // Resolve the import to a file path
+                        if let Some(resolved_path) =
+                            self.resolve_module_to_file(&import.module_path, file_path)
+                        {
+                            let canonical = self.get_canonical_path(resolved_path);
+                            // Only add if not already processed and not in file cache
+                            if !processed_files.contains(&canonical)
+                                && !self.file_cache.contains_key(&canonical)
+                            {
+                                new_modules.insert(canonical);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if new_modules.is_empty() {
+                debug!("No new modules found in iteration {}", iteration);
+                break;
+            }
+
+            info!(
+                "Iteration {}: found {} new modules to analyze",
+                iteration,
+                new_modules.len()
+            );
+
+            // Analyze the new modules
+            for module_path in &new_modules {
+                if module_path.exists() {
+                    debug!("Analyzing imported module: {:?}", module_path);
+                    match std::fs::read_to_string(module_path) {
+                        Ok(content) => {
+                            self.analyze_file_fresh(module_path.clone(), &content);
+                        }
+                        Err(err) => {
+                            debug!("Failed to read imported module {:?}: {}", module_path, err);
+                        }
+                    }
+                }
+            }
+
+            // Next iteration will check the newly analyzed modules for their imports
+            files_to_check = new_modules.into_iter().collect();
+        }
+
+        info!(
+            "Imported fixture module scan complete after {} iterations",
+            iteration
+        );
     }
 
     /// Scan virtual environment for pytest plugin fixtures.

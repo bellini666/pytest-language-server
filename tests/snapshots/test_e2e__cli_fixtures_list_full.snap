@@ -25,8 +25,16 @@ database/
     ├── db_cursor (used 2 times)
     └── transaction (used 1 time)
 imported_fixtures/
-└── conftest.py (1 fixtures)
-    └── local_fixture (used 1 time)
+├── conftest.py (1 fixtures)
+│   └── local_fixture (used 1 time)
+├── fixture_module.py (3 fixtures)
+│   ├── another_imported_fixture (used 1 time)
+│   ├── explicitly_imported (unused)
+│   └── imported_fixture (used 1 time)
+└── nested/
+    └── deep_fixtures.py (2 fixtures)
+        ├── another_deep_fixture (used 1 time)
+        └── deep_nested_fixture (used 2 times)
 integration/
 └── test_scopes.py (2 fixtures)
     ├── module_fixture (used 1 time)

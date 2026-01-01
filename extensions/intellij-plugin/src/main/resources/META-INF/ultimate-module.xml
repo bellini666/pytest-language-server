@@ -1,9 +1,11 @@
 <idea-plugin>
     <!-- Native LSP support via com.intellij.modules.ultimate (for 2023.2 - 2025.1) -->
     <!-- Fallback for older commercial IDEs before modules.lsp was introduced -->
+    <!-- Uses PytestLspServerSupportProviderFallback which skips registration when -->
+    <!-- com.intellij.modules.lsp is also available (to prevent duplicate entries) -->
 
     <extensions defaultExtensionNs="com.intellij">
         <platform.lsp.serverSupportProvider
-                implementation="com.github.bellini666.pytestlsp.PytestLspServerSupportProvider"/>
+                implementation="com.github.bellini666.pytestlsp.PytestLspServerSupportProviderFallback"/>
     </extensions>
 </idea-plugin>

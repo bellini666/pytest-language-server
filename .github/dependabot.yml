@@ -5,7 +5,7 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-      day: "monday"
+      day: "saturday"
       time: "09:00"
       timezone: "Europe/Amsterdam"
     open-pull-requests-limit: 10
@@ -27,7 +27,7 @@ updates:
     directory: "/extensions/zed-extension"
     schedule:
       interval: "weekly"
-      day: "monday"
+      day: "saturday"
       time: "09:00"
       timezone: "Europe/Amsterdam"
     open-pull-requests-limit: 5
@@ -42,7 +42,7 @@ updates:
     directory: "/extensions/vscode-extension"
     schedule:
       interval: "weekly"
-      day: "monday"
+      day: "saturday"
       time: "09:00"
       timezone: "Europe/Amsterdam"
     open-pull-requests-limit: 10
@@ -64,7 +64,7 @@ updates:
     directory: "/extensions/intellij-plugin"
     schedule:
       interval: "weekly"
-      day: "monday"
+      day: "saturday"
       time: "09:00"
       timezone: "Europe/Amsterdam"
     open-pull-requests-limit: 5
@@ -79,7 +79,7 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-      day: "monday"
+      day: "saturday"
       time: "09:00"
       timezone: "Europe/Amsterdam"
     open-pull-requests-limit: 5
@@ -94,7 +94,7 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-      day: "monday"
+      day: "saturday"
       time: "09:00"
       timezone: "Europe/Amsterdam"
     open-pull-requests-limit: 5

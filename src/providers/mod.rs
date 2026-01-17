@@ -93,6 +93,12 @@ impl Backend {
                     None
                 }
             })
+        } else if cfg!(target_os = "windows") {
+            // Strip Windows extended-length path prefix (\\?\) which is added by canonicalize()
+            // This prefix causes Uri::from_file_path() to produce malformed URIs
+            path.to_str()
+                .and_then(|path_str| path_str.strip_prefix(r"\\?\"))
+                .map(PathBuf::from)
         } else {
             None
         };

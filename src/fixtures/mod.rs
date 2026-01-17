@@ -51,6 +51,10 @@ type AvailableFixturesCacheEntry = (u64, Arc<Vec<FixtureDefinition>>);
 /// Invalidated when either the file content or fixture definitions change.
 type ImportedFixturesCacheEntry = (u64, u64, Arc<HashSet<String>>);
 
+/// Maximum number of files to keep in the file content cache.
+/// When exceeded, the oldest entries are evicted to prevent unbounded memory growth.
+const MAX_FILE_CACHE_SIZE: usize = 2000;
+
 /// The central database for fixture definitions and usages.
 ///
 /// Uses `DashMap` for lock-free concurrent access during workspace scanning.
@@ -255,5 +259,43 @@ impl FixtureDatabase {
         // Note: We don't remove definitions/usages here because:
         // 1. They might be needed for cross-file references
         // 2. They're cleaned up on next analyze_file call anyway
+    }
+
+    /// Evict entries from caches if they exceed the maximum size.
+    /// Called periodically to prevent unbounded memory growth in very large workspaces.
+    /// Most LSPs rely on did_close cleanup for open files; this is a safety net for
+    /// workspace scan files that accumulate over time.
+    pub(crate) fn evict_cache_if_needed(&self) {
+        // Only evict if significantly over limit to avoid frequent eviction
+        if self.file_cache.len() > MAX_FILE_CACHE_SIZE {
+            debug!(
+                "File cache size ({}) exceeds limit ({}), evicting entries",
+                self.file_cache.len(),
+                MAX_FILE_CACHE_SIZE
+            );
+
+            // Remove ~25% of entries to avoid frequent re-eviction
+            let to_remove_count = self.file_cache.len() / 4;
+            let to_remove: Vec<PathBuf> = self
+                .file_cache
+                .iter()
+                .take(to_remove_count)
+                .map(|entry| entry.key().clone())
+                .collect();
+
+            for path in to_remove {
+                self.file_cache.remove(&path);
+                // Also clean related caches for consistency
+                self.line_index_cache.remove(&path);
+                self.ast_cache.remove(&path);
+                self.available_fixtures_cache.remove(&path);
+                self.imported_fixtures_cache.remove(&path);
+            }
+
+            debug!(
+                "Cache eviction complete, new size: {}",
+                self.file_cache.len()
+            );
+        }
     }
 }

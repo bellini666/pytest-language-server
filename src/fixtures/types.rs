@@ -50,8 +50,9 @@ pub struct FixtureDefinition {
     pub name: String,
     pub file_path: PathBuf,
     pub line: usize,
+    pub end_line: usize, // Line number where the function ends (for document symbol ranges)
     pub start_char: usize, // Character position where the fixture name starts (on the line)
-    pub end_char: usize,   // Character position where the fixture name ends (on the line)
+    pub end_char: usize, // Character position where the fixture name ends (on the line)
     pub docstring: Option<String>,
     pub return_type: Option<String>, // The return type annotation (for generators, the yielded type)
     pub is_third_party: bool, // Whether this fixture is from a third-party package (site-packages)

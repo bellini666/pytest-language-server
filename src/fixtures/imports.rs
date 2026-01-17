@@ -140,9 +140,12 @@ impl FixtureDatabase {
                     .unwrap_or_default();
 
                 // Add leading dots for relative imports
-                if let Some(_level) = import_from.level {
-                    // For now, assume level is 1 (one dot) - TODO: find proper way to extract Int value
-                    module = ".".to_string() + &module;
+                // level indicates how many parent directories to go up:
+                // level=1 means "from . import" (current package)
+                // level=2 means "from .. import" (parent package)
+                if let Some(ref level) = import_from.level {
+                    let dots = ".".repeat(level.to_usize());
+                    module = dots + &module;
                 }
 
                 // Skip obvious non-fixture imports

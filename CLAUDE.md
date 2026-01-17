@@ -1,4 +1,4 @@
-# AGENTS.md - AI Agent Guide
+# CLAUDE.md - AI Agent Guide
 
 ## Workflow Rules
 

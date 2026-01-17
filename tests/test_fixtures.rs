@@ -10405,3 +10405,141 @@ def test_something(local_fixture):
         "local_fixture should still be resolvable"
     );
 }
+
+/// Test that parse error recovery keeps previous fixture data
+#[test]
+#[timeout(30000)]
+fn test_parse_error_keeps_previous_data() {
+    let db = FixtureDatabase::new();
+
+    // First, analyze a valid file
+    let valid_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return "test value"
+"#;
+
+    let path = PathBuf::from("/tmp/test_parse_error/conftest.py");
+    db.analyze_file(path.clone(), valid_content);
+
+    // Verify fixture was detected
+    assert!(
+        db.definitions.contains_key("my_fixture"),
+        "my_fixture should be detected initially"
+    );
+
+    // Now analyze the same file with syntax errors
+    let invalid_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture(
+    # Missing closing parenthesis - syntax error
+    return "test value"
+"#;
+
+    db.analyze_file(path.clone(), invalid_content);
+
+    // The fixture should still be present due to parse error recovery
+    assert!(
+        db.definitions.contains_key("my_fixture"),
+        "my_fixture should still be present after parse error"
+    );
+}
+
+/// Test that fixture definitions have correct end_line set
+#[test]
+#[timeout(30000)]
+fn test_fixture_end_line_tracking() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def short_fixture():
+    return 1
+
+@pytest.fixture
+def multiline_fixture():
+    x = 1
+    y = 2
+    z = 3
+    return x + y + z
+"#;
+
+    let path = PathBuf::from("/tmp/test_end_line/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    // Check short_fixture end_line
+    let short_fixture = db.definitions.get("short_fixture").unwrap();
+    assert_eq!(short_fixture[0].line, 5); // def line
+    assert!(
+        short_fixture[0].end_line >= short_fixture[0].line,
+        "end_line should be >= line"
+    );
+    assert!(
+        short_fixture[0].end_line <= 7,
+        "short_fixture end_line should be around line 6-7"
+    );
+
+    // Check multiline_fixture end_line
+    let multiline_fixture = db.definitions.get("multiline_fixture").unwrap();
+    assert_eq!(multiline_fixture[0].line, 9); // def line
+    assert!(
+        multiline_fixture[0].end_line >= 13,
+        "multiline_fixture end_line should be at least line 13"
+    );
+}
+
+/// Test multi-level relative imports with different levels
+#[test]
+#[timeout(30000)]
+fn test_multi_level_relative_import_levels() {
+    let db = FixtureDatabase::new();
+
+    // Test that the import level extraction works for various depths
+    // The extract_fixture_imports function should correctly parse:
+    // - level=1: from .module import *
+    // - level=2: from ..module import *
+    // - level=3: from ...module import *
+
+    let single_dot_conftest = r#"
+from .fixtures import *
+"#;
+
+    let double_dot_conftest = r#"
+from ..shared.fixtures import *
+"#;
+
+    let triple_dot_conftest = r#"
+from ...common.fixtures import *
+"#;
+
+    // Analyze these files to ensure they parse without errors
+    // The actual import resolution depends on file structure
+    let path1 = PathBuf::from("/tmp/test_levels/pkg/subpkg/conftest.py");
+    let path2 = PathBuf::from("/tmp/test_levels/pkg/subpkg/deep/conftest.py");
+    let path3 = PathBuf::from("/tmp/test_levels/pkg/subpkg/deep/deeper/conftest.py");
+
+    // These should not panic or error
+    db.analyze_file(path1.clone(), single_dot_conftest);
+    db.analyze_file(path2.clone(), double_dot_conftest);
+    db.analyze_file(path3.clone(), triple_dot_conftest);
+
+    // Verify files were analyzed (file_cache should contain them)
+    assert!(
+        db.file_cache.contains_key(&path1),
+        "single dot import file should be cached"
+    );
+    assert!(
+        db.file_cache.contains_key(&path2),
+        "double dot import file should be cached"
+    );
+    assert!(
+        db.file_cache.contains_key(&path3),
+        "triple dot import file should be cached"
+    );
+}

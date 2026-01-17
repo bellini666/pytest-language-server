@@ -48,9 +48,9 @@ impl Backend {
                 // Selection range is the fixture name
                 let selection_range = Self::create_range(line, start_char, line, end_char);
 
-                // Full range includes the entire function (approximated as the line for now)
-                // TODO: Track full function range in FixtureDefinition for better range support
-                let range = Self::create_range(line, 0, line, end_char);
+                // Full range includes the entire function body
+                let end_line = Self::internal_line_to_lsp(definition.end_line);
+                let range = Self::create_range(line, 0, end_line, 0);
 
                 // Build detail string with return type if available
                 let detail = definition

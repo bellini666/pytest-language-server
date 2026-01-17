@@ -41,16 +41,31 @@ impl Backend {
                     format!("{} usages", usage_count)
                 };
 
+                // Build command arguments - these serializations should not fail
+                // for simple types like strings and numbers
+                let arguments = match (
+                    serde_json::to_value(uri.to_string()),
+                    serde_json::to_value(line),
+                    serde_json::to_value(def.start_char),
+                ) {
+                    (Ok(uri_val), Ok(line_val), Ok(char_val)) => {
+                        Some(vec![uri_val, line_val, char_val])
+                    }
+                    _ => {
+                        tracing::warn!(
+                            "Failed to serialize code lens arguments for fixture: {}",
+                            def.name
+                        );
+                        continue;
+                    }
+                };
+
                 let lens = CodeLens {
                     range,
                     command: Some(Command {
                         title,
                         command: "pytest-lsp.findReferences".to_string(),
-                        arguments: Some(vec![
-                            serde_json::to_value(uri.to_string()).unwrap(),
-                            serde_json::to_value(line).unwrap(),
-                            serde_json::to_value(def.start_char).unwrap(),
-                        ]),
+                        arguments,
                     }),
                     data: None,
                 };

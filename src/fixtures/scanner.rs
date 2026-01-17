@@ -161,6 +161,7 @@ impl FixtureDatabase {
         // Phase 2: Process files in parallel using rayon
         // Use analyze_file_fresh since this is initial scan (no previous definitions to clean)
         let error_count = AtomicUsize::new(0);
+        let permission_denied_count = AtomicUsize::new(0);
 
         files_to_process.par_iter().for_each(|path| {
             debug!("Found test/conftest file: {:?}", path);
@@ -170,7 +171,8 @@ impl FixtureDatabase {
                 }
                 Err(err) => {
                     if err.kind() == std::io::ErrorKind::PermissionDenied {
-                        warn!("Permission denied reading file: {:?}", path);
+                        debug!("Permission denied reading file: {:?}", path);
+                        permission_denied_count.fetch_add(1, Ordering::Relaxed);
                     } else {
                         error!("Failed to read file {:?}: {}", path, err);
                         error_count.fetch_add(1, Ordering::Relaxed);
@@ -180,11 +182,22 @@ impl FixtureDatabase {
         });
 
         let errors = error_count.load(Ordering::Relaxed);
+        let permission_errors = permission_denied_count.load(Ordering::Relaxed);
+
         if errors > 0 {
-            warn!("Workspace scan completed with {} errors", errors);
+            warn!("Workspace scan completed with {} read errors", errors);
+        }
+        if permission_errors > 0 {
+            warn!(
+                "Workspace scan: skipped {} files due to permission denied",
+                permission_errors
+            );
         }
 
-        info!("Workspace scan complete. Processed {} files", total_files);
+        info!(
+            "Workspace scan complete. Processed {} files ({} permission denied, {} errors)",
+            total_files, permission_errors, errors
+        );
 
         // Phase 3: Scan modules imported by conftest.py files
         // This ensures fixtures defined in separate modules (imported via star import) are discovered

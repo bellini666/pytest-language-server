@@ -11,7 +11,7 @@ use rustpython_parser::ast::{ArgWithDefault, Arguments, Expr, Stmt};
 use rustpython_parser::{parse, Mode};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 impl FixtureDatabase {
     /// Analyze a Python file for fixtures and usages.
@@ -42,12 +42,17 @@ impl FixtureDatabase {
         let parsed = match parse(content, Mode::Module, "") {
             Ok(ast) => ast,
             Err(e) => {
-                error!("Failed to parse Python file {:?}: {}", file_path, e);
+                // Keep existing fixture data when parse fails (user is likely editing)
+                // This provides better LSP experience during editing with syntax errors
+                debug!(
+                    "Failed to parse Python file {:?}: {} - keeping previous data",
+                    file_path, e
+                );
                 return;
             }
         };
 
-        // Clear previous usages for this file
+        // Clear previous usages for this file (only after successful parse)
         self.cleanup_usages_for_file(&file_path);
         self.usages.remove(&file_path);
 
@@ -95,6 +100,9 @@ impl FixtureDatabase {
         }
 
         debug!("Analysis complete for {:?}", file_path);
+
+        // Periodically evict cache entries to prevent unbounded memory growth
+        self.evict_cache_if_needed();
     }
 
     /// Remove definitions that were in a specific file.
@@ -435,10 +443,14 @@ impl FixtureDatabase {
                 }
             }
 
+            // Calculate end line from the function's range
+            let end_line = self.get_line_from_offset(range.end().to_usize(), line_index);
+
             let definition = FixtureDefinition {
                 name: fixture_name.clone(),
                 file_path: file_path.clone(),
                 line,
+                end_line,
                 start_char,
                 end_char,
                 docstring,
@@ -580,6 +592,7 @@ impl FixtureDatabase {
                                 name: fixture_name.to_string(),
                                 file_path: file_path.clone(),
                                 line,
+                                end_line: line, // Assignment-style fixtures are single-line
                                 start_char,
                                 end_char,
                                 docstring: None,

@@ -752,3 +752,43 @@ def test_c(base_fixture):
         "Reverse index should have 3 entries"
     );
 }
+
+#[test]
+#[timeout(30000)]
+fn test_cache_handles_many_files() {
+    // Test that the cache can handle many files without issues
+    // The eviction logic is triggered internally when analyzing files
+    let db = FixtureDatabase::new();
+
+    // Analyze many files to build up the cache
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def fixture_{n}():
+    return {n}
+"#;
+
+    // Add many files - the cache eviction is called internally after each analyze
+    for i in 0..100 {
+        let file_content = content.replace("{n}", &i.to_string());
+        let path = PathBuf::from(format!("/tmp/test_cache_many/file_{}.py", i));
+        db.analyze_file(path.clone(), &file_content);
+    }
+
+    // Verify files were analyzed and cached
+    assert!(
+        db.file_cache.len() >= 100,
+        "Should have at least 100 files in cache"
+    );
+
+    // Verify all fixtures were detected
+    for i in 0..100 {
+        let fixture_name = format!("fixture_{}", i);
+        assert!(
+            db.definitions.contains_key(&fixture_name),
+            "fixture_{} should be detected",
+            i
+        );
+    }
+}

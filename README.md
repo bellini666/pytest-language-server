@@ -35,6 +35,7 @@ documentation, diagnostics, and more!
   - [Zed](#zed)
   - [VS Code](#vs-code)
   - [IntelliJ IDEA / PyCharm](#intellij-idea--pycharm)
+  - [Emacs](#emacs)
   - [Other Editors](#other-editors)
 - [Configuration](#configuration)
 - [CLI Commands](#cli-commands)
@@ -357,6 +358,17 @@ Install from the [JetBrains Marketplace](https://plugins.jetbrains.com/plugin/29
 4. Click "Install"
 
 Requires PyCharm 2024.2+ or IntelliJ IDEA 2024.2+ with Python plugin.
+
+### Emacs
+
+Add this to your config:
+
+```elisp
+(use-package eglot
+  :config
+  (add-to-list 'eglot-server-programs
+               '((python-mode python-ts-mode) . ("pytest-language-server"))))
+```
 
 ### Other Editors
 

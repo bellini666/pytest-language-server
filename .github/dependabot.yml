@@ -52,12 +52,9 @@ updates:
       prefix: "deps(vscode)"
       include: "scope"
     groups:
-      npm-minor-patch:
+      npm-all:
         patterns:
           - "*"
-        update-types:
-          - "minor"
-          - "patch"
 
   # Gradle dependencies (IntelliJ plugin)
   - package-ecosystem: "gradle"

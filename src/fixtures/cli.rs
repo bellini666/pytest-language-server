@@ -97,7 +97,7 @@ impl FixtureDatabase {
             }
         }
 
-        let definition_usage_counts = self.compute_definition_usage_counts();
+        let mut definition_usage_counts = self.compute_definition_usage_counts();
 
         // Remap editable install paths to virtual site-packages paths for display.
         // Only remap files that are outside the workspace (third-party editable installs).
@@ -126,18 +126,38 @@ impl FixtureDatabase {
                 for original_path in keys_to_remap {
                     if let Ok(relative) = original_path.strip_prefix(&install.source_root) {
                         let virtual_path = install.site_packages.join(relative);
-                        if let Some(first_component) = relative.components().next() {
-                            editable_dirs
-                                .insert(install.site_packages.join(first_component.as_os_str()));
+                        // Build label path from raw package name (dot-separated for namespace packages)
+                        let parts: Vec<&str> = install.raw_package_name.split('.').collect();
+                        if !parts.is_empty() {
+                            let mut label_path = install.site_packages.clone();
+                            for part in &parts {
+                                label_path = label_path.join(part.replace('-', "_"));
+                            }
+                            editable_dirs.insert(label_path);
                         }
                         remapped.push((original_path, virtual_path));
                     }
                 }
             }
 
-            for (original, virtual_path) in remapped {
-                if let Some(fixtures) = file_fixtures.remove(&original) {
-                    file_fixtures.insert(virtual_path, fixtures);
+            for (original, virtual_path) in &remapped {
+                if let Some(fixtures) = file_fixtures.remove(original) {
+                    file_fixtures.insert(virtual_path.clone(), fixtures);
+                }
+            }
+
+            // Remap usage count keys to match virtual paths
+            let mut remapped_counts: Vec<((PathBuf, String), (PathBuf, String))> = Vec::new();
+            for (original, virtual_path) in &remapped {
+                for key in definition_usage_counts.keys() {
+                    if key.0 == *original {
+                        remapped_counts.push((key.clone(), (virtual_path.clone(), key.1.clone())));
+                    }
+                }
+            }
+            for (old_key, new_key) in remapped_counts {
+                if let Some(count) = definition_usage_counts.remove(&old_key) {
+                    definition_usage_counts.insert(new_key, count);
                 }
             }
         }

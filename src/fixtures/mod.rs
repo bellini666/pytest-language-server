@@ -36,6 +36,7 @@ use tracing::debug;
 #[allow(dead_code)] // Fields read in tests and used for debug logging
 pub struct EditableInstall {
     pub package_name: String,
+    pub raw_package_name: String,
     pub source_root: PathBuf,
     pub site_packages: PathBuf,
 }

@@ -11048,6 +11048,7 @@ fn test_editable_install_is_third_party() {
     db.editable_install_roots.lock().unwrap().push(
         pytest_language_server::fixtures::EditableInstall {
             package_name: "external_pkg".to_string(),
+            raw_package_name: "external_pkg".to_string(),
             source_root: external_src_canonical,
             site_packages: PathBuf::from("/fake/site-packages"),
         },
@@ -11094,6 +11095,7 @@ fn test_editable_install_in_workspace_not_third_party() {
     db.editable_install_roots.lock().unwrap().push(
         pytest_language_server::fixtures::EditableInstall {
             package_name: "mylib".to_string(),
+            raw_package_name: "mylib".to_string(),
             source_root: editable_src.clone(),
             site_packages: PathBuf::from("/fake/site-packages"),
         },
@@ -11136,6 +11138,7 @@ fn test_editable_install_unused_fixtures_excluded() {
     db.editable_install_roots.lock().unwrap().push(
         pytest_language_server::fixtures::EditableInstall {
             package_name: "ext_pkg".to_string(),
+            raw_package_name: "ext_pkg".to_string(),
             source_root: external_src_canonical,
             site_packages: PathBuf::from("/fake/site-packages"),
         },

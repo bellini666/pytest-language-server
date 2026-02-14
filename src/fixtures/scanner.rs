@@ -79,7 +79,11 @@ impl FixtureDatabase {
         info!("Scanning workspace: {:?}", root_path);
 
         // Store workspace root for editable install third-party detection
-        *self.workspace_root.lock().unwrap() = Some(root_path.to_path_buf());
+        *self.workspace_root.lock().unwrap() = Some(
+            root_path
+                .canonicalize()
+                .unwrap_or_else(|_| root_path.to_path_buf()),
+        );
 
         // Defensive check: ensure the root path exists
         if !root_path.exists() {
@@ -405,6 +409,7 @@ impl FixtureDatabase {
             info!("Found VIRTUAL_ENV environment variable: {}", venv);
             let venv_path = std::path::PathBuf::from(venv);
             if venv_path.exists() {
+                let venv_path = venv_path.canonicalize().unwrap_or(venv_path);
                 info!("Using VIRTUAL_ENV: {:?}", venv_path);
                 self.scan_venv_site_packages(&venv_path);
                 return;
@@ -438,6 +443,8 @@ impl FixtureDatabase {
                         debug!("Checking site-packages: {:?}", site_packages);
 
                         if site_packages.exists() {
+                            let site_packages =
+                                site_packages.canonicalize().unwrap_or(site_packages);
                             info!("Found site-packages: {:?}", site_packages);
                             self.site_packages_paths
                                 .lock()
@@ -455,6 +462,9 @@ impl FixtureDatabase {
         let windows_site_packages = venv_path.join("Lib/site-packages");
         debug!("Checking Windows path: {:?}", windows_site_packages);
         if windows_site_packages.exists() {
+            let windows_site_packages = windows_site_packages
+                .canonicalize()
+                .unwrap_or(windows_site_packages);
             info!("Found site-packages (Windows): {:?}", windows_site_packages);
             self.site_packages_paths
                 .lock()
@@ -725,39 +735,10 @@ impl FixtureDatabase {
                 site_packages,
             );
             let Some(source_root) = source_root else {
-                // Fallback: try the url field from direct_url.json
-                let url = json.get("url").and_then(|u| u.as_str()).unwrap_or("");
-                let path_str = url.strip_prefix("file://").unwrap_or(url);
-                if path_str.is_empty() {
-                    debug!(
-                        "No .pth file or url found for editable install: {}",
-                        normalized_name
-                    );
-                    continue;
-                }
-                let candidate = PathBuf::from(path_str);
-                match candidate.canonicalize() {
-                    Ok(canonical) => {
-                        info!(
-                            "Discovered editable install (from url): {} -> {:?}",
-                            normalized_name, canonical
-                        );
-                        self.editable_install_roots
-                            .lock()
-                            .unwrap()
-                            .push(super::EditableInstall {
-                                package_name: normalized_name,
-                                source_root: canonical,
-                                site_packages: site_packages.to_path_buf(),
-                            });
-                    }
-                    Err(_) => {
-                        debug!(
-                            "Could not canonicalize editable install path: {:?}",
-                            candidate
-                        );
-                    }
-                }
+                debug!(
+                    "No .pth file found for editable install: {}",
+                    normalized_name
+                );
                 continue;
             };
 
@@ -770,6 +751,7 @@ impl FixtureDatabase {
                 .unwrap()
                 .push(super::EditableInstall {
                     package_name: normalized_name,
+                    raw_package_name: raw_name,
                     source_root,
                     site_packages: site_packages.to_path_buf(),
                 });
@@ -823,9 +805,13 @@ impl FixtureDatabase {
 
         // Search the pre-built index for matching .pth stems
         for (stem, pth_path) in pth_index {
-            let matches = candidates
-                .iter()
-                .any(|c| stem == c || stem.starts_with(&format!("{}-", c)));
+            let matches = candidates.iter().any(|c| {
+                stem == c
+                    || stem.strip_prefix(c).is_some_and(|rest| {
+                        rest.starts_with('-')
+                            && rest[1..].starts_with(|ch: char| ch.is_ascii_digit())
+                    })
+            });
             if !matches {
                 continue;
             }
@@ -841,6 +827,11 @@ impl FixtureDatabase {
                 if line.is_empty() || line.starts_with('#') || line.starts_with("import ") {
                     continue;
                 }
+                // Validate: reject lines with null bytes or control characters
+                if line.contains('\0') || line.bytes().any(|b| b < 0x20 && b != b'\t') {
+                    debug!("Skipping .pth line with invalid characters: {:?}", line);
+                    continue;
+                }
                 let candidate = PathBuf::from(line);
                 let resolved = if candidate.is_absolute() {
                     candidate
@@ -848,7 +839,11 @@ impl FixtureDatabase {
                     site_packages.join(&candidate)
                 };
                 match resolved.canonicalize() {
-                    Ok(canonical) => return Some(canonical),
+                    Ok(canonical) if canonical.is_dir() => return Some(canonical),
+                    Ok(canonical) => {
+                        debug!(".pth path is not a directory: {:?}", canonical);
+                        continue;
+                    }
                     Err(_) => {
                         debug!("Could not canonicalize .pth path: {:?}", resolved);
                         continue;
@@ -1777,5 +1772,90 @@ def editable_fixture():
             db.definitions.contains_key("editable_fixture"),
             "editable_fixture should be discovered via entry point fallback"
         );
+    }
+
+    #[test]
+    fn test_discover_editable_installs_namespace_package() {
+        let temp = tempdir().unwrap();
+        let site_packages = temp.path();
+
+        let source_root = tempdir().unwrap();
+        let pkg_dir = source_root.path().join("namespace").join("pkg");
+        fs::create_dir_all(&pkg_dir).unwrap();
+        fs::write(pkg_dir.join("__init__.py"), "").unwrap();
+
+        let dist_info = site_packages.join("namespace.pkg-1.0.0.dist-info");
+        fs::create_dir_all(&dist_info).unwrap();
+        let direct_url = serde_json::json!({
+            "url": format!("file://{}", source_root.path().display()),
+            "dir_info": { "editable": true }
+        });
+        fs::write(
+            dist_info.join("direct_url.json"),
+            serde_json::to_string(&direct_url).unwrap(),
+        )
+        .unwrap();
+
+        let pth_content = format!("{}\n", source_root.path().display());
+        fs::write(
+            site_packages.join("__editable__.namespace.pkg-1.0.0.pth"),
+            &pth_content,
+        )
+        .unwrap();
+
+        let db = FixtureDatabase::new();
+        db.discover_editable_installs(site_packages);
+
+        let installs = db.editable_install_roots.lock().unwrap();
+        assert_eq!(
+            installs.len(),
+            1,
+            "Should discover namespace editable install"
+        );
+        assert_eq!(installs[0].package_name, "namespace_pkg");
+        assert_eq!(installs[0].raw_package_name, "namespace.pkg");
+        assert_eq!(
+            installs[0].source_root,
+            source_root.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_pth_prefix_matching_no_false_positive() {
+        // "foo" candidate should NOT match "foo-bar.pth" (different package)
+        let temp = tempdir().unwrap();
+        let site_packages = temp.path();
+
+        let source_root_foo = tempdir().unwrap();
+        fs::create_dir_all(source_root_foo.path()).unwrap();
+
+        let source_root_foobar = tempdir().unwrap();
+        fs::create_dir_all(source_root_foobar.path()).unwrap();
+
+        // Create foo-bar.pth pointing to foobar source
+        fs::write(
+            site_packages.join("foo-bar.pth"),
+            format!("{}\n", source_root_foobar.path().display()),
+        )
+        .unwrap();
+
+        let pth_index = FixtureDatabase::build_pth_index(site_packages);
+
+        // "foo" should NOT match "foo-bar" (different package, not a version suffix)
+        let result =
+            FixtureDatabase::find_editable_pth_source_root(&pth_index, "foo", "foo", site_packages);
+        assert!(
+            result.is_none(),
+            "foo should not match foo-bar.pth (different package)"
+        );
+
+        // "foo-bar" exact match should work
+        let result = FixtureDatabase::find_editable_pth_source_root(
+            &pth_index,
+            "foo-bar",
+            "foo_bar",
+            site_packages,
+        );
+        assert!(result.is_some(), "foo-bar should match foo-bar.pth exactly");
     }
 }

@@ -529,23 +529,42 @@ impl FixtureDatabase {
             return None;
         }
 
+        // Reject path traversal and null bytes in module path components
+        if parts
+            .iter()
+            .any(|p| p.contains("..") || p.contains('\0') || p.is_empty())
+        {
+            return None;
+        }
+
         // Build the path from module components
         let mut path = site_packages.to_path_buf();
         for part in &parts {
             path.push(part);
         }
 
+        // Ensure resolved path stays within the base directory
+        let check_bounded = |candidate: &Path| -> Option<PathBuf> {
+            let canonical = candidate.canonicalize().ok()?;
+            let base_canonical = site_packages.canonicalize().ok()?;
+            if canonical.starts_with(&base_canonical) {
+                Some(canonical)
+            } else {
+                None
+            }
+        };
+
         // Check if it's a module file (add .py extension)
         let py_file = path.with_extension("py");
         if py_file.exists() {
-            return Some(py_file);
+            return check_bounded(&py_file);
         }
 
         // Check if it's a package directory (has __init__.py)
         if path.is_dir() {
             let init_file = path.join("__init__.py");
             if init_file.exists() {
-                return Some(init_file);
+                return check_bounded(&init_file);
             }
         }
 
@@ -1070,11 +1089,14 @@ extra = something
         fs::create_dir_all(&pkg_dir).unwrap();
         fs::write(pkg_dir.join("__init__.py"), "# plugin code").unwrap();
 
-        // Should resolve to __init__.py
+        // Should resolve to __init__.py (canonicalized)
         let result =
             FixtureDatabase::resolve_entry_point_module_to_path(site_packages, "my_plugin");
         assert!(result.is_some());
-        assert_eq!(result.unwrap(), pkg_dir.join("__init__.py"));
+        assert_eq!(
+            result.unwrap(),
+            pkg_dir.join("__init__.py").canonicalize().unwrap()
+        );
     }
 
     #[test]
@@ -1088,11 +1110,14 @@ extra = something
         fs::write(pkg_dir.join("__init__.py"), "").unwrap();
         fs::write(pkg_dir.join("plugin.py"), "# plugin code").unwrap();
 
-        // Should resolve to plugin.py
+        // Should resolve to plugin.py (canonicalized)
         let result =
             FixtureDatabase::resolve_entry_point_module_to_path(site_packages, "my_plugin.plugin");
         assert!(result.is_some());
-        assert_eq!(result.unwrap(), pkg_dir.join("plugin.py"));
+        assert_eq!(
+            result.unwrap(),
+            pkg_dir.join("plugin.py").canonicalize().unwrap()
+        );
     }
 
     #[test]
@@ -1103,11 +1128,14 @@ extra = something
         // Create a single-file module
         fs::write(site_packages.join("my_plugin.py"), "# plugin code").unwrap();
 
-        // Should resolve to my_plugin.py
+        // Should resolve to my_plugin.py (canonicalized)
         let result =
             FixtureDatabase::resolve_entry_point_module_to_path(site_packages, "my_plugin");
         assert!(result.is_some());
-        assert_eq!(result.unwrap(), site_packages.join("my_plugin.py"));
+        assert_eq!(
+            result.unwrap(),
+            site_packages.join("my_plugin.py").canonicalize().unwrap()
+        );
     }
 
     #[test]
@@ -1134,13 +1162,77 @@ extra = something
         fs::write(pkg_dir.join("__init__.py"), "").unwrap();
         fs::write(pkg_dir.join("module.py"), "# plugin code").unwrap();
 
-        // Should resolve even with :attr suffix
+        // Should resolve even with :attr suffix (canonicalized)
         let result = FixtureDatabase::resolve_entry_point_module_to_path(
             site_packages,
             "my_plugin.module:entry_function",
         );
         assert!(result.is_some());
-        assert_eq!(result.unwrap(), pkg_dir.join("module.py"));
+        assert_eq!(
+            result.unwrap(),
+            pkg_dir.join("module.py").canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_resolve_entry_point_rejects_path_traversal() {
+        let temp = tempdir().unwrap();
+        let site_packages = temp.path();
+
+        // Create a valid module so the path would resolve if not for validation
+        fs::write(site_packages.join("valid.py"), "# code").unwrap();
+
+        // ".." in module path
+        let result =
+            FixtureDatabase::resolve_entry_point_module_to_path(site_packages, "..%2Fetc%2Fpasswd");
+        assert!(result.is_none(), "should reject path with ..");
+
+        let result =
+            FixtureDatabase::resolve_entry_point_module_to_path(site_packages, "valid...secret");
+        assert!(result.is_none(), "should reject dotdot segments");
+    }
+
+    #[test]
+    fn test_resolve_entry_point_rejects_null_bytes() {
+        let temp = tempdir().unwrap();
+        let site_packages = temp.path();
+
+        let result =
+            FixtureDatabase::resolve_entry_point_module_to_path(site_packages, "module\0name");
+        assert!(result.is_none(), "should reject null bytes");
+    }
+
+    #[test]
+    fn test_resolve_entry_point_rejects_empty_segments() {
+        let temp = tempdir().unwrap();
+        let site_packages = temp.path();
+
+        // "foo..bar" splits on '.' to ["foo", "", "bar"]
+        let result = FixtureDatabase::resolve_entry_point_module_to_path(site_packages, "foo..bar");
+        assert!(result.is_none(), "should reject empty path segments");
+    }
+
+    #[test]
+    fn test_resolve_entry_point_rejects_symlink_escape() {
+        let temp = tempdir().unwrap();
+        let site_packages = temp.path();
+
+        // Create an outside directory with a .py file
+        let outside = tempdir().unwrap();
+        fs::write(outside.path().join("evil.py"), "# malicious").unwrap();
+
+        // Create a symlink inside site-packages pointing outside
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(outside.path(), site_packages.join("escaped")).unwrap();
+
+            let result =
+                FixtureDatabase::resolve_entry_point_module_to_path(site_packages, "escaped.evil");
+            assert!(
+                result.is_none(),
+                "should reject paths that escape site-packages via symlink"
+            );
+        }
     }
 
     #[test]

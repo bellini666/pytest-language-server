@@ -598,6 +598,25 @@ def test_user_value(user, value):
     pass
 ```
 
+### Imported Fixtures (`from ... import *`)
+```python
+# conftest.py
+from .pytest_fixtures import *  # Fixtures from pytest_fixtures.py are available
+```
+
+### `pytest_plugins` Variable
+```python
+# conftest.py
+pytest_plugins = ["myapp.fixtures", "other.fixtures"]
+
+# Also supports single strings, tuples, and annotated assignments:
+# pytest_plugins = "myapp.fixtures"
+# pytest_plugins = ("myapp.fixtures",)
+# pytest_plugins: list[str] = ["myapp.fixtures"]
+```
+
+Fixtures declared in `pytest_plugins` modules are automatically discovered in `conftest.py`, test files, and plugin entry point modules. Only static string literals are supported — dynamic values are ignored.
+
 ## Fixture Priority Rules
 
 pytest-language-server correctly implements pytest's fixture shadowing rules:

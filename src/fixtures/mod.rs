@@ -96,6 +96,9 @@ pub struct FixtureDatabase {
     /// Cache of imported fixtures per file.
     /// Stores (content_hash, definitions_version, fixture_names) for invalidation.
     pub imported_fixtures_cache: Arc<DashMap<PathBuf, ImportedFixturesCacheEntry>>,
+    /// Discovered site-packages paths from venv scanning.
+    /// Used for resolving absolute imports in venv plugin modules.
+    pub site_packages_paths: Arc<std::sync::Mutex<Vec<PathBuf>>>,
 }
 
 impl Default for FixtureDatabase {
@@ -122,6 +125,7 @@ impl FixtureDatabase {
             cycle_cache: Arc::new(DashMap::new()),
             available_fixtures_cache: Arc::new(DashMap::new()),
             imported_fixtures_cache: Arc::new(DashMap::new()),
+            site_packages_paths: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 

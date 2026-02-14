@@ -8009,19 +8009,15 @@ def test_with_mark():
 }
 
 // =============================================================================
-// pytest_plugins tests (known limitation documentation)
+// pytest_plugins tests (basic detection)
 // =============================================================================
 
-/// Test that pytest_plugins is recognized at the module level
-/// Note: Full resolution of pytest_plugins paths is not implemented
-/// This test documents the current behavior
 #[test]
 #[timeout(30000)]
 fn test_pytest_plugins_declaration_detected() {
     let db = FixtureDatabase::new();
 
     let conftest_content = r#"
-# Declare external fixture modules
 pytest_plugins = ["myapp.fixtures", "other.fixtures"]
 
 import pytest
@@ -8034,21 +8030,15 @@ def local_fixture():
     let conftest_path = PathBuf::from("/tmp/test_plugins/conftest.py");
     db.analyze_file(conftest_path, conftest_content);
 
-    // Local fixtures should still be detected
     assert!(
         db.definitions.contains_key("local_fixture"),
         "local_fixture should be detected even with pytest_plugins"
     );
-
-    // Note: We don't currently resolve the pytest_plugins modules
-    // This is a known limitation - fixtures from those modules won't be found
-    // unless the modules are explicitly scanned as part of the workspace
 }
 
-/// Test that pytest_plugins tuple syntax is also recognized
 #[test]
 #[timeout(30000)]
-fn test_pytest_plugins_tuple_syntax() {
+fn test_pytest_plugins_tuple_declaration_detected() {
     let db = FixtureDatabase::new();
 
     let conftest_content = r#"
@@ -8064,7 +8054,6 @@ def another_fixture():
     let conftest_path = PathBuf::from("/tmp/test_plugins/conftest.py");
     db.analyze_file(conftest_path, conftest_content);
 
-    // Fixture detection should work normally
     assert!(
         db.definitions.contains_key("another_fixture"),
         "another_fixture should be detected"
@@ -10541,5 +10530,501 @@ from ...common.fixtures import *
     assert!(
         db.file_cache.contains_key(&path3),
         "triple dot import file should be cached"
+    );
+}
+
+// ============ pytest_plugins Variable Tests ============
+
+#[test]
+#[timeout(30000)]
+fn test_pytest_plugins_single_string() {
+    let db = FixtureDatabase::new();
+
+    let fixture_module_content = r#"
+import pytest
+
+@pytest.fixture
+def plugin_fixture():
+    return "from plugin"
+"#;
+
+    let conftest_content = r#"
+pytest_plugins = "fixture_module"
+"#;
+
+    let test_content = r#"
+def test_uses_plugin(plugin_fixture):
+    pass
+"#;
+
+    let fixture_module_path = PathBuf::from("/tmp/test_pytest_plugins/fixture_module.py");
+    let conftest_path = PathBuf::from("/tmp/test_pytest_plugins/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_pytest_plugins/test_example.py");
+
+    db.analyze_file(fixture_module_path.clone(), fixture_module_content);
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    let resolved = db.resolve_fixture_for_file(&test_path, "plugin_fixture");
+    assert!(
+        resolved.is_some(),
+        "plugin_fixture should be resolvable via pytest_plugins single string"
+    );
+    assert_eq!(resolved.unwrap().file_path, fixture_module_path);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_pytest_plugins_list_syntax() {
+    let db = FixtureDatabase::new();
+
+    let module_a_content = r#"
+import pytest
+
+@pytest.fixture
+def fixture_a():
+    return "a"
+"#;
+
+    let module_b_content = r#"
+import pytest
+
+@pytest.fixture
+def fixture_b():
+    return "b"
+"#;
+
+    let conftest_content = r#"
+pytest_plugins = ["module_a", "module_b"]
+"#;
+
+    let test_content = r#"
+def test_uses_both(fixture_a, fixture_b):
+    pass
+"#;
+
+    let module_a_path = PathBuf::from("/tmp/test_pp_list/module_a.py");
+    let module_b_path = PathBuf::from("/tmp/test_pp_list/module_b.py");
+    let conftest_path = PathBuf::from("/tmp/test_pp_list/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_pp_list/test_example.py");
+
+    db.analyze_file(module_a_path.clone(), module_a_content);
+    db.analyze_file(module_b_path.clone(), module_b_content);
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    let resolved_a = db.resolve_fixture_for_file(&test_path, "fixture_a");
+    assert!(
+        resolved_a.is_some(),
+        "fixture_a should be resolvable via pytest_plugins list"
+    );
+    assert_eq!(resolved_a.unwrap().file_path, module_a_path);
+
+    let resolved_b = db.resolve_fixture_for_file(&test_path, "fixture_b");
+    assert!(
+        resolved_b.is_some(),
+        "fixture_b should be resolvable via pytest_plugins list"
+    );
+    assert_eq!(resolved_b.unwrap().file_path, module_b_path);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_pytest_plugins_tuple_resolution() {
+    let db = FixtureDatabase::new();
+
+    let module_content = r#"
+import pytest
+
+@pytest.fixture
+def tuple_fixture():
+    return "from tuple"
+"#;
+
+    let conftest_content = r#"
+pytest_plugins = ("fixture_module",)
+"#;
+
+    let test_content = r#"
+def test_uses_tuple(tuple_fixture):
+    pass
+"#;
+
+    let fixture_module_path = PathBuf::from("/tmp/test_pp_tuple/fixture_module.py");
+    let conftest_path = PathBuf::from("/tmp/test_pp_tuple/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_pp_tuple/test_example.py");
+
+    db.analyze_file(fixture_module_path.clone(), module_content);
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    let resolved = db.resolve_fixture_for_file(&test_path, "tuple_fixture");
+    assert!(
+        resolved.is_some(),
+        "tuple_fixture should be resolvable via pytest_plugins tuple"
+    );
+    assert_eq!(resolved.unwrap().file_path, fixture_module_path);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_pytest_plugins_dotted_path() {
+    let db = FixtureDatabase::new();
+
+    let fixture_content = r#"
+import pytest
+
+@pytest.fixture
+def nested_fixture():
+    return "nested"
+"#;
+
+    let conftest_content = r#"
+pytest_plugins = "myapp.sub.fixtures"
+"#;
+
+    let test_content = r#"
+def test_uses_nested(nested_fixture):
+    pass
+"#;
+
+    let fixture_path = PathBuf::from("/tmp/test_pp_dotted/myapp/sub/fixtures.py");
+    let conftest_path = PathBuf::from("/tmp/test_pp_dotted/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_pp_dotted/test_example.py");
+
+    db.analyze_file(fixture_path.clone(), fixture_content);
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    let resolved = db.resolve_fixture_for_file(&test_path, "nested_fixture");
+    assert!(
+        resolved.is_some(),
+        "nested_fixture should be resolvable via dotted pytest_plugins path"
+    );
+    assert_eq!(resolved.unwrap().file_path, fixture_path);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_pytest_plugins_in_test_file() {
+    let db = FixtureDatabase::new();
+
+    let module_content = r#"
+import pytest
+
+@pytest.fixture
+def test_file_plugin_fixture():
+    return "from test file plugin"
+"#;
+
+    let test_content = r#"
+pytest_plugins = "fixture_module"
+
+def test_uses_plugin(test_file_plugin_fixture):
+    pass
+"#;
+
+    let fixture_module_path = PathBuf::from("/tmp/test_pp_testfile/fixture_module.py");
+    let test_path = PathBuf::from("/tmp/test_pp_testfile/test_example.py");
+
+    db.analyze_file(fixture_module_path.clone(), module_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    let resolved = db.resolve_fixture_for_file(&test_path, "test_file_plugin_fixture");
+    assert!(
+        resolved.is_some(),
+        "test_file_plugin_fixture should be resolvable via pytest_plugins in test file"
+    );
+    assert_eq!(resolved.unwrap().file_path, fixture_module_path);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_pytest_plugins_transitive() {
+    let db = FixtureDatabase::new();
+
+    let module_c_content = r#"
+import pytest
+
+@pytest.fixture
+def deep_plugin_fixture():
+    return "deep"
+"#;
+
+    let module_b_content = r#"
+pytest_plugins = ["module_c"]
+
+import pytest
+
+@pytest.fixture
+def mid_plugin_fixture():
+    return "mid"
+"#;
+
+    let conftest_content = r#"
+pytest_plugins = ["module_b"]
+"#;
+
+    let test_content = r#"
+def test_uses_deep(deep_plugin_fixture, mid_plugin_fixture):
+    pass
+"#;
+
+    let module_c_path = PathBuf::from("/tmp/test_pp_transitive/module_c.py");
+    let module_b_path = PathBuf::from("/tmp/test_pp_transitive/module_b.py");
+    let conftest_path = PathBuf::from("/tmp/test_pp_transitive/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_pp_transitive/test_example.py");
+
+    db.analyze_file(module_c_path.clone(), module_c_content);
+    db.analyze_file(module_b_path.clone(), module_b_content);
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    let resolved_deep = db.resolve_fixture_for_file(&test_path, "deep_plugin_fixture");
+    assert!(
+        resolved_deep.is_some(),
+        "deep_plugin_fixture should be resolvable via transitive pytest_plugins"
+    );
+    assert_eq!(resolved_deep.unwrap().file_path, module_c_path);
+
+    let resolved_mid = db.resolve_fixture_for_file(&test_path, "mid_plugin_fixture");
+    assert!(
+        resolved_mid.is_some(),
+        "mid_plugin_fixture should be resolvable via pytest_plugins"
+    );
+    assert_eq!(resolved_mid.unwrap().file_path, module_b_path);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_pytest_plugins_dynamic_value_ignored() {
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+pytest_plugins = get_plugins()
+
+import pytest
+
+@pytest.fixture
+def local_fixture():
+    return "local"
+"#;
+
+    let test_content = r#"
+def test_local(local_fixture):
+    pass
+"#;
+
+    let conftest_path = PathBuf::from("/tmp/test_pp_dynamic/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_pp_dynamic/test_example.py");
+
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Should not crash, local fixture should still work
+    let resolved = db.resolve_fixture_for_file(&test_path, "local_fixture");
+    assert!(
+        resolved.is_some(),
+        "local_fixture should still be resolvable even with dynamic pytest_plugins"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_pytest_plugins_available_fixtures() {
+    let db = FixtureDatabase::new();
+
+    let module_content = r#"
+import pytest
+
+@pytest.fixture
+def plugin_avail_fixture():
+    return "available"
+"#;
+
+    let conftest_content = r#"
+pytest_plugins = ["fixture_module"]
+
+import pytest
+
+@pytest.fixture
+def conftest_fixture():
+    return "conftest"
+"#;
+
+    let test_content = r#"
+def test_something():
+    pass
+"#;
+
+    let fixture_module_path = PathBuf::from("/tmp/test_pp_avail/fixture_module.py");
+    let conftest_path = PathBuf::from("/tmp/test_pp_avail/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_pp_avail/test_example.py");
+
+    db.analyze_file(fixture_module_path.clone(), module_content);
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    let available = db.get_available_fixtures(&test_path);
+    let names: Vec<&str> = available.iter().map(|f| f.name.as_str()).collect();
+
+    assert!(
+        names.contains(&"conftest_fixture"),
+        "conftest_fixture should be in available fixtures"
+    );
+    assert!(
+        names.contains(&"plugin_avail_fixture"),
+        "plugin_avail_fixture should be in available fixtures (via pytest_plugins)"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_pytest_plugins_in_venv_plugin_module() {
+    let db = FixtureDatabase::new();
+
+    // Simulate a venv plugin that declares pytest_plugins to load an internal sub-module.
+    // The plugin __init__.py is registered via pytest11 entry point and declares:
+    //   pytest_plugins = ["my_plugin.internal_fixtures"]
+    // The internal_fixtures.py defines fixtures that should be discoverable.
+
+    let plugin_init_content = r#"
+pytest_plugins = ["my_plugin.internal_fixtures"]
+"#;
+
+    let internal_fixtures_content = r#"
+import pytest
+
+@pytest.fixture
+def venv_internal_fixture():
+    return "from internal sub-module"
+"#;
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def local_fixture():
+    return "local"
+"#;
+
+    let test_content = r#"
+def test_uses_venv_fixture(venv_internal_fixture):
+    pass
+"#;
+
+    let site_packages = PathBuf::from("/tmp/test_venv_pp/venv/lib/python3.11/site-packages");
+    let plugin_init_path = site_packages.join("my_plugin/__init__.py");
+    let internal_path = site_packages.join("my_plugin/internal_fixtures.py");
+    let conftest_path = PathBuf::from("/tmp/test_venv_pp/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_venv_pp/test_example.py");
+
+    // Register site-packages path (normally done by scan_venv_site_packages)
+    db.site_packages_paths
+        .lock()
+        .unwrap()
+        .push(site_packages.clone());
+
+    // Analyze the plugin init (as if scanned via entry points)
+    db.analyze_file(plugin_init_path.clone(), plugin_init_content);
+    // Analyze the internal fixtures module
+    db.analyze_file(internal_path.clone(), internal_fixtures_content);
+    // Analyze local project files
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    // The plugin's pytest_plugins should resolve "my_plugin.internal_fixtures"
+    // via the site-packages fallback in resolve_absolute_import
+    let resolved = db.resolve_fixture_for_file(&test_path, "venv_internal_fixture");
+    assert!(
+        resolved.is_some(),
+        "venv_internal_fixture should be resolvable via venv plugin pytest_plugins"
+    );
+    assert_eq!(resolved.unwrap().file_path, internal_path);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_pytest_plugins_annotated_assignment() {
+    let db = FixtureDatabase::new();
+
+    let fixture_module_content = r#"
+import pytest
+
+@pytest.fixture
+def annotated_plugin_fixture():
+    return "from annotated plugin"
+"#;
+
+    let conftest_content = r#"
+pytest_plugins: list[str] = ["fixture_module"]
+"#;
+
+    let test_content = r#"
+def test_uses_annotated(annotated_plugin_fixture):
+    pass
+"#;
+
+    let fixture_module_path = PathBuf::from("/tmp/test_annassign/fixture_module.py");
+    let conftest_path = PathBuf::from("/tmp/test_annassign/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_annassign/test_example.py");
+
+    db.analyze_file(fixture_module_path.clone(), fixture_module_content);
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    let resolved = db.resolve_fixture_for_file(&test_path, "annotated_plugin_fixture");
+    assert!(
+        resolved.is_some(),
+        "annotated_plugin_fixture should be resolvable via annotated pytest_plugins"
+    );
+    assert_eq!(resolved.unwrap().file_path, fixture_module_path);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_pytest_plugins_last_assignment_wins() {
+    let db = FixtureDatabase::new();
+
+    let module_a_content = r#"
+import pytest
+
+@pytest.fixture
+def fixture_a():
+    return "a"
+"#;
+
+    let module_b_content = r#"
+import pytest
+
+@pytest.fixture
+def fixture_b():
+    return "b"
+"#;
+
+    let conftest_content = r#"
+pytest_plugins = ["module_a"]
+pytest_plugins = ["module_b"]
+"#;
+
+    let module_a_path = PathBuf::from("/tmp/test_last_wins/module_a.py");
+    let module_b_path = PathBuf::from("/tmp/test_last_wins/module_b.py");
+    let conftest_path = PathBuf::from("/tmp/test_last_wins/conftest.py");
+
+    db.analyze_file(module_a_path.clone(), module_a_content);
+    db.analyze_file(module_b_path.clone(), module_b_content);
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // Only module_b should be imported via conftest (last assignment wins)
+    let imported = db.is_fixture_imported_in_file("fixture_b", &conftest_path);
+    assert!(
+        imported,
+        "fixture_b should be imported (last pytest_plugins assignment)"
+    );
+
+    let imported_a = db.is_fixture_imported_in_file("fixture_a", &conftest_path);
+    assert!(
+        !imported_a,
+        "fixture_a should NOT be imported (overwritten by second pytest_plugins)"
     );
 }

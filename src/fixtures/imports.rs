@@ -9,7 +9,7 @@
 
 use super::FixtureDatabase;
 use once_cell::sync::Lazy;
-use rustpython_parser::ast::Stmt;
+use rustpython_parser::ast::{Expr, Stmt};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -194,6 +194,81 @@ impl FixtureDatabase {
         imports
     }
 
+    /// Extract module paths from `pytest_plugins` variable assignments.
+    ///
+    /// Handles both regular and annotated assignments:
+    /// - `pytest_plugins = "module"` (single string)
+    /// - `pytest_plugins = ["module_a", "module_b"]` (list)
+    /// - `pytest_plugins = ("module_a", "module_b")` (tuple)
+    /// - `pytest_plugins: list[str] = ["module_a"]` (annotated)
+    ///
+    /// If multiple assignments exist, only the last one is used (matching pytest semantics).
+    pub(crate) fn extract_pytest_plugins(&self, stmts: &[Stmt]) -> Vec<String> {
+        let mut modules = Vec::new();
+
+        for stmt in stmts {
+            let value = match stmt {
+                Stmt::Assign(assign) => {
+                    let is_pytest_plugins = assign.targets.iter().any(|target| {
+                        matches!(target, Expr::Name(name) if name.id.as_str() == "pytest_plugins")
+                    });
+                    if !is_pytest_plugins {
+                        continue;
+                    }
+                    assign.value.as_ref()
+                }
+                Stmt::AnnAssign(ann_assign) => {
+                    let is_pytest_plugins = matches!(
+                        ann_assign.target.as_ref(),
+                        Expr::Name(name) if name.id.as_str() == "pytest_plugins"
+                    );
+                    if !is_pytest_plugins {
+                        continue;
+                    }
+                    match ann_assign.value.as_ref() {
+                        Some(v) => v.as_ref(),
+                        None => continue,
+                    }
+                }
+                _ => continue,
+            };
+
+            // Last assignment wins: clear previous values
+            modules.clear();
+
+            match value {
+                Expr::Constant(c) => {
+                    if let rustpython_parser::ast::Constant::Str(s) = &c.value {
+                        modules.push(s.to_string());
+                    }
+                }
+                Expr::List(list) => {
+                    for elt in &list.elts {
+                        if let Expr::Constant(c) = elt {
+                            if let rustpython_parser::ast::Constant::Str(s) = &c.value {
+                                modules.push(s.to_string());
+                            }
+                        }
+                    }
+                }
+                Expr::Tuple(tuple) => {
+                    for elt in &tuple.elts {
+                        if let Expr::Constant(c) = elt {
+                            if let rustpython_parser::ast::Constant::Str(s) = &c.value {
+                                modules.push(s.to_string());
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    debug!("Ignoring dynamic pytest_plugins value (not a string/list/tuple)");
+                }
+            }
+        }
+
+        modules
+    }
+
     /// Check if a module is a standard library module that can't contain fixtures.
     /// Uses a static HashSet for O(1) lookup instead of linear array search.
     fn is_standard_library_module(&self, module: &str) -> bool {
@@ -253,7 +328,8 @@ impl FixtureDatabase {
         self.find_module_file(&remaining, &current_dir)
     }
 
-    /// Resolve an absolute import by searching up the directory tree.
+    /// Resolve an absolute import by searching up the directory tree,
+    /// then falling back to site-packages paths for venv plugin modules.
     fn resolve_absolute_import(&self, module_path: &str, start_dir: &Path) -> Option<PathBuf> {
         let mut current_dir = start_dir.to_path_buf();
 
@@ -266,6 +342,13 @@ impl FixtureDatabase {
             match current_dir.parent() {
                 Some(parent) => current_dir = parent.to_path_buf(),
                 None => break,
+            }
+        }
+
+        // Fallback: search in site-packages paths (for venv plugin pytest_plugins)
+        for sp in self.site_packages_paths.lock().unwrap().iter() {
+            if let Some(path) = self.find_module_file(module_path, sp) {
+                return Some(path);
             }
         }
 
@@ -434,6 +517,35 @@ impl FixtureDatabase {
                         }
                     }
                 }
+            }
+
+            // Process pytest_plugins variable (treated like star imports)
+            let plugin_modules = self.extract_pytest_plugins(&module.body);
+            for module_path in plugin_modules {
+                let Some(resolved_path) = self.resolve_module_to_file(&module_path, canonical_path)
+                else {
+                    debug!(
+                        "Could not resolve pytest_plugins module '{}' from {:?}",
+                        module_path, canonical_path
+                    );
+                    continue;
+                };
+
+                let resolved_canonical = self.get_canonical_path(resolved_path);
+
+                debug!(
+                    "Resolved pytest_plugins '{}' to {:?}",
+                    module_path, resolved_canonical
+                );
+
+                if let Some(file_fixtures) = self.file_definitions.get(&resolved_canonical) {
+                    for fixture_name in file_fixtures.iter() {
+                        imported_fixtures.insert(fixture_name.clone());
+                    }
+                }
+
+                let transitive = self.get_imported_fixtures(&resolved_canonical, visited);
+                imported_fixtures.extend(transitive);
             }
         }
 

@@ -31,6 +31,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::debug;
 
+/// An editable install discovered via `direct_url.json` + `.pth` files in site-packages.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Fields read in tests and used for debug logging
+pub struct EditableInstall {
+    pub package_name: String,
+    pub source_root: PathBuf,
+    pub site_packages: PathBuf,
+}
+
 /// Cache entry for line indices: (content_hash, line_index).
 /// The content hash is used to invalidate the cache when file content changes.
 type LineIndexCacheEntry = (u64, Arc<Vec<usize>>);
@@ -99,6 +108,10 @@ pub struct FixtureDatabase {
     /// Discovered site-packages paths from venv scanning.
     /// Used for resolving absolute imports in venv plugin modules.
     pub site_packages_paths: Arc<std::sync::Mutex<Vec<PathBuf>>>,
+    /// Discovered editable installs from venv scanning.
+    pub editable_install_roots: Arc<std::sync::Mutex<Vec<EditableInstall>>>,
+    /// Workspace root path, set during scan. Used to distinguish in-workspace editables.
+    pub workspace_root: Arc<std::sync::Mutex<Option<PathBuf>>>,
 }
 
 impl Default for FixtureDatabase {
@@ -126,6 +139,8 @@ impl FixtureDatabase {
             available_fixtures_cache: Arc::new(DashMap::new()),
             imported_fixtures_cache: Arc::new(DashMap::new()),
             site_packages_paths: Arc::new(std::sync::Mutex::new(Vec::new())),
+            editable_install_roots: Arc::new(std::sync::Mutex::new(Vec::new())),
+            workspace_root: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -228,6 +243,31 @@ impl FixtureDatabase {
         let mut hasher = DefaultHasher::new();
         content.hash(&mut hasher);
         hasher.finish()
+    }
+
+    /// Check if a file path is inside an editable install that is NOT within the workspace.
+    /// Returns true if the file is from an external editable install (third-party).
+    pub(crate) fn is_editable_install_third_party(&self, file_path: &Path) -> bool {
+        let installs = self.editable_install_roots.lock().unwrap();
+        let workspace = self.workspace_root.lock().unwrap();
+
+        for install in installs.iter() {
+            if file_path.starts_with(&install.source_root) {
+                if let Some(ref ws) = *workspace {
+                    // Not third-party if editable source is inside workspace
+                    if install.source_root.starts_with(ws) {
+                        return false;
+                    }
+                    // Not third-party if workspace is inside editable source
+                    // (project installed editable in its own venv)
+                    if ws.starts_with(&install.source_root) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+        }
+        false
     }
 
     /// Remove all cached data for a file.

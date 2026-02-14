@@ -78,6 +78,9 @@ impl FixtureDatabase {
     pub fn scan_workspace_with_excludes(&self, root_path: &Path, exclude_patterns: &[Pattern]) {
         info!("Scanning workspace: {:?}", root_path);
 
+        // Store workspace root for editable install third-party detection
+        *self.workspace_root.lock().unwrap() = Some(root_path.to_path_buf());
+
         // Defensive check: ensure the root path exists
         if !root_path.exists() {
             warn!(
@@ -235,6 +238,13 @@ impl FixtureDatabase {
         // Start with conftest.py, test files, and venv plugin files
         // (pytest_plugins can appear in any of these)
         let site_packages_paths = self.site_packages_paths.lock().unwrap().clone();
+        let editable_roots: Vec<PathBuf> = self
+            .editable_install_roots
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.source_root.clone())
+            .collect();
         let mut files_to_check: Vec<std::path::PathBuf> = self
             .file_cache
             .iter()
@@ -250,7 +260,8 @@ impl FixtureDatabase {
                     })
                     .unwrap_or(false);
                 let is_venv_plugin = site_packages_paths.iter().any(|sp| key.starts_with(sp));
-                is_conftest_or_test || is_venv_plugin
+                let is_editable_plugin = editable_roots.iter().any(|er| key.starts_with(er));
+                is_conftest_or_test || is_venv_plugin || is_editable_plugin
             })
             .map(|entry| entry.key().clone())
             .collect();
@@ -572,9 +583,11 @@ impl FixtureDatabase {
                 entry.name, entry.module_path
             );
 
-            if let Some(path) =
+            let resolved =
                 Self::resolve_entry_point_module_to_path(site_packages, &entry.module_path)
-            {
+                    .or_else(|| self.resolve_entry_point_in_editable_installs(&entry.module_path));
+
+            if let Some(path) = resolved {
                 let scanned = if path.file_name().and_then(|n| n.to_str()) == Some("__init__.py") {
                     let package_dir = path.parent().expect("__init__.py must have parent");
                     info!(
@@ -626,11 +639,248 @@ impl FixtureDatabase {
         self.scan_plugin_directory(&pytest_internal);
     }
 
+    /// Extract the raw and normalized package name from a `.dist-info` directory name.
+    /// Returns `(raw_name, normalized_name)`.
+    /// e.g., `my-package-1.0.0.dist-info` → `("my-package", "my_package")`
+    fn extract_package_name_from_dist_info(dir_name: &str) -> Option<(String, String)> {
+        // Strip the .dist-info or .egg-info suffix
+        let name_version = dir_name
+            .strip_suffix(".dist-info")
+            .or_else(|| dir_name.strip_suffix(".egg-info"))?;
+
+        // The format is `name-version`. Split on '-' and take the first segment.
+        // Package names can contain hyphens, but the version always starts with a digit,
+        // so find the first '-' followed by a digit.
+        let name = if let Some(idx) = name_version.char_indices().position(|(i, c)| {
+            c == '-' && name_version[i + 1..].starts_with(|c: char| c.is_ascii_digit())
+        }) {
+            &name_version[..idx]
+        } else {
+            name_version
+        };
+
+        let raw = name.to_string();
+        // Normalize: PEP 503 says dashes, dots, underscores are interchangeable
+        let normalized = name.replace(['-', '.'], "_").to_lowercase();
+        Some((raw, normalized))
+    }
+
+    /// Discover editable installs by scanning `.dist-info` directories for `direct_url.json`.
+    fn discover_editable_installs(&self, site_packages: &Path) {
+        info!("Scanning for editable installs in: {:?}", site_packages);
+
+        // Clear previous editable installs to avoid duplicates on re-scan
+        self.editable_install_roots.lock().unwrap().clear();
+
+        // Index all .pth files once (stem → full path) to avoid re-reading site-packages per package
+        let pth_index = Self::build_pth_index(site_packages);
+
+        let entries = match std::fs::read_dir(site_packages) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let filename = path.file_name().unwrap_or_default().to_string_lossy();
+
+            if !filename.ends_with(".dist-info") {
+                continue;
+            }
+
+            let direct_url_path = path.join("direct_url.json");
+            let content = match std::fs::read_to_string(&direct_url_path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            // Parse direct_url.json to check for editable installs
+            let json: serde_json::Value = match serde_json::from_str(&content) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            // Check if dir_info.editable is true
+            let is_editable = json
+                .get("dir_info")
+                .and_then(|d| d.get("editable"))
+                .and_then(|e| e.as_bool())
+                .unwrap_or(false);
+
+            if !is_editable {
+                continue;
+            }
+
+            let Some((raw_name, normalized_name)) =
+                Self::extract_package_name_from_dist_info(&filename)
+            else {
+                continue;
+            };
+
+            // Find the .pth file that points to the source root
+            let source_root = Self::find_editable_pth_source_root(
+                &pth_index,
+                &raw_name,
+                &normalized_name,
+                site_packages,
+            );
+            let Some(source_root) = source_root else {
+                // Fallback: try the url field from direct_url.json
+                let url = json.get("url").and_then(|u| u.as_str()).unwrap_or("");
+                let path_str = url.strip_prefix("file://").unwrap_or(url);
+                if path_str.is_empty() {
+                    debug!(
+                        "No .pth file or url found for editable install: {}",
+                        normalized_name
+                    );
+                    continue;
+                }
+                let candidate = PathBuf::from(path_str);
+                match candidate.canonicalize() {
+                    Ok(canonical) => {
+                        info!(
+                            "Discovered editable install (from url): {} -> {:?}",
+                            normalized_name, canonical
+                        );
+                        self.editable_install_roots
+                            .lock()
+                            .unwrap()
+                            .push(super::EditableInstall {
+                                package_name: normalized_name,
+                                source_root: canonical,
+                                site_packages: site_packages.to_path_buf(),
+                            });
+                    }
+                    Err(_) => {
+                        debug!(
+                            "Could not canonicalize editable install path: {:?}",
+                            candidate
+                        );
+                    }
+                }
+                continue;
+            };
+
+            info!(
+                "Discovered editable install: {} -> {:?}",
+                normalized_name, source_root
+            );
+            self.editable_install_roots
+                .lock()
+                .unwrap()
+                .push(super::EditableInstall {
+                    package_name: normalized_name,
+                    source_root,
+                    site_packages: site_packages.to_path_buf(),
+                });
+        }
+
+        let count = self.editable_install_roots.lock().unwrap().len();
+        info!("Discovered {} editable install(s)", count);
+    }
+
+    /// Build an index of `.pth` file stems to their full paths.
+    /// Read site-packages once and store `stem → path` for O(1) lookup.
+    fn build_pth_index(site_packages: &Path) -> std::collections::HashMap<String, PathBuf> {
+        let mut index = std::collections::HashMap::new();
+        let entries = match std::fs::read_dir(site_packages) {
+            Ok(e) => e,
+            Err(_) => return index,
+        };
+        for entry in entries.flatten() {
+            let fname = entry.file_name();
+            let fname_str = fname.to_string_lossy();
+            if fname_str.ends_with(".pth") {
+                let stem = fname_str.strip_suffix(".pth").unwrap_or(&fname_str);
+                index.insert(stem.to_string(), entry.path());
+            }
+        }
+        index
+    }
+
+    /// Find the source root from a `.pth` file for an editable install.
+    /// Uses both raw and normalized package names to handle pip's varying naming conventions.
+    /// Looks for both old-style (`_<pkg>.pth`) and new-style (`__editable__.<pkg>.pth`) naming.
+    fn find_editable_pth_source_root(
+        pth_index: &std::collections::HashMap<String, PathBuf>,
+        raw_name: &str,
+        normalized_name: &str,
+        site_packages: &Path,
+    ) -> Option<PathBuf> {
+        // Build candidates from both raw and normalized names.
+        // Raw name preserves original dashes/dots (e.g., "my-package"),
+        // normalized uses underscores (e.g., "my_package").
+        let mut candidates: Vec<String> = vec![
+            format!("__editable__.{}", normalized_name),
+            format!("_{}", normalized_name),
+            normalized_name.to_string(),
+        ];
+        if raw_name != normalized_name {
+            candidates.push(format!("__editable__.{}", raw_name));
+            candidates.push(format!("_{}", raw_name));
+            candidates.push(raw_name.to_string());
+        }
+
+        // Search the pre-built index for matching .pth stems
+        for (stem, pth_path) in pth_index {
+            let matches = candidates
+                .iter()
+                .any(|c| stem == c || stem.starts_with(&format!("{}-", c)));
+            if !matches {
+                continue;
+            }
+
+            // Parse the .pth file: first non-comment, non-import line is the path
+            let content = match std::fs::read_to_string(pth_path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') || line.starts_with("import ") {
+                    continue;
+                }
+                let candidate = PathBuf::from(line);
+                let resolved = if candidate.is_absolute() {
+                    candidate
+                } else {
+                    site_packages.join(&candidate)
+                };
+                match resolved.canonicalize() {
+                    Ok(canonical) => return Some(canonical),
+                    Err(_) => {
+                        debug!("Could not canonicalize .pth path: {:?}", resolved);
+                        continue;
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Try to resolve an entry point module path through editable install source roots.
+    fn resolve_entry_point_in_editable_installs(&self, module_path: &str) -> Option<PathBuf> {
+        let installs = self.editable_install_roots.lock().unwrap();
+        for install in installs.iter() {
+            if let Some(path) =
+                Self::resolve_entry_point_module_to_path(&install.source_root, module_path)
+            {
+                return Some(path);
+            }
+        }
+        None
+    }
+
     fn scan_pytest_plugins(&self, site_packages: &Path) {
         info!(
             "Scanning for pytest plugins via entry points in: {:?}",
             site_packages
         );
+
+        // Discover editable installs before scanning entry points
+        self.discover_editable_installs(site_packages);
 
         let mut plugin_count = 0;
 
@@ -1263,6 +1513,269 @@ def capsys():
         assert!(
             db.definitions.contains_key("capsys"),
             "capsys should be discovered from _pytest"
+        );
+    }
+
+    #[test]
+    fn test_extract_package_name_from_dist_info() {
+        assert_eq!(
+            FixtureDatabase::extract_package_name_from_dist_info("mypackage-1.0.0.dist-info"),
+            Some(("mypackage".to_string(), "mypackage".to_string()))
+        );
+        assert_eq!(
+            FixtureDatabase::extract_package_name_from_dist_info("my-package-1.0.0.dist-info"),
+            Some(("my-package".to_string(), "my_package".to_string()))
+        );
+        assert_eq!(
+            FixtureDatabase::extract_package_name_from_dist_info("My.Package-2.3.4.dist-info"),
+            Some(("My.Package".to_string(), "my_package".to_string()))
+        );
+        assert_eq!(
+            FixtureDatabase::extract_package_name_from_dist_info("pytest_mock-3.12.0.dist-info"),
+            Some(("pytest_mock".to_string(), "pytest_mock".to_string()))
+        );
+        assert_eq!(
+            FixtureDatabase::extract_package_name_from_dist_info("mypackage-0.1.0.egg-info"),
+            Some(("mypackage".to_string(), "mypackage".to_string()))
+        );
+        // Edge case: no version
+        assert_eq!(
+            FixtureDatabase::extract_package_name_from_dist_info("mypackage.dist-info"),
+            Some(("mypackage".to_string(), "mypackage".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_discover_editable_installs() {
+        let temp = tempdir().unwrap();
+        let site_packages = temp.path();
+
+        // Create a source root for the editable package
+        let source_root = tempdir().unwrap();
+        let pkg_dir = source_root.path().join("mypackage");
+        fs::create_dir_all(&pkg_dir).unwrap();
+        fs::write(pkg_dir.join("__init__.py"), "").unwrap();
+
+        // Create dist-info with direct_url.json indicating editable
+        let dist_info = site_packages.join("mypackage-0.1.0.dist-info");
+        fs::create_dir_all(&dist_info).unwrap();
+
+        let direct_url = serde_json::json!({
+            "url": format!("file://{}", source_root.path().display()),
+            "dir_info": {
+                "editable": true
+            }
+        });
+        fs::write(
+            dist_info.join("direct_url.json"),
+            serde_json::to_string(&direct_url).unwrap(),
+        )
+        .unwrap();
+
+        // Create a .pth file pointing to the source root
+        let pth_content = format!("{}\n", source_root.path().display());
+        fs::write(
+            site_packages.join("__editable__.mypackage-0.1.0.pth"),
+            &pth_content,
+        )
+        .unwrap();
+
+        let db = FixtureDatabase::new();
+        db.discover_editable_installs(site_packages);
+
+        let installs = db.editable_install_roots.lock().unwrap();
+        assert_eq!(installs.len(), 1, "Should discover one editable install");
+        assert_eq!(installs[0].package_name, "mypackage");
+        assert_eq!(
+            installs[0].source_root,
+            source_root.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_discover_editable_installs_pth_with_dashes() {
+        let temp = tempdir().unwrap();
+        let site_packages = temp.path();
+
+        // Create a source root
+        let source_root = tempdir().unwrap();
+        let pkg_dir = source_root.path().join("my_package");
+        fs::create_dir_all(&pkg_dir).unwrap();
+        fs::write(pkg_dir.join("__init__.py"), "").unwrap();
+
+        // dist-info uses dashes (PEP 427): my-package-0.1.0.dist-info
+        let dist_info = site_packages.join("my-package-0.1.0.dist-info");
+        fs::create_dir_all(&dist_info).unwrap();
+        let direct_url = serde_json::json!({
+            "url": format!("file://{}", source_root.path().display()),
+            "dir_info": { "editable": true }
+        });
+        fs::write(
+            dist_info.join("direct_url.json"),
+            serde_json::to_string(&direct_url).unwrap(),
+        )
+        .unwrap();
+
+        // .pth file keeps dashes (matches pip's actual behavior)
+        let pth_content = format!("{}\n", source_root.path().display());
+        fs::write(
+            site_packages.join("__editable__.my-package-0.1.0.pth"),
+            &pth_content,
+        )
+        .unwrap();
+
+        let db = FixtureDatabase::new();
+        db.discover_editable_installs(site_packages);
+
+        let installs = db.editable_install_roots.lock().unwrap();
+        assert_eq!(
+            installs.len(),
+            1,
+            "Should discover editable install from .pth with dashes"
+        );
+        assert_eq!(installs[0].package_name, "my_package");
+        assert_eq!(
+            installs[0].source_root,
+            source_root.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_discover_editable_installs_pth_with_dots() {
+        let temp = tempdir().unwrap();
+        let site_packages = temp.path();
+
+        // Create a source root
+        let source_root = tempdir().unwrap();
+        fs::create_dir_all(source_root.path().join("my_package")).unwrap();
+        fs::write(source_root.path().join("my_package/__init__.py"), "").unwrap();
+
+        // dist-info uses dots: My.Package-1.0.0.dist-info
+        let dist_info = site_packages.join("My.Package-1.0.0.dist-info");
+        fs::create_dir_all(&dist_info).unwrap();
+        let direct_url = serde_json::json!({
+            "url": format!("file://{}", source_root.path().display()),
+            "dir_info": { "editable": true }
+        });
+        fs::write(
+            dist_info.join("direct_url.json"),
+            serde_json::to_string(&direct_url).unwrap(),
+        )
+        .unwrap();
+
+        // .pth file keeps dots
+        let pth_content = format!("{}\n", source_root.path().display());
+        fs::write(
+            site_packages.join("__editable__.My.Package-1.0.0.pth"),
+            &pth_content,
+        )
+        .unwrap();
+
+        let db = FixtureDatabase::new();
+        db.discover_editable_installs(site_packages);
+
+        let installs = db.editable_install_roots.lock().unwrap();
+        assert_eq!(
+            installs.len(),
+            1,
+            "Should discover editable install from .pth with dots"
+        );
+        assert_eq!(installs[0].package_name, "my_package");
+        assert_eq!(
+            installs[0].source_root,
+            source_root.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_discover_editable_installs_dedup_on_rescan() {
+        let temp = tempdir().unwrap();
+        let site_packages = temp.path();
+
+        let source_root = tempdir().unwrap();
+        fs::create_dir_all(source_root.path().join("pkg")).unwrap();
+        fs::write(source_root.path().join("pkg/__init__.py"), "").unwrap();
+
+        let dist_info = site_packages.join("pkg-0.1.0.dist-info");
+        fs::create_dir_all(&dist_info).unwrap();
+        let direct_url = serde_json::json!({
+            "url": format!("file://{}", source_root.path().display()),
+            "dir_info": { "editable": true }
+        });
+        fs::write(
+            dist_info.join("direct_url.json"),
+            serde_json::to_string(&direct_url).unwrap(),
+        )
+        .unwrap();
+
+        let pth_content = format!("{}\n", source_root.path().display());
+        fs::write(site_packages.join("pkg.pth"), &pth_content).unwrap();
+
+        let db = FixtureDatabase::new();
+
+        // Scan twice
+        db.discover_editable_installs(site_packages);
+        db.discover_editable_installs(site_packages);
+
+        let installs = db.editable_install_roots.lock().unwrap();
+        assert_eq!(
+            installs.len(),
+            1,
+            "Re-scanning should not produce duplicates"
+        );
+    }
+
+    #[test]
+    fn test_editable_install_entry_point_resolution() {
+        let temp = tempdir().unwrap();
+        let site_packages = temp.path();
+
+        // Create a source root with a plugin module
+        let source_root = tempdir().unwrap();
+        let pkg_dir = source_root.path().join("mypackage");
+        fs::create_dir_all(&pkg_dir).unwrap();
+
+        let plugin_content = r#"
+import pytest
+
+@pytest.fixture
+def editable_fixture():
+    return "from editable install"
+"#;
+        fs::write(pkg_dir.join("__init__.py"), "").unwrap();
+        fs::write(pkg_dir.join("plugin.py"), plugin_content).unwrap();
+
+        // Create dist-info with direct_url.json and entry_points.txt
+        let dist_info = site_packages.join("mypackage-0.1.0.dist-info");
+        fs::create_dir_all(&dist_info).unwrap();
+
+        let direct_url = serde_json::json!({
+            "url": format!("file://{}", source_root.path().display()),
+            "dir_info": { "editable": true }
+        });
+        fs::write(
+            dist_info.join("direct_url.json"),
+            serde_json::to_string(&direct_url).unwrap(),
+        )
+        .unwrap();
+
+        let entry_points = "[pytest11]\nmypackage = mypackage.plugin\n";
+        fs::write(dist_info.join("entry_points.txt"), entry_points).unwrap();
+
+        // Create .pth file
+        let pth_content = format!("{}\n", source_root.path().display());
+        fs::write(
+            site_packages.join("__editable__.mypackage-0.1.0.pth"),
+            &pth_content,
+        )
+        .unwrap();
+
+        let db = FixtureDatabase::new();
+        db.scan_pytest_plugins(site_packages);
+
+        assert!(
+            db.definitions.contains_key("editable_fixture"),
+            "editable_fixture should be discovered via entry point fallback"
         );
     }
 }

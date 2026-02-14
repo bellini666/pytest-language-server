@@ -11028,3 +11028,154 @@ pytest_plugins = ["module_b"]
         "fixture_a should NOT be imported (overwritten by second pytest_plugins)"
     );
 }
+
+#[test]
+#[timeout(30000)]
+fn test_editable_install_is_third_party() {
+    use std::fs;
+    use tempfile::tempdir;
+
+    let db = FixtureDatabase::new();
+
+    // Simulate workspace root (canonicalize to match analyze_file behavior)
+    let workspace = tempdir().unwrap();
+    let workspace_canonical = workspace.path().canonicalize().unwrap();
+    *db.workspace_root.lock().unwrap() = Some(workspace_canonical);
+
+    // Simulate an external editable install source root
+    let external_src = tempdir().unwrap();
+    let external_src_canonical = external_src.path().canonicalize().unwrap();
+    db.editable_install_roots.lock().unwrap().push(
+        pytest_language_server::fixtures::EditableInstall {
+            package_name: "external_pkg".to_string(),
+            source_root: external_src_canonical,
+            site_packages: PathBuf::from("/fake/site-packages"),
+        },
+    );
+
+    // Create a fixture file in the external source root
+    let fixture_file = external_src.path().join("plugin.py");
+    let fixture_content = r#"
+import pytest
+
+@pytest.fixture
+def ext_editable_fixture():
+    return "from external editable"
+"#;
+    fs::write(&fixture_file, fixture_content).unwrap();
+    db.analyze_file(fixture_file.clone(), fixture_content);
+
+    // The fixture should be marked as third-party
+    let defs = db.definitions.get("ext_editable_fixture").unwrap();
+    assert!(
+        defs[0].is_third_party,
+        "Fixture from external editable install should be third-party"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_editable_install_in_workspace_not_third_party() {
+    use std::fs;
+    use tempfile::tempdir;
+
+    let db = FixtureDatabase::new();
+
+    // Simulate workspace root that CONTAINS the editable source (canonicalize paths)
+    let workspace = tempdir().unwrap();
+    let workspace_canonical = workspace.path().canonicalize().unwrap();
+    let editable_src = workspace_canonical
+        .join("packages")
+        .join("mylib")
+        .join("src");
+    std::fs::create_dir_all(&editable_src).unwrap();
+
+    *db.workspace_root.lock().unwrap() = Some(workspace_canonical);
+    db.editable_install_roots.lock().unwrap().push(
+        pytest_language_server::fixtures::EditableInstall {
+            package_name: "mylib".to_string(),
+            source_root: editable_src.clone(),
+            site_packages: PathBuf::from("/fake/site-packages"),
+        },
+    );
+
+    // Create a fixture in the in-workspace editable source
+    let fixture_file = editable_src.join("conftest.py");
+    let fixture_content = r#"
+import pytest
+
+@pytest.fixture
+def local_editable_fixture():
+    return "from local editable"
+"#;
+    fs::write(&fixture_file, fixture_content).unwrap();
+    db.analyze_file(fixture_file.clone(), fixture_content);
+
+    // Should NOT be third-party since source is inside workspace
+    let defs = db.definitions.get("local_editable_fixture").unwrap();
+    assert!(
+        !defs[0].is_third_party,
+        "Fixture from in-workspace editable install should NOT be third-party"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_editable_install_unused_fixtures_excluded() {
+    use std::fs;
+    use tempfile::tempdir;
+
+    let db = FixtureDatabase::new();
+
+    // Simulate an external editable install (canonicalize paths)
+    let workspace = tempdir().unwrap();
+    let workspace_canonical = workspace.path().canonicalize().unwrap();
+    let external_src = tempdir().unwrap();
+    let external_src_canonical = external_src.path().canonicalize().unwrap();
+    *db.workspace_root.lock().unwrap() = Some(workspace_canonical);
+    db.editable_install_roots.lock().unwrap().push(
+        pytest_language_server::fixtures::EditableInstall {
+            package_name: "ext_pkg".to_string(),
+            source_root: external_src_canonical,
+            site_packages: PathBuf::from("/fake/site-packages"),
+        },
+    );
+
+    // Create fixtures in external source
+    let fixture_file = external_src.path().join("plugin.py");
+    let fixture_content = r#"
+import pytest
+
+@pytest.fixture
+def third_party_editable_fixture():
+    return "external"
+"#;
+    fs::write(&fixture_file, fixture_content).unwrap();
+    db.analyze_file(fixture_file, fixture_content);
+
+    // Create a local fixture
+    let local_file = workspace.path().join("conftest.py");
+    let local_content = r#"
+import pytest
+
+@pytest.fixture
+def unused_local_fixture():
+    return "local"
+"#;
+    fs::write(&local_file, local_content).unwrap();
+    db.analyze_file(local_file, local_content);
+
+    let unused = db.get_unused_fixtures();
+    let unused_names: Vec<&str> = unused.iter().map(|(_, name)| name.as_str()).collect();
+
+    // Third-party editable fixture should be excluded from unused report
+    assert!(
+        !unused_names.contains(&"third_party_editable_fixture"),
+        "Third-party editable fixture should be excluded from unused report"
+    );
+    // Local fixture should appear in unused report
+    assert!(
+        unused_names.contains(&"unused_local_fixture"),
+        "Local unused fixture should appear in unused report"
+    );
+}

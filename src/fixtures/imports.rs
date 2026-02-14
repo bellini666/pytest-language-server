@@ -352,6 +352,13 @@ impl FixtureDatabase {
             }
         }
 
+        // Fallback: search in editable install source roots
+        for install in self.editable_install_roots.lock().unwrap().iter() {
+            if let Some(path) = self.find_module_file(module_path, &install.source_root) {
+                return Some(path);
+            }
+        }
+
         None
     }
 

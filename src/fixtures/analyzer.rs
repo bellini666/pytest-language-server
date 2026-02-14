@@ -425,7 +425,8 @@ impl FixtureDatabase {
 
             let (start_char, end_char) = self.find_function_name_position(content, line, func_name);
 
-            let is_third_party = file_path.to_string_lossy().contains("site-packages");
+            let is_third_party = file_path.to_string_lossy().contains("site-packages")
+                || self.is_editable_install_third_party(file_path);
 
             // Fixtures can depend on other fixtures - collect dependencies first
             let mut declared_params: HashSet<String> = HashSet::new();

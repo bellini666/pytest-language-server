@@ -679,6 +679,15 @@ impl FixtureDatabase {
     fn discover_editable_installs(&self, site_packages: &Path) {
         info!("Scanning for editable installs in: {:?}", site_packages);
 
+        // Validate the site-packages path is a real directory before reading from it
+        if !site_packages.is_dir() {
+            warn!(
+                "site-packages path is not a directory, skipping editable install scan: {:?}",
+                site_packages
+            );
+            return;
+        }
+
         // Clear previous editable installs to avoid duplicates on re-scan
         self.editable_install_roots.lock().unwrap().clear();
 
@@ -765,6 +774,9 @@ impl FixtureDatabase {
     /// Read site-packages once and store `stem → path` for O(1) lookup.
     fn build_pth_index(site_packages: &Path) -> std::collections::HashMap<String, PathBuf> {
         let mut index = std::collections::HashMap::new();
+        if !site_packages.is_dir() {
+            return index;
+        }
         let entries = match std::fs::read_dir(site_packages) {
             Ok(e) => e,
             Err(_) => return index,
@@ -827,8 +839,12 @@ impl FixtureDatabase {
                 if line.is_empty() || line.starts_with('#') || line.starts_with("import ") {
                     continue;
                 }
-                // Validate: reject lines with null bytes or control characters
-                if line.contains('\0') || line.bytes().any(|b| b < 0x20 && b != b'\t') {
+                // Validate: reject lines with null bytes, control characters,
+                // or path traversal sequences
+                if line.contains('\0')
+                    || line.bytes().any(|b| b < 0x20 && b != b'\t')
+                    || line.contains("..")
+                {
                     debug!("Skipping .pth line with invalid characters: {:?}", line);
                     continue;
                 }
@@ -838,6 +854,8 @@ impl FixtureDatabase {
                 } else {
                     site_packages.join(&candidate)
                 };
+                // Canonicalize to resolve symlinks and validate existence,
+                // then verify it's an actual directory
                 match resolved.canonicalize() {
                     Ok(canonical) if canonical.is_dir() => return Some(canonical),
                     Ok(canonical) => {

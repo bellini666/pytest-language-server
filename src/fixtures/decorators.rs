@@ -167,6 +167,20 @@ pub fn extract_parametrize_indirect_fixtures(
     vec![]
 }
 
+/// Extracts whether autouse=True is set on a @pytest.fixture decorator.
+/// Returns false if no autouse keyword is specified or if autouse=False.
+pub fn extract_fixture_autouse(expr: &Expr) -> bool {
+    let Expr::Call(call) = expr else { return false };
+    if !is_fixture_decorator(&call.func) {
+        return false;
+    }
+
+    call.keywords
+        .iter()
+        .filter(|kw| kw.arg.as_ref().is_some_and(|a| a.as_str() == "autouse"))
+        .any(|kw| matches!(&kw.value, Expr::Constant(c) if matches!(c.value, rustpython_parser::ast::Constant::Bool(true))))
+}
+
 /// Extracts the scope from a @pytest.fixture(scope="...") decorator.
 /// Returns None if no scope is specified (defaults to "function" at call site).
 pub fn extract_fixture_scope(expr: &Expr) -> Option<super::types::FixtureScope> {

@@ -409,6 +409,30 @@ fn test_e2e_autouse_fixture_detection() {
     // Should detect the autouse fixture
     let autouse = db.definitions.get("auto_cleanup");
     assert!(autouse.is_some());
+
+    // Verify the autouse field is set
+    let auto_cleanup = &autouse.unwrap()[0];
+    assert!(
+        auto_cleanup.autouse,
+        "auto_cleanup should have autouse=true"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_e2e_autouse_fixture_not_reported_unused() {
+    let db = FixtureDatabase::new();
+    let project_path = PathBuf::from("tests/test_project");
+
+    db.scan_workspace(&project_path);
+
+    let unused = db.get_unused_fixtures();
+    let unused_names: Vec<&str> = unused.iter().map(|(_, name)| name.as_str()).collect();
+
+    assert!(
+        !unused_names.contains(&"auto_cleanup"),
+        "autouse fixture auto_cleanup should NOT be reported as unused"
+    );
 }
 
 #[test]

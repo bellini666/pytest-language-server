@@ -59,6 +59,7 @@ pub struct FixtureDefinition {
     pub dependencies: Vec<String>, // Names of fixtures this fixture depends on (via parameters)
     pub scope: FixtureScope,  // The fixture's scope (function, class, module, package, session)
     pub yield_line: Option<usize>, // Line number of the yield statement (for generator fixtures)
+    pub autouse: bool,        // Whether this fixture has autouse=True
 }
 
 /// A fixture usage (reference) in a Python file.

@@ -25,6 +25,7 @@ fn test_hover_content_with_leading_newline() {
         dependencies: vec![],
         scope: pytest_language_server::FixtureScope::Function,
         yield_line: None,
+        autouse: false,
     };
 
     // Build hover content (same logic as hover method)
@@ -92,6 +93,7 @@ fn test_hover_content_structure_without_docstring() {
         dependencies: vec![],
         scope: pytest_language_server::FixtureScope::Function,
         yield_line: None,
+        autouse: false,
     };
 
     // Build hover content

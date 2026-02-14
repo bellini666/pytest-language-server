@@ -434,6 +434,11 @@ impl FixtureDatabase {
                     continue;
                 }
 
+                // Skip autouse fixtures (they're used implicitly)
+                if def.autouse {
+                    continue;
+                }
+
                 let usage_count = definition_usage_counts
                     .get(&(def.file_path.clone(), fixture_name.clone()))
                     .copied()

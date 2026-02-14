@@ -3189,6 +3189,19 @@ def another_auto():
     // Should detect autouse fixtures
     assert!(db.definitions.contains_key("auto_fixture"));
     assert!(db.definitions.contains_key("another_auto"));
+
+    // Verify autouse field is set correctly
+    let auto_fixture = &db.definitions.get("auto_fixture").unwrap()[0];
+    assert!(
+        auto_fixture.autouse,
+        "auto_fixture should have autouse=true"
+    );
+
+    let another_auto = &db.definitions.get("another_auto").unwrap()[0];
+    assert!(
+        another_auto.autouse,
+        "another_auto should have autouse=true"
+    );
 }
 
 #[test]
@@ -11181,4 +11194,102 @@ def unused_local_fixture():
         unused_names.contains(&"unused_local_fixture"),
         "Local unused fixture should appear in unused report"
     );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_autouse_fixture_not_reported_as_unused() {
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture(autouse=True)
+def auto_setup():
+    yield
+
+@pytest.fixture
+def regular_fixture():
+    return 42
+"#;
+    let conftest_path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let test_content = r#"
+def test_something():
+    assert True
+"#;
+    let test_path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    let unused = db.get_unused_fixtures();
+    let unused_names: Vec<&str> = unused.iter().map(|(_, name)| name.as_str()).collect();
+
+    assert!(
+        !unused_names.contains(&"auto_setup"),
+        "autouse fixture should NOT be reported as unused"
+    );
+    assert!(
+        unused_names.contains(&"regular_fixture"),
+        "regular unused fixture should be reported as unused"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_autouse_with_scope_not_reported_unused() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture(scope="session", autouse=True)
+def session_auto():
+    yield
+"#;
+    let file_path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(file_path.clone(), content);
+
+    let unused = db.get_unused_fixtures();
+    let unused_names: Vec<&str> = unused.iter().map(|(_, name)| name.as_str()).collect();
+
+    assert!(
+        !unused_names.contains(&"session_auto"),
+        "autouse fixture with scope should NOT be reported as unused"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_extract_fixture_autouse() {
+    use rustpython_parser::{parse, Mode};
+
+    let cases = vec![
+        ("@pytest.fixture(autouse=True)\ndef f(): pass", true),
+        ("@pytest.fixture(autouse=False)\ndef f(): pass", false),
+        ("@pytest.fixture\ndef f(): pass", false),
+        ("@pytest.fixture()\ndef f(): pass", false),
+        (
+            "@pytest.fixture(scope=\"session\", autouse=True)\ndef f(): pass",
+            true,
+        ),
+    ];
+
+    for (source, expected) in cases {
+        let parsed = parse(source, Mode::Module, "<test>").unwrap();
+        let module = parsed.as_module().unwrap();
+        let stmt = &module.body[0];
+        if let rustpython_parser::ast::Stmt::FunctionDef(func) = stmt {
+            let decorator = &func.decorator_list[0];
+            let result =
+                pytest_language_server::fixtures::decorators::extract_fixture_autouse(decorator);
+            assert_eq!(
+                result, expected,
+                "extract_fixture_autouse({:?}) should be {}, got {}",
+                source, expected, result
+            );
+        } else {
+            panic!("Expected FunctionDef, got {:?}", stmt);
+        }
+    }
 }

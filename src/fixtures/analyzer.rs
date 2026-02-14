@@ -413,6 +413,7 @@ impl FixtureDatabase {
 
             // Extract scope from decorator (defaults to function scope)
             let scope = decorators::extract_fixture_scope(decorator).unwrap_or_default();
+            let autouse = decorators::extract_fixture_autouse(decorator);
 
             let line = self.get_line_from_offset(range.start().to_usize(), line_index);
             let docstring = self.extract_docstring(body);
@@ -460,6 +461,7 @@ impl FixtureDatabase {
                 dependencies: dependencies.clone(),
                 scope,
                 yield_line: self.find_yield_line(body, line_index),
+                autouse,
             };
 
             self.record_fixture_definition(definition);
@@ -602,6 +604,7 @@ impl FixtureDatabase {
                                 dependencies: Vec::new(), // Assignment-style fixtures don't have explicit dependencies
                                 scope: FixtureScope::default(), // Assignment-style fixtures default to function scope
                                 yield_line: None, // Assignment-style fixtures don't have yield statements
+                                autouse: false,   // Assignment-style fixtures are never autouse
                             };
 
                             self.record_fixture_definition(definition);

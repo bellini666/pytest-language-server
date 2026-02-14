@@ -256,12 +256,12 @@ impl FixtureDatabase {
             .collect();
 
         if files_to_check.is_empty() {
-            debug!("No conftest/test files found, skipping import scan");
+            debug!("No conftest/test/plugin files found, skipping import scan");
             return;
         }
 
         info!(
-            "Starting import scan with {} conftest/test files",
+            "Starting import scan with {} conftest/test/plugin files",
             files_to_check.len()
         );
 

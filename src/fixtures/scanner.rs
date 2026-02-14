@@ -230,7 +230,7 @@ impl FixtureDatabase {
         // Track all files we've already processed to find imports from
         let mut processed_files: HashSet<std::path::PathBuf> = HashSet::new();
 
-        // Start with conftest.py files
+        // Start with conftest.py and test files (pytest_plugins can appear in test files too)
         let mut files_to_check: Vec<std::path::PathBuf> = self
             .file_cache
             .iter()
@@ -238,19 +238,24 @@ impl FixtureDatabase {
                 entry
                     .key()
                     .file_name()
-                    .map(|n| n == "conftest.py")
+                    .and_then(|n| n.to_str())
+                    .map(|n| {
+                        n == "conftest.py"
+                            || (n.starts_with("test_") && n.ends_with(".py"))
+                            || n.ends_with("_test.py")
+                    })
                     .unwrap_or(false)
             })
             .map(|entry| entry.key().clone())
             .collect();
 
         if files_to_check.is_empty() {
-            debug!("No conftest.py files found, skipping import scan");
+            debug!("No conftest/test files found, skipping import scan");
             return;
         }
 
         info!(
-            "Starting import scan with {} conftest.py files",
+            "Starting import scan with {} conftest/test files",
             files_to_check.len()
         );
 
@@ -284,18 +289,31 @@ impl FixtureDatabase {
 
                 let line_index = self.get_line_index(file_path, &content);
 
-                // Extract imports
+                // Extract imports and pytest_plugins
                 if let rustpython_parser::ast::Mod::Module(module) = parsed.as_ref() {
                     let imports =
                         self.extract_fixture_imports(&module.body, file_path, &line_index);
 
                     for import in imports {
-                        // Resolve the import to a file path
                         if let Some(resolved_path) =
                             self.resolve_module_to_file(&import.module_path, file_path)
                         {
                             let canonical = self.get_canonical_path(resolved_path);
-                            // Only add if not already processed and not in file cache
+                            if !processed_files.contains(&canonical)
+                                && !self.file_cache.contains_key(&canonical)
+                            {
+                                new_modules.insert(canonical);
+                            }
+                        }
+                    }
+
+                    // Also extract pytest_plugins variable declarations
+                    let plugin_modules = self.extract_pytest_plugins(&module.body);
+                    for module_path in plugin_modules {
+                        if let Some(resolved_path) =
+                            self.resolve_module_to_file(&module_path, file_path)
+                        {
+                            let canonical = self.get_canonical_path(resolved_path);
                             if !processed_files.contains(&canonical)
                                 && !self.file_cache.contains_key(&canonical)
                             {

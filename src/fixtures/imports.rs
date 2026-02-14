@@ -9,7 +9,7 @@
 
 use super::FixtureDatabase;
 use once_cell::sync::Lazy;
-use rustpython_parser::ast::Stmt;
+use rustpython_parser::ast::{Expr, Stmt};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -192,6 +192,58 @@ impl FixtureDatabase {
         }
 
         imports
+    }
+
+    /// Extract module paths from `pytest_plugins` variable assignments.
+    ///
+    /// Handles:
+    /// - `pytest_plugins = "module"` (single string)
+    /// - `pytest_plugins = ["module_a", "module_b"]` (list)
+    /// - `pytest_plugins = ("module_a", "module_b")` (tuple)
+    pub(crate) fn extract_pytest_plugins(&self, stmts: &[Stmt]) -> Vec<String> {
+        let mut modules = Vec::new();
+
+        for stmt in stmts {
+            if let Stmt::Assign(assign) = stmt {
+                let is_pytest_plugins = assign.targets.iter().any(|target| {
+                    matches!(target, Expr::Name(name) if name.id.as_str() == "pytest_plugins")
+                });
+                if !is_pytest_plugins {
+                    continue;
+                }
+
+                match assign.value.as_ref() {
+                    Expr::Constant(c) => {
+                        if let rustpython_parser::ast::Constant::Str(s) = &c.value {
+                            modules.push(s.to_string());
+                        }
+                    }
+                    Expr::List(list) => {
+                        for elt in &list.elts {
+                            if let Expr::Constant(c) = elt {
+                                if let rustpython_parser::ast::Constant::Str(s) = &c.value {
+                                    modules.push(s.to_string());
+                                }
+                            }
+                        }
+                    }
+                    Expr::Tuple(tuple) => {
+                        for elt in &tuple.elts {
+                            if let Expr::Constant(c) = elt {
+                                if let rustpython_parser::ast::Constant::Str(s) = &c.value {
+                                    modules.push(s.to_string());
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        debug!("Ignoring dynamic pytest_plugins value (not a string/list/tuple)");
+                    }
+                }
+            }
+        }
+
+        modules
     }
 
     /// Check if a module is a standard library module that can't contain fixtures.
@@ -434,6 +486,35 @@ impl FixtureDatabase {
                         }
                     }
                 }
+            }
+
+            // Process pytest_plugins variable (treated like star imports)
+            let plugin_modules = self.extract_pytest_plugins(&module.body);
+            for module_path in plugin_modules {
+                let Some(resolved_path) = self.resolve_module_to_file(&module_path, canonical_path)
+                else {
+                    debug!(
+                        "Could not resolve pytest_plugins module '{}' from {:?}",
+                        module_path, canonical_path
+                    );
+                    continue;
+                };
+
+                let resolved_canonical = self.get_canonical_path(resolved_path);
+
+                debug!(
+                    "Resolved pytest_plugins '{}' to {:?}",
+                    module_path, resolved_canonical
+                );
+
+                if let Some(file_fixtures) = self.file_definitions.get(&resolved_canonical) {
+                    for fixture_name in file_fixtures.iter() {
+                        imported_fixtures.insert(fixture_name.clone());
+                    }
+                }
+
+                let transitive = self.get_imported_fixtures(&resolved_canonical, visited);
+                imported_fixtures.extend(transitive);
             }
         }
 

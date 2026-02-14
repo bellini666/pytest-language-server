@@ -305,7 +305,8 @@ impl FixtureDatabase {
         self.find_module_file(&remaining, &current_dir)
     }
 
-    /// Resolve an absolute import by searching up the directory tree.
+    /// Resolve an absolute import by searching up the directory tree,
+    /// then falling back to site-packages paths for venv plugin modules.
     fn resolve_absolute_import(&self, module_path: &str, start_dir: &Path) -> Option<PathBuf> {
         let mut current_dir = start_dir.to_path_buf();
 
@@ -318,6 +319,13 @@ impl FixtureDatabase {
             match current_dir.parent() {
                 Some(parent) => current_dir = parent.to_path_buf(),
                 None => break,
+            }
+        }
+
+        // Fallback: search in site-packages paths (for venv plugin pytest_plugins)
+        for sp in self.site_packages_paths.lock().unwrap().iter() {
+            if let Some(path) = self.find_module_file(module_path, sp) {
+                return Some(path);
             }
         }
 

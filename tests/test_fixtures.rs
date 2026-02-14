@@ -10877,3 +10877,68 @@ def test_something():
         "plugin_avail_fixture should be in available fixtures (via pytest_plugins)"
     );
 }
+
+#[test]
+#[timeout(30000)]
+fn test_pytest_plugins_in_venv_plugin_module() {
+    let db = FixtureDatabase::new();
+
+    // Simulate a venv plugin that declares pytest_plugins to load an internal sub-module.
+    // The plugin __init__.py is registered via pytest11 entry point and declares:
+    //   pytest_plugins = ["my_plugin.internal_fixtures"]
+    // The internal_fixtures.py defines fixtures that should be discoverable.
+
+    let plugin_init_content = r#"
+pytest_plugins = ["my_plugin.internal_fixtures"]
+"#;
+
+    let internal_fixtures_content = r#"
+import pytest
+
+@pytest.fixture
+def venv_internal_fixture():
+    return "from internal sub-module"
+"#;
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def local_fixture():
+    return "local"
+"#;
+
+    let test_content = r#"
+def test_uses_venv_fixture(venv_internal_fixture):
+    pass
+"#;
+
+    let site_packages = PathBuf::from("/tmp/test_venv_pp/venv/lib/python3.11/site-packages");
+    let plugin_init_path = site_packages.join("my_plugin/__init__.py");
+    let internal_path = site_packages.join("my_plugin/internal_fixtures.py");
+    let conftest_path = PathBuf::from("/tmp/test_venv_pp/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_venv_pp/test_example.py");
+
+    // Register site-packages path (normally done by scan_venv_site_packages)
+    db.site_packages_paths
+        .lock()
+        .unwrap()
+        .push(site_packages.clone());
+
+    // Analyze the plugin init (as if scanned via entry points)
+    db.analyze_file(plugin_init_path.clone(), plugin_init_content);
+    // Analyze the internal fixtures module
+    db.analyze_file(internal_path.clone(), internal_fixtures_content);
+    // Analyze local project files
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    // The plugin's pytest_plugins should resolve "my_plugin.internal_fixtures"
+    // via the site-packages fallback in resolve_absolute_import
+    let resolved = db.resolve_fixture_for_file(&test_path, "venv_internal_fixture");
+    assert!(
+        resolved.is_some(),
+        "venv_internal_fixture should be resolvable via venv plugin pytest_plugins"
+    );
+    assert_eq!(resolved.unwrap().file_path, internal_path);
+}

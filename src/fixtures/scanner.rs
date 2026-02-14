@@ -1182,14 +1182,27 @@ extra = something
         // Create a valid module so the path would resolve if not for validation
         fs::write(site_packages.join("valid.py"), "# code").unwrap();
 
-        // ".." in module path
+        // After splitting on '.', this yields empty segments ["", "", "%2Fetc%2Fpasswd"]
+        // and is rejected by the empty-segment validation
         let result =
             FixtureDatabase::resolve_entry_point_module_to_path(site_packages, "..%2Fetc%2Fpasswd");
-        assert!(result.is_none(), "should reject path with ..");
+        assert!(result.is_none(), "should reject traversal-like pattern");
 
+        // "valid...secret" splits to ["valid", "", "", "secret"] — caught by empty segments
         let result =
             FixtureDatabase::resolve_entry_point_module_to_path(site_packages, "valid...secret");
-        assert!(result.is_none(), "should reject dotdot segments");
+        assert!(
+            result.is_none(),
+            "should reject module names with consecutive dots (empty segments)"
+        );
+
+        // "pkg..evil" splits to ["pkg", "", "evil"] — also caught by empty segments
+        let result =
+            FixtureDatabase::resolve_entry_point_module_to_path(site_packages, "pkg..evil");
+        assert!(
+            result.is_none(),
+            "should reject module names with consecutive dots"
+        );
     }
 
     #[test]
@@ -1212,6 +1225,7 @@ extra = something
         assert!(result.is_none(), "should reject empty path segments");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_resolve_entry_point_rejects_symlink_escape() {
         let temp = tempdir().unwrap();
@@ -1222,17 +1236,14 @@ extra = something
         fs::write(outside.path().join("evil.py"), "# malicious").unwrap();
 
         // Create a symlink inside site-packages pointing outside
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(outside.path(), site_packages.join("escaped")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), site_packages.join("escaped")).unwrap();
 
-            let result =
-                FixtureDatabase::resolve_entry_point_module_to_path(site_packages, "escaped.evil");
-            assert!(
-                result.is_none(),
-                "should reject paths that escape site-packages via symlink"
-            );
-        }
+        let result =
+            FixtureDatabase::resolve_entry_point_module_to_path(site_packages, "escaped.evil");
+        assert!(
+            result.is_none(),
+            "should reject paths that escape site-packages via symlink"
+        );
     }
 
     #[test]

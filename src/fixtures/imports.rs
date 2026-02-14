@@ -196,49 +196,72 @@ impl FixtureDatabase {
 
     /// Extract module paths from `pytest_plugins` variable assignments.
     ///
-    /// Handles:
+    /// Handles both regular and annotated assignments:
     /// - `pytest_plugins = "module"` (single string)
     /// - `pytest_plugins = ["module_a", "module_b"]` (list)
     /// - `pytest_plugins = ("module_a", "module_b")` (tuple)
+    /// - `pytest_plugins: list[str] = ["module_a"]` (annotated)
+    ///
+    /// If multiple assignments exist, only the last one is used (matching pytest semantics).
     pub(crate) fn extract_pytest_plugins(&self, stmts: &[Stmt]) -> Vec<String> {
         let mut modules = Vec::new();
 
         for stmt in stmts {
-            if let Stmt::Assign(assign) = stmt {
-                let is_pytest_plugins = assign.targets.iter().any(|target| {
-                    matches!(target, Expr::Name(name) if name.id.as_str() == "pytest_plugins")
-                });
-                if !is_pytest_plugins {
-                    continue;
+            let value = match stmt {
+                Stmt::Assign(assign) => {
+                    let is_pytest_plugins = assign.targets.iter().any(|target| {
+                        matches!(target, Expr::Name(name) if name.id.as_str() == "pytest_plugins")
+                    });
+                    if !is_pytest_plugins {
+                        continue;
+                    }
+                    assign.value.as_ref()
                 }
+                Stmt::AnnAssign(ann_assign) => {
+                    let is_pytest_plugins = matches!(
+                        ann_assign.target.as_ref(),
+                        Expr::Name(name) if name.id.as_str() == "pytest_plugins"
+                    );
+                    if !is_pytest_plugins {
+                        continue;
+                    }
+                    match ann_assign.value.as_ref() {
+                        Some(v) => v.as_ref(),
+                        None => continue,
+                    }
+                }
+                _ => continue,
+            };
 
-                match assign.value.as_ref() {
-                    Expr::Constant(c) => {
-                        if let rustpython_parser::ast::Constant::Str(s) = &c.value {
-                            modules.push(s.to_string());
-                        }
+            // Last assignment wins: clear previous values
+            modules.clear();
+
+            match value {
+                Expr::Constant(c) => {
+                    if let rustpython_parser::ast::Constant::Str(s) = &c.value {
+                        modules.push(s.to_string());
                     }
-                    Expr::List(list) => {
-                        for elt in &list.elts {
-                            if let Expr::Constant(c) = elt {
-                                if let rustpython_parser::ast::Constant::Str(s) = &c.value {
-                                    modules.push(s.to_string());
-                                }
+                }
+                Expr::List(list) => {
+                    for elt in &list.elts {
+                        if let Expr::Constant(c) = elt {
+                            if let rustpython_parser::ast::Constant::Str(s) = &c.value {
+                                modules.push(s.to_string());
                             }
                         }
                     }
-                    Expr::Tuple(tuple) => {
-                        for elt in &tuple.elts {
-                            if let Expr::Constant(c) = elt {
-                                if let rustpython_parser::ast::Constant::Str(s) = &c.value {
-                                    modules.push(s.to_string());
-                                }
+                }
+                Expr::Tuple(tuple) => {
+                    for elt in &tuple.elts {
+                        if let Expr::Constant(c) = elt {
+                            if let rustpython_parser::ast::Constant::Str(s) = &c.value {
+                                modules.push(s.to_string());
                             }
                         }
                     }
-                    _ => {
-                        debug!("Ignoring dynamic pytest_plugins value (not a string/list/tuple)");
-                    }
+                }
+                _ => {
+                    debug!("Ignoring dynamic pytest_plugins value (not a string/list/tuple)");
                 }
             }
         }

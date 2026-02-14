@@ -10942,3 +10942,89 @@ def test_uses_venv_fixture(venv_internal_fixture):
     );
     assert_eq!(resolved.unwrap().file_path, internal_path);
 }
+
+#[test]
+#[timeout(30000)]
+fn test_pytest_plugins_annotated_assignment() {
+    let db = FixtureDatabase::new();
+
+    let fixture_module_content = r#"
+import pytest
+
+@pytest.fixture
+def annotated_plugin_fixture():
+    return "from annotated plugin"
+"#;
+
+    let conftest_content = r#"
+pytest_plugins: list[str] = ["fixture_module"]
+"#;
+
+    let test_content = r#"
+def test_uses_annotated(annotated_plugin_fixture):
+    pass
+"#;
+
+    let fixture_module_path = PathBuf::from("/tmp/test_annassign/fixture_module.py");
+    let conftest_path = PathBuf::from("/tmp/test_annassign/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_annassign/test_example.py");
+
+    db.analyze_file(fixture_module_path.clone(), fixture_module_content);
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    let resolved = db.resolve_fixture_for_file(&test_path, "annotated_plugin_fixture");
+    assert!(
+        resolved.is_some(),
+        "annotated_plugin_fixture should be resolvable via annotated pytest_plugins"
+    );
+    assert_eq!(resolved.unwrap().file_path, fixture_module_path);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_pytest_plugins_last_assignment_wins() {
+    let db = FixtureDatabase::new();
+
+    let module_a_content = r#"
+import pytest
+
+@pytest.fixture
+def fixture_a():
+    return "a"
+"#;
+
+    let module_b_content = r#"
+import pytest
+
+@pytest.fixture
+def fixture_b():
+    return "b"
+"#;
+
+    let conftest_content = r#"
+pytest_plugins = ["module_a"]
+pytest_plugins = ["module_b"]
+"#;
+
+    let module_a_path = PathBuf::from("/tmp/test_last_wins/module_a.py");
+    let module_b_path = PathBuf::from("/tmp/test_last_wins/module_b.py");
+    let conftest_path = PathBuf::from("/tmp/test_last_wins/conftest.py");
+
+    db.analyze_file(module_a_path.clone(), module_a_content);
+    db.analyze_file(module_b_path.clone(), module_b_content);
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // Only module_b should be imported via conftest (last assignment wins)
+    let imported = db.is_fixture_imported_in_file("fixture_b", &conftest_path);
+    assert!(
+        imported,
+        "fixture_b should be imported (last pytest_plugins assignment)"
+    );
+
+    let imported_a = db.is_fixture_imported_in_file("fixture_a", &conftest_path);
+    assert!(
+        !imported_a,
+        "fixture_a should NOT be imported (overwritten by second pytest_plugins)"
+    );
+}

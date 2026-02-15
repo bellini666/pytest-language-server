@@ -56,6 +56,6 @@ test_renamed_fixtures.py (3 fixtures)
 └── user (used 1 time)
 utils/
 └── conftest.py (3 fixtures)
-    ├── auto_cleanup (unused)
+    ├── auto_cleanup (autouse=True)
     ├── temp_dir (unused)
     └── temp_file (unused)

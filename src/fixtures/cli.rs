@@ -99,6 +99,16 @@ impl FixtureDatabase {
 
         let mut definition_usage_counts = self.compute_definition_usage_counts();
 
+        let mut autouse_fixtures: HashSet<(PathBuf, String)> = HashSet::new();
+        for entry in self.definitions.iter() {
+            let fixture_name = entry.key();
+            for def in entry.value().iter() {
+                if def.autouse {
+                    autouse_fixtures.insert((def.file_path.clone(), fixture_name.clone()));
+                }
+            }
+        }
+
         // Remap editable install paths to virtual site-packages paths for display.
         // Only remap files that are outside the workspace (third-party editable installs).
         let mut editable_dirs: HashSet<PathBuf> = HashSet::new();
@@ -159,6 +169,20 @@ impl FixtureDatabase {
                 if let Some(count) = definition_usage_counts.remove(&old_key) {
                     definition_usage_counts.insert(new_key, count);
                 }
+            }
+
+            // Remap autouse fixture keys to match virtual paths
+            let mut autouse_remapped: Vec<((PathBuf, String), (PathBuf, String))> = Vec::new();
+            for (original, virtual_path) in &remapped {
+                for key in autouse_fixtures.iter() {
+                    if key.0 == *original {
+                        autouse_remapped.push((key.clone(), (virtual_path.clone(), key.1.clone())));
+                    }
+                }
+            }
+            for (old_key, new_key) in autouse_remapped {
+                autouse_fixtures.remove(&old_key);
+                autouse_fixtures.insert(new_key);
             }
         }
 
@@ -227,6 +251,7 @@ impl FixtureDatabase {
                 skip_unused,
                 only_unused,
                 &editable_dirs,
+                &autouse_fixtures,
             );
         }
     }
@@ -244,6 +269,7 @@ impl FixtureDatabase {
         skip_unused: bool,
         only_unused: bool,
         editable_dirs: &HashSet<PathBuf>,
+        autouse_fixtures: &HashSet<(PathBuf, String)>,
     ) {
         use colored::Colorize;
 
@@ -262,14 +288,13 @@ impl FixtureDatabase {
                 let fixture_vec: Vec<_> = fixtures
                     .iter()
                     .filter(|fixture_name| {
-                        let usage_count = definition_usage_counts
-                            .get(&(path.to_path_buf(), (*fixture_name).clone()))
-                            .copied()
-                            .unwrap_or(0);
+                        let key = (path.to_path_buf(), (*fixture_name).clone());
+                        let is_autouse = autouse_fixtures.contains(&key);
+                        let usage_count = definition_usage_counts.get(&key).copied().unwrap_or(0);
                         if only_unused {
-                            usage_count == 0
+                            usage_count == 0 && !is_autouse
                         } else if skip_unused {
-                            usage_count > 0
+                            usage_count > 0 || is_autouse
                         } else {
                             true
                         }
@@ -308,13 +333,30 @@ impl FixtureDatabase {
                         .copied()
                         .unwrap_or(0);
 
-                    let fixture_display = if usage_count == 0 {
+                    let is_autouse =
+                        autouse_fixtures.contains(&(path.to_path_buf(), (*fixture_name).clone()));
+
+                    let fixture_display = if is_autouse && usage_count == 0 {
+                        fixture_name.to_string().cyan()
+                    } else if usage_count == 0 {
                         fixture_name.to_string().dimmed()
                     } else {
                         fixture_name.to_string().green()
                     };
 
-                    let usage_info = if usage_count == 0 {
+                    let usage_info = if is_autouse && usage_count == 0 {
+                        "autouse=True".cyan().to_string()
+                    } else if is_autouse {
+                        format!(
+                            "{}, {}",
+                            if usage_count == 1 {
+                                "used 1 time".yellow().to_string()
+                            } else {
+                                format!("used {} times", usage_count).yellow().to_string()
+                            },
+                            "autouse=True".cyan()
+                        )
+                    } else if usage_count == 0 {
                         "unused".dimmed().to_string()
                     } else if usage_count == 1 {
                         format!("{}", "used 1 time".yellow())
@@ -339,6 +381,7 @@ impl FixtureDatabase {
                     definition_usage_counts,
                     skip_unused,
                     only_unused,
+                    autouse_fixtures,
                 )
             });
 
@@ -373,6 +416,7 @@ impl FixtureDatabase {
                     skip_unused,
                     only_unused,
                     editable_dirs,
+                    autouse_fixtures,
                 );
             }
         }
@@ -385,18 +429,18 @@ impl FixtureDatabase {
         definition_usage_counts: &HashMap<(PathBuf, String), usize>,
         skip_unused: bool,
         only_unused: bool,
+        autouse_fixtures: &HashSet<(PathBuf, String)>,
     ) -> bool {
         if path.is_file() {
             if let Some(fixtures) = file_fixtures.get(path) {
                 return fixtures.iter().any(|fixture_name| {
-                    let usage_count = definition_usage_counts
-                        .get(&(path.to_path_buf(), fixture_name.clone()))
-                        .copied()
-                        .unwrap_or(0);
+                    let key = (path.to_path_buf(), fixture_name.clone());
+                    let is_autouse = autouse_fixtures.contains(&key);
+                    let usage_count = definition_usage_counts.get(&key).copied().unwrap_or(0);
                     if only_unused {
-                        usage_count == 0
+                        usage_count == 0 && !is_autouse
                     } else if skip_unused {
-                        usage_count > 0
+                        usage_count > 0 || is_autouse
                     } else {
                         true
                     }
@@ -412,6 +456,7 @@ impl FixtureDatabase {
                     definition_usage_counts,
                     skip_unused,
                     only_unused,
+                    autouse_fixtures,
                 )
             })
         } else {

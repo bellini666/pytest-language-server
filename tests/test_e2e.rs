@@ -201,8 +201,15 @@ fn test_cli_fixtures_unused_text_output() {
     assert!(stdout.contains("Found") && stdout.contains("unused fixture"));
 
     // Should contain known unused fixtures from test_project
-    // (iterator_fixture, auto_cleanup, temp_dir, temp_file are unused)
-    assert!(stdout.contains("iterator_fixture") || stdout.contains("auto_cleanup"));
+    // (iterator_fixture, temp_dir, temp_file are unused; auto_cleanup is autouse, not unused)
+    assert!(
+        stdout.contains("iterator_fixture"),
+        "iterator_fixture should be reported as unused"
+    );
+    assert!(
+        !stdout.contains("auto_cleanup"),
+        "autouse fixture auto_cleanup should NOT be reported as unused"
+    );
 }
 
 #[test]
@@ -315,6 +322,87 @@ fn test_cli_fixtures_unused_help() {
         .success()
         .stdout(predicate::str::contains("unused fixtures"))
         .stdout(predicate::str::contains("--format"));
+}
+
+// MARK: Autouse fixtures in `fixtures list` E2E Tests
+
+#[test]
+#[timeout(30000)]
+fn test_cli_fixtures_list_only_unused_excludes_autouse() {
+    let mut cmd = Command::cargo_bin("pytest-language-server").unwrap();
+    let output = cmd
+        .arg("fixtures")
+        .arg("list")
+        .arg("tests/test_project")
+        .arg("--only-unused")
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        !stdout.contains("auto_cleanup"),
+        "autouse fixture auto_cleanup should NOT appear in --only-unused output"
+    );
+    // Regular unused fixtures should still appear
+    assert!(
+        stdout.contains("iterator_fixture"),
+        "non-autouse unused fixture should appear"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_cli_fixtures_list_skip_unused_includes_autouse() {
+    let mut cmd = Command::cargo_bin("pytest-language-server").unwrap();
+    let output = cmd
+        .arg("fixtures")
+        .arg("list")
+        .arg("tests/test_project")
+        .arg("--skip-unused")
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("auto_cleanup"),
+        "autouse fixture auto_cleanup should appear in --skip-unused output"
+    );
+    // Regular unused fixtures should NOT appear
+    assert!(
+        !stdout.contains("iterator_fixture"),
+        "non-autouse unused fixture should NOT appear in --skip-unused output"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_cli_fixtures_list_shows_autouse_label() {
+    let mut cmd = Command::cargo_bin("pytest-language-server").unwrap();
+    let output = cmd
+        .arg("fixtures")
+        .arg("list")
+        .arg("tests/test_project")
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("autouse=True"),
+        "full list should show 'autouse=True' label for autouse fixtures"
+    );
+    assert!(
+        !stdout.contains("auto_cleanup") || !stdout.contains("auto_cleanup (unused)"),
+        "auto_cleanup should not be shown as 'unused'"
+    );
 }
 
 // MARK: Workspace Scanning E2E Tests

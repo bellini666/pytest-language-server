@@ -283,7 +283,7 @@ impl FixtureDatabase {
             "├── "
         };
 
-        if path.is_file() {
+        if file_fixtures.contains_key(path) {
             if let Some(fixtures) = file_fixtures.get(path) {
                 let fixture_vec: Vec<_> = fixtures
                     .iter()
@@ -431,7 +431,7 @@ impl FixtureDatabase {
         only_unused: bool,
         autouse_fixtures: &HashSet<(PathBuf, String)>,
     ) -> bool {
-        if path.is_file() {
+        if file_fixtures.contains_key(path) {
             if let Some(fixtures) = file_fixtures.get(path) {
                 return fixtures.iter().any(|fixture_name| {
                     let key = (path.to_path_buf(), fixture_name.clone());

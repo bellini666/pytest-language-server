@@ -11833,12 +11833,13 @@ def test_uses_plugin(direct_plugin_fixture, transitive_plugin_fixture, root_conf
     .unwrap();
 
     // direct_url.json marking it as editable
+    let direct_url = serde_json::json!({
+        "url": format!("file://{}", ws.display()),
+        "dir_info": { "editable": true }
+    });
     fs::write(
         dist_info.join("direct_url.json"),
-        format!(
-            r#"{{"url": "file://{}", "dir_info": {{"editable": true}}}}"#,
-            ws.display()
-        ),
+        serde_json::to_string(&direct_url).unwrap(),
     )
     .unwrap();
 

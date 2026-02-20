@@ -889,7 +889,7 @@ dependencies = [
 
 [[package]]
 name = "pytest-language-server"
-version = "0.19.3"
+version = "0.20.0"
 dependencies = [
  "assert_cmd",
  "clap",

@@ -252,7 +252,7 @@ impl FixtureDatabase {
             }
         }
 
-        // Priority 2.5: Plugin fixtures (discovered via pytest11 entry points)
+        // Priority 3: Plugin fixtures (discovered via pytest11 entry points)
         // These are globally available like third-party fixtures, but from workspace-local
         // editable installs that aren't in site-packages or conftest.py.
         debug!(
@@ -269,7 +269,7 @@ impl FixtureDatabase {
             }
         }
 
-        // Priority 3: Third-party fixtures (site-packages)
+        // Priority 4: Third-party fixtures (site-packages)
         debug!(
             "No fixture {} found in plugins, checking third-party",
             fixture_name
@@ -549,7 +549,7 @@ impl FixtureDatabase {
             }
         }
 
-        // Priority 2.5: Plugin fixtures (pytest11 entry points, e.g. workspace editable installs)
+        // Priority 3: Plugin fixtures (pytest11 entry points, e.g. workspace editable installs)
         for entry in self.definitions.iter() {
             let fixture_name = entry.key();
             for def in entry.value().iter() {
@@ -563,7 +563,7 @@ impl FixtureDatabase {
             }
         }
 
-        // Priority 3: Third-party fixtures from site-packages
+        // Priority 4: Third-party fixtures from site-packages
         for entry in self.definitions.iter() {
             let fixture_name = entry.key();
             for def in entry.value().iter() {
@@ -1204,7 +1204,7 @@ impl FixtureDatabase {
             return Some(def.clone());
         }
 
-        // Priority 2.5: Plugin fixtures (pytest11 entry points)
+        // Priority 3: Plugin fixtures (pytest11 entry points)
         if let Some(def) = definitions
             .iter()
             .find(|d| d.is_plugin && !d.is_third_party)
@@ -1212,7 +1212,7 @@ impl FixtureDatabase {
             return Some(def.clone());
         }
 
-        // Priority 3: Third-party (site-packages)
+        // Priority 4: Third-party (site-packages)
         if let Some(def) = definitions.iter().find(|d| d.is_third_party) {
             return Some(def.clone());
         }

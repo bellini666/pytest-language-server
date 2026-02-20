@@ -421,7 +421,7 @@ impl FixtureDatabase {
 
         // Re-analyze modules that were already cached but newly marked as
         // plugin files.  This refreshes FixtureDefinition.is_plugin on every
-        // fixture in those files so they participate in Priority 2.5 resolution.
+        // fixture in those files so they participate in Priority 3 resolution.
         if !reanalyze_as_plugin.is_empty() {
             info!(
                 "Re-analyzing {} cached module(s) newly marked as plugin files",

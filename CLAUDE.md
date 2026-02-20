@@ -40,7 +40,8 @@ src/
 ### Pytest Fixture Resolution Priority
 1. Same file (highest)
 2. Closest conftest.py (walk up directory tree)
-3. Third-party from venv site-packages (lowest)
+3. Plugin fixtures (pytest11 entry points, e.g. workspace editable installs)
+4. Third-party from venv site-packages (lowest)
 
 ### Self-Referencing Fixtures
 ```python

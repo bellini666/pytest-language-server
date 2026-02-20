@@ -11491,7 +11491,7 @@ def test_priority(shared_fixture):
     let canonical_test = test_file.canonicalize().unwrap();
     db.analyze_file(canonical_test.clone(), test_content);
 
-    // Conftest should win over plugin (Priority 2 > Priority 2.5)
+    // Conftest should win over plugin (Priority 2 > Priority 3)
     let resolved = db.find_fixture_definition(&canonical_test, 1, 20);
     assert!(resolved.is_some(), "shared_fixture should be resolvable");
     let resolved = resolved.unwrap();
@@ -11632,7 +11632,7 @@ def ext_plugin_fixture():
     );
     assert!(defs[0].is_plugin, "Should also be marked as plugin");
 
-    // It should be resolvable from a test file via Priority 3 (third-party)
+    // It should be resolvable from a test file via Priority 4 (third-party)
     let test_file = workspace_canonical.join("tests").join("test_ext.py");
     let resolved = db.resolve_fixture_for_file(&test_file, "ext_plugin_fixture");
     assert!(

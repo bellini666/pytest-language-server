@@ -354,6 +354,11 @@ impl FixtureDatabase {
                 if def.is_third_party {
                     return true;
                 }
+
+                // Check if it's from a pytest11 entry point plugin
+                if def.is_plugin {
+                    return true;
+                }
             }
         }
         false

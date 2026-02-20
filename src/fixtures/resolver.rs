@@ -252,9 +252,26 @@ impl FixtureDatabase {
             }
         }
 
-        // Priority 3: Third-party fixtures (site-packages)
+        // Priority 3: Plugin fixtures (discovered via pytest11 entry points)
+        // These are globally available like third-party fixtures, but from workspace-local
+        // editable installs that aren't in site-packages or conftest.py.
         debug!(
-            "No fixture {} found in conftest hierarchy, checking third-party",
+            "No fixture {} found in conftest hierarchy, checking plugins",
+            fixture_name
+        );
+        for def in definitions.iter() {
+            if def.is_plugin && !def.is_third_party && filter(def) {
+                info!(
+                    "Found plugin fixture {} via pytest11 entry point: {:?}",
+                    fixture_name, def.file_path
+                );
+                return Some(def.clone());
+            }
+        }
+
+        // Priority 4: Third-party fixtures (site-packages)
+        debug!(
+            "No fixture {} found in plugins, checking third-party",
             fixture_name
         );
         for def in definitions.iter() {
@@ -532,7 +549,21 @@ impl FixtureDatabase {
             }
         }
 
-        // Priority 3: Third-party fixtures from site-packages
+        // Priority 3: Plugin fixtures (pytest11 entry points, e.g. workspace editable installs)
+        for entry in self.definitions.iter() {
+            let fixture_name = entry.key();
+            for def in entry.value().iter() {
+                if def.is_plugin
+                    && !def.is_third_party
+                    && !seen_names.contains(fixture_name.as_str())
+                {
+                    available_fixtures.push(def.clone());
+                    seen_names.insert(fixture_name.clone());
+                }
+            }
+        }
+
+        // Priority 4: Third-party fixtures from site-packages
         for entry in self.definitions.iter() {
             let fixture_name = entry.key();
             for def in entry.value().iter() {
@@ -1173,7 +1204,15 @@ impl FixtureDatabase {
             return Some(def.clone());
         }
 
-        // Priority 3: Third-party (site-packages)
+        // Priority 3: Plugin fixtures (pytest11 entry points)
+        if let Some(def) = definitions
+            .iter()
+            .find(|d| d.is_plugin && !d.is_third_party)
+        {
+            return Some(def.clone());
+        }
+
+        // Priority 4: Third-party (site-packages)
         if let Some(def) = definitions.iter().find(|d| d.is_third_party) {
             return Some(def.clone());
         }

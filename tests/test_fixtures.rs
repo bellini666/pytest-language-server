@@ -11293,3 +11293,660 @@ fn test_extract_fixture_autouse() {
         }
     }
 }
+
+#[test]
+#[timeout(30000)]
+fn test_workspace_editable_plugin_fixture_is_plugin_flag() {
+    use std::fs;
+    use tempfile::tempdir;
+
+    let db = FixtureDatabase::new();
+
+    let workspace = tempdir().unwrap();
+    let workspace_canonical = workspace.path().canonicalize().unwrap();
+    *db.workspace_root.lock().unwrap() = Some(workspace_canonical.clone());
+
+    // Create a plugin module inside the workspace
+    let pkg_dir = workspace_canonical.join("mypackage");
+    fs::create_dir_all(&pkg_dir).unwrap();
+    let plugin_file = pkg_dir.join("plugin.py");
+    let plugin_content = r#"
+import pytest
+
+@pytest.fixture
+def ws_plugin_fixture():
+    return "from workspace plugin"
+"#;
+    fs::write(&plugin_file, plugin_content).unwrap();
+
+    // Mark the file as a plugin file (simulating what scan_single_plugin_file does)
+    let canonical_plugin = plugin_file.canonicalize().unwrap();
+    db.plugin_fixture_files.insert(canonical_plugin.clone(), ());
+
+    db.analyze_file(canonical_plugin.clone(), plugin_content);
+
+    let defs = db.definitions.get("ws_plugin_fixture").unwrap();
+    assert_eq!(defs.len(), 1);
+    assert!(
+        defs[0].is_plugin,
+        "Fixture from plugin file should have is_plugin=true"
+    );
+    assert!(
+        !defs[0].is_third_party,
+        "Fixture from workspace plugin should NOT be is_third_party"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_workspace_editable_plugin_fixture_resolution() {
+    use std::fs;
+    use tempfile::tempdir;
+
+    let db = FixtureDatabase::new();
+
+    let workspace = tempdir().unwrap();
+    let workspace_canonical = workspace.path().canonicalize().unwrap();
+    *db.workspace_root.lock().unwrap() = Some(workspace_canonical.clone());
+
+    // Create a plugin module inside the workspace (not conftest, not test file)
+    let pkg_dir = workspace_canonical.join("mypackage");
+    fs::create_dir_all(&pkg_dir).unwrap();
+    let plugin_file = pkg_dir.join("plugin.py");
+    let plugin_content = r#"
+import pytest
+
+@pytest.fixture
+def plugin_fixture():
+    return "from plugin"
+"#;
+    fs::write(&plugin_file, plugin_content).unwrap();
+    let canonical_plugin = plugin_file.canonicalize().unwrap();
+    db.plugin_fixture_files.insert(canonical_plugin.clone(), ());
+    db.analyze_file(canonical_plugin.clone(), plugin_content);
+
+    // Create a test file in the workspace
+    let tests_dir = workspace_canonical.join("tests");
+    fs::create_dir_all(&tests_dir).unwrap();
+    let test_file = tests_dir.join("test_foo.py");
+    let test_content = r#"
+def test_something(plugin_fixture):
+    assert plugin_fixture == "from plugin"
+"#;
+    fs::write(&test_file, test_content).unwrap();
+    let canonical_test = test_file.canonicalize().unwrap();
+    db.analyze_file(canonical_test.clone(), test_content);
+
+    // The fixture should be resolvable from the test file via find_closest_definition
+    let resolved = db.find_fixture_definition(&canonical_test, 1, 19);
+    assert!(
+        resolved.is_some(),
+        "Plugin fixture should be resolvable from test file via find_closest_definition"
+    );
+    let resolved = resolved.unwrap();
+    assert_eq!(resolved.name, "plugin_fixture");
+    assert_eq!(resolved.file_path, canonical_plugin);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_workspace_editable_plugin_available_fixtures() {
+    use std::fs;
+    use tempfile::tempdir;
+
+    let db = FixtureDatabase::new();
+
+    let workspace = tempdir().unwrap();
+    let workspace_canonical = workspace.path().canonicalize().unwrap();
+    *db.workspace_root.lock().unwrap() = Some(workspace_canonical.clone());
+
+    // Create a plugin module inside the workspace
+    let pkg_dir = workspace_canonical.join("mypackage");
+    fs::create_dir_all(&pkg_dir).unwrap();
+    let plugin_file = pkg_dir.join("plugin.py");
+    let plugin_content = r#"
+import pytest
+
+@pytest.fixture
+def available_plugin_fixture():
+    return "available"
+"#;
+    fs::write(&plugin_file, plugin_content).unwrap();
+    let canonical_plugin = plugin_file.canonicalize().unwrap();
+    db.plugin_fixture_files.insert(canonical_plugin.clone(), ());
+    db.analyze_file(canonical_plugin, plugin_content);
+
+    // Create a test file
+    let tests_dir = workspace_canonical.join("tests");
+    fs::create_dir_all(&tests_dir).unwrap();
+    let test_file = tests_dir.join("test_bar.py");
+    let test_content = r#"
+def test_bar(available_plugin_fixture):
+    pass
+"#;
+    fs::write(&test_file, test_content).unwrap();
+    let canonical_test = test_file.canonicalize().unwrap();
+    db.analyze_file(canonical_test.clone(), test_content);
+
+    // get_available_fixtures should include the plugin fixture
+    let available = db.get_available_fixtures(&canonical_test);
+    let available_names: Vec<&str> = available.iter().map(|d| d.name.as_str()).collect();
+    assert!(
+        available_names.contains(&"available_plugin_fixture"),
+        "Plugin fixture should appear in available fixtures for test file. Got: {:?}",
+        available_names
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_workspace_editable_plugin_conftest_wins_over_plugin() {
+    use std::fs;
+    use tempfile::tempdir;
+
+    let db = FixtureDatabase::new();
+
+    let workspace = tempdir().unwrap();
+    let workspace_canonical = workspace.path().canonicalize().unwrap();
+    *db.workspace_root.lock().unwrap() = Some(workspace_canonical.clone());
+
+    // Create a plugin fixture
+    let pkg_dir = workspace_canonical.join("mypackage");
+    fs::create_dir_all(&pkg_dir).unwrap();
+    let plugin_file = pkg_dir.join("plugin.py");
+    let plugin_content = r#"
+import pytest
+
+@pytest.fixture
+def shared_fixture():
+    return "from plugin"
+"#;
+    fs::write(&plugin_file, plugin_content).unwrap();
+    let canonical_plugin = plugin_file.canonicalize().unwrap();
+    db.plugin_fixture_files.insert(canonical_plugin.clone(), ());
+    db.analyze_file(canonical_plugin.clone(), plugin_content);
+
+    // Create a conftest.py that overrides the same fixture
+    let tests_dir = workspace_canonical.join("tests");
+    fs::create_dir_all(&tests_dir).unwrap();
+    let conftest_file = tests_dir.join("conftest.py");
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def shared_fixture():
+    return "from conftest"
+"#;
+    fs::write(&conftest_file, conftest_content).unwrap();
+    let canonical_conftest = conftest_file.canonicalize().unwrap();
+    db.analyze_file(canonical_conftest.clone(), conftest_content);
+
+    // Create a test file
+    let test_file = tests_dir.join("test_priority.py");
+    let test_content = r#"
+def test_priority(shared_fixture):
+    pass
+"#;
+    fs::write(&test_file, test_content).unwrap();
+    let canonical_test = test_file.canonicalize().unwrap();
+    db.analyze_file(canonical_test.clone(), test_content);
+
+    // Conftest should win over plugin (Priority 2 > Priority 3)
+    let resolved = db.find_fixture_definition(&canonical_test, 1, 20);
+    assert!(resolved.is_some(), "shared_fixture should be resolvable");
+    let resolved = resolved.unwrap();
+    assert_eq!(
+        resolved.file_path, canonical_conftest,
+        "conftest.py fixture should win over plugin fixture"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_workspace_editable_plugin_fixture_is_available_for_undeclared_check() {
+    use std::fs;
+    use tempfile::tempdir;
+
+    let db = FixtureDatabase::new();
+
+    let workspace = tempdir().unwrap();
+    let workspace_canonical = workspace.path().canonicalize().unwrap();
+    *db.workspace_root.lock().unwrap() = Some(workspace_canonical.clone());
+
+    // Create a plugin fixture
+    let pkg_dir = workspace_canonical.join("mypackage");
+    fs::create_dir_all(&pkg_dir).unwrap();
+    let plugin_file = pkg_dir.join("plugin.py");
+    let plugin_content = r#"
+import pytest
+
+@pytest.fixture
+def undeclared_check_fixture():
+    return "plugin"
+"#;
+    fs::write(&plugin_file, plugin_content).unwrap();
+    let canonical_plugin = plugin_file.canonicalize().unwrap();
+    db.plugin_fixture_files.insert(canonical_plugin.clone(), ());
+    db.analyze_file(canonical_plugin, plugin_content);
+
+    // Plugin fixture should appear in available fixtures for any test file
+    // (this is what the undeclared fixture checker uses under the hood)
+    let tests_dir = workspace_canonical.join("tests");
+    fs::create_dir_all(&tests_dir).unwrap();
+    let test_file = tests_dir.join("test_x.py");
+    let test_content = "def test_x(): pass\n";
+    fs::write(&test_file, test_content).unwrap();
+    let canonical_test = test_file.canonicalize().unwrap();
+    db.analyze_file(canonical_test.clone(), test_content);
+
+    let available = db.get_available_fixtures(&canonical_test);
+    let available_names: Vec<&str> = available.iter().map(|d| d.name.as_str()).collect();
+    assert!(
+        available_names.contains(&"undeclared_check_fixture"),
+        "Plugin fixture should be recognized as available (used by undeclared fixture checker). Got: {:?}",
+        available_names
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_workspace_editable_plugin_resolve_fixture_for_file() {
+    use std::fs;
+    use tempfile::tempdir;
+
+    let db = FixtureDatabase::new();
+
+    let workspace = tempdir().unwrap();
+    let workspace_canonical = workspace.path().canonicalize().unwrap();
+    *db.workspace_root.lock().unwrap() = Some(workspace_canonical.clone());
+
+    // Create a plugin fixture
+    let pkg_dir = workspace_canonical.join("mypackage");
+    fs::create_dir_all(&pkg_dir).unwrap();
+    let plugin_file = pkg_dir.join("plugin.py");
+    let plugin_content = r#"
+import pytest
+
+@pytest.fixture
+def resolve_for_file_fixture():
+    return "plugin"
+"#;
+    fs::write(&plugin_file, plugin_content).unwrap();
+    let canonical_plugin = plugin_file.canonicalize().unwrap();
+    db.plugin_fixture_files.insert(canonical_plugin.clone(), ());
+    db.analyze_file(canonical_plugin.clone(), plugin_content);
+
+    // resolve_fixture_for_file (used by diagnostics) should also find plugin fixtures
+    let test_file = workspace_canonical.join("tests").join("test_resolve.py");
+    let resolved = db.resolve_fixture_for_file(&test_file, "resolve_for_file_fixture");
+    assert!(
+        resolved.is_some(),
+        "resolve_fixture_for_file should find plugin fixtures"
+    );
+    assert_eq!(resolved.unwrap().file_path, canonical_plugin);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_external_editable_plugin_is_third_party_and_resolvable() {
+    use std::fs;
+    use tempfile::tempdir;
+
+    let db = FixtureDatabase::new();
+
+    let workspace = tempdir().unwrap();
+    let workspace_canonical = workspace.path().canonicalize().unwrap();
+    *db.workspace_root.lock().unwrap() = Some(workspace_canonical.clone());
+
+    // Create an external editable install (source outside workspace)
+    let external_src = tempdir().unwrap();
+    let external_src_canonical = external_src.path().canonicalize().unwrap();
+    db.editable_install_roots.lock().unwrap().push(
+        pytest_language_server::fixtures::EditableInstall {
+            package_name: "ext_plugin".to_string(),
+            raw_package_name: "ext_plugin".to_string(),
+            source_root: external_src_canonical.clone(),
+            site_packages: PathBuf::from("/fake/site-packages"),
+        },
+    );
+
+    // Create a fixture in the external source
+    let plugin_file = external_src_canonical.join("plugin.py");
+    let plugin_content = r#"
+import pytest
+
+@pytest.fixture
+def ext_plugin_fixture():
+    return "external"
+"#;
+    fs::write(&plugin_file, plugin_content).unwrap();
+    let canonical_plugin = plugin_file.canonicalize().unwrap();
+    db.plugin_fixture_files.insert(canonical_plugin.clone(), ());
+    db.analyze_file(canonical_plugin.clone(), plugin_content);
+
+    // The fixture should be third-party AND is_plugin
+    let defs = db.definitions.get("ext_plugin_fixture").unwrap();
+    assert!(
+        defs[0].is_third_party,
+        "External editable should be third-party"
+    );
+    assert!(defs[0].is_plugin, "Should also be marked as plugin");
+
+    // It should be resolvable from a test file via Priority 4 (third-party)
+    let test_file = workspace_canonical.join("tests").join("test_ext.py");
+    let resolved = db.resolve_fixture_for_file(&test_file, "ext_plugin_fixture");
+    assert!(
+        resolved.is_some(),
+        "External editable plugin fixture should be resolvable as third-party"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_non_plugin_file_fixture_not_marked_is_plugin() {
+    let db = FixtureDatabase::new();
+
+    // A regular conftest.py fixture should NOT have is_plugin
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def regular_fixture():
+    return "regular"
+"#;
+    let conftest_path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(conftest_path, conftest_content);
+
+    let defs = db.definitions.get("regular_fixture").unwrap();
+    assert!(
+        !defs[0].is_plugin,
+        "Regular conftest fixture should NOT be marked as plugin"
+    );
+    assert!(
+        !defs[0].is_third_party,
+        "Regular conftest fixture should NOT be third-party"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_cli_and_resolver_agree_on_workspace_editable_plugin_fixtures() {
+    use std::fs;
+    use tempfile::tempdir;
+
+    let db = FixtureDatabase::new();
+
+    let workspace = tempdir().unwrap();
+    let workspace_canonical = workspace.path().canonicalize().unwrap();
+    *db.workspace_root.lock().unwrap() = Some(workspace_canonical.clone());
+
+    // Create a conftest fixture
+    let conftest_file = workspace_canonical.join("conftest.py");
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def conftest_fixture():
+    return "conftest"
+"#;
+    fs::write(&conftest_file, conftest_content).unwrap();
+    let canonical_conftest = conftest_file.canonicalize().unwrap();
+    db.analyze_file(canonical_conftest, conftest_content);
+
+    // Create a plugin fixture (not in conftest, not test file)
+    let pkg_dir = workspace_canonical.join("mypackage");
+    fs::create_dir_all(&pkg_dir).unwrap();
+    let plugin_file = pkg_dir.join("plugin.py");
+    let plugin_content = r#"
+import pytest
+
+@pytest.fixture
+def plugin_only_fixture():
+    return "plugin"
+"#;
+    fs::write(&plugin_file, plugin_content).unwrap();
+    let canonical_plugin = plugin_file.canonicalize().unwrap();
+    db.plugin_fixture_files.insert(canonical_plugin.clone(), ());
+    db.analyze_file(canonical_plugin, plugin_content);
+
+    // Create a test file
+    let test_file = workspace_canonical.join("test_agree.py");
+    let test_content = r#"
+def test_agree(conftest_fixture, plugin_only_fixture):
+    pass
+"#;
+    fs::write(&test_file, test_content).unwrap();
+    let canonical_test = test_file.canonicalize().unwrap();
+    db.analyze_file(canonical_test.clone(), test_content);
+
+    // CLI view: all definitions
+    let all_fixture_names: std::collections::HashSet<String> = db
+        .definitions
+        .iter()
+        .map(|entry| entry.key().clone())
+        .collect();
+
+    // LSP view: available fixtures for the test file
+    let available = db.get_available_fixtures(&canonical_test);
+    let available_names: std::collections::HashSet<String> =
+        available.iter().map(|d| d.name.clone()).collect();
+
+    // Every fixture visible in the CLI should also be available in the LSP
+    assert!(
+        available_names.contains("conftest_fixture"),
+        "conftest_fixture should be in available fixtures"
+    );
+    assert!(
+        available_names.contains("plugin_only_fixture"),
+        "plugin_only_fixture should be in available fixtures (was missing before fix)"
+    );
+    // Verify they agree
+    for name in &all_fixture_names {
+        assert!(
+            available_names.contains(name),
+            "Fixture '{}' is in definitions (CLI view) but NOT in available fixtures (LSP view)",
+            name
+        );
+    }
+}
+
+/// End-to-end test: set up a realistic workspace with a venv containing a
+/// workspace-local editable install that registers a pytest11 entry point,
+/// then call `scan_workspace` and verify that fixtures from the plugin are
+/// discoverable, resolvable, and available for completions / diagnostics.
+#[test]
+#[timeout(30000)]
+fn test_e2e_scan_workspace_editable_plugin_entry_point() {
+    use std::fs;
+    use tempfile::tempdir;
+
+    let workspace = tempdir().unwrap();
+    let ws = workspace.path().canonicalize().unwrap();
+
+    // ── workspace source ──────────────────────────────────────────────
+    //   mypackage/
+    //     __init__.py
+    //     plugin.py          <- pytest11 entry point module
+    //     helpers.py         <- imported by plugin.py via pytest_plugins
+    //   tests/
+    //     test_foo.py        <- uses the plugin fixtures
+    //   conftest.py          <- root conftest with a normal fixture
+
+    let pkg_dir = ws.join("mypackage");
+    fs::create_dir_all(&pkg_dir).unwrap();
+    fs::write(pkg_dir.join("__init__.py"), "").unwrap();
+
+    let plugin_content = r#"
+import pytest
+
+pytest_plugins = ["mypackage.helpers"]
+
+@pytest.fixture
+def direct_plugin_fixture():
+    """Fixture defined directly in the plugin entry point module."""
+    return "direct"
+"#;
+    fs::write(pkg_dir.join("plugin.py"), plugin_content).unwrap();
+
+    let helpers_content = r#"
+import pytest
+
+@pytest.fixture
+def transitive_plugin_fixture():
+    """Fixture imported transitively via pytest_plugins in plugin.py."""
+    return "transitive"
+"#;
+    fs::write(pkg_dir.join("helpers.py"), helpers_content).unwrap();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def root_conftest_fixture():
+    return "conftest"
+"#;
+    fs::write(ws.join("conftest.py"), conftest_content).unwrap();
+
+    let tests_dir = ws.join("tests");
+    fs::create_dir_all(&tests_dir).unwrap();
+    let test_content = r#"
+def test_uses_plugin(direct_plugin_fixture, transitive_plugin_fixture, root_conftest_fixture):
+    pass
+"#;
+    fs::write(tests_dir.join("test_foo.py"), test_content).unwrap();
+
+    // ── fake venv with editable install ──────────────────────────────
+    let site_packages = ws
+        .join(".venv")
+        .join("lib")
+        .join("python3.12")
+        .join("site-packages");
+    fs::create_dir_all(&site_packages).unwrap();
+
+    // dist-info with pytest11 entry point
+    let dist_info = site_packages.join("mypackage-0.1.0.dist-info");
+    fs::create_dir_all(&dist_info).unwrap();
+    fs::write(
+        dist_info.join("entry_points.txt"),
+        "[pytest11]\nmyplugin = mypackage.plugin\n",
+    )
+    .unwrap();
+
+    // direct_url.json marking it as editable
+    let direct_url = serde_json::json!({
+        "url": format!("file://{}", ws.display()),
+        "dir_info": { "editable": true }
+    });
+    fs::write(
+        dist_info.join("direct_url.json"),
+        serde_json::to_string(&direct_url).unwrap(),
+    )
+    .unwrap();
+
+    // METADATA (needed by extract_package_name_from_dist_info indirectly, but
+    // the dist-info dirname is sufficient for discover_editable_installs)
+
+    // .pth file pointing at workspace root so Python can find mypackage
+    fs::write(
+        site_packages.join("mypackage.pth"),
+        format!("{}\n", ws.display()),
+    )
+    .unwrap();
+
+    // ── scan ──────────────────────────────────────────────────────────
+    let db = FixtureDatabase::new();
+    db.scan_workspace(&ws);
+
+    // ── assertions ────────────────────────────────────────────────────
+    let canonical_test = ws.join("tests").join("test_foo.py");
+    // (files are already canonical because ws is canonical and we created them there)
+
+    // 1. The plugin fixture should be in definitions
+    assert!(
+        db.definitions.contains_key("direct_plugin_fixture"),
+        "direct_plugin_fixture should be in definitions after scan_workspace. \
+         definitions keys: {:?}",
+        db.definitions
+            .iter()
+            .map(|e| e.key().clone())
+            .collect::<Vec<_>>()
+    );
+
+    // 2. Check is_third_party – workspace-local editable should NOT be third-party
+    {
+        let defs = db.definitions.get("direct_plugin_fixture").unwrap();
+        assert!(
+            !defs[0].is_third_party,
+            "Workspace-local editable plugin fixture should NOT be third_party"
+        );
+    }
+
+    // 3. The fixture should be resolvable from the test file
+    let resolved = db.resolve_fixture_for_file(&canonical_test, "direct_plugin_fixture");
+    assert!(
+        resolved.is_some(),
+        "direct_plugin_fixture should be resolvable from test file via resolve_fixture_for_file. \
+         definitions: {:?}",
+        db.definitions
+            .get("direct_plugin_fixture")
+            .map(|d| d.value().clone())
+    );
+
+    // 4. The fixture should appear in available fixtures (completions / diagnostics)
+    let available = db.get_available_fixtures(&canonical_test);
+    let available_names: Vec<&str> = available.iter().map(|d| d.name.as_str()).collect();
+    assert!(
+        available_names.contains(&"direct_plugin_fixture"),
+        "direct_plugin_fixture should be in available fixtures for test file. Got: {:?}",
+        available_names
+    );
+    assert!(
+        available_names.contains(&"root_conftest_fixture"),
+        "root_conftest_fixture should be in available fixtures. Got: {:?}",
+        available_names
+    );
+
+    // 5. Transitive plugin fixture (imported via pytest_plugins) should also work
+    // Note: this depends on Phase 4 (scan_imported_fixture_modules) propagating
+    // plugin status through pytest_plugins declarations.
+    let transitive_available = available_names.contains(&"transitive_plugin_fixture");
+    let transitive_in_defs = db.definitions.contains_key("transitive_plugin_fixture");
+    assert!(
+        transitive_in_defs,
+        "transitive_plugin_fixture should be in definitions (discovered via pytest_plugins). \
+         All definitions: {:?}",
+        db.definitions
+            .iter()
+            .map(|e| e.key().clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        transitive_available,
+        "transitive_plugin_fixture should be available for the test file. Got: {:?}",
+        available_names
+    );
+
+    // 6. The plugin fixture should not generate false-positive "undeclared" diagnostics
+    let undeclared = db.get_undeclared_fixtures(&canonical_test);
+    let undeclared_names: Vec<&str> = undeclared.iter().map(|u| u.name.as_str()).collect();
+    assert!(
+        !undeclared_names.contains(&"direct_plugin_fixture"),
+        "direct_plugin_fixture should NOT be reported as undeclared. Undeclared: {:?}",
+        undeclared_names
+    );
+    assert!(
+        !undeclared_names.contains(&"transitive_plugin_fixture"),
+        "transitive_plugin_fixture should NOT be reported as undeclared. Undeclared: {:?}",
+        undeclared_names
+    );
+
+    // 7. find_fixture_definition (go-to-definition) should work
+    //    Line 1 (0-based), "direct_plugin_fixture" starts at char 21
+    let goto = db.find_fixture_definition(&canonical_test, 1, 21);
+    assert!(
+        goto.is_some(),
+        "find_fixture_definition should resolve direct_plugin_fixture from the test file"
+    );
+    let goto_def = goto.unwrap();
+    assert_eq!(goto_def.name, "direct_plugin_fixture");
+}

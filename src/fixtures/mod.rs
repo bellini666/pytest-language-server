@@ -113,6 +113,10 @@ pub struct FixtureDatabase {
     pub editable_install_roots: Arc<std::sync::Mutex<Vec<EditableInstall>>>,
     /// Workspace root path, set during scan. Used to distinguish in-workspace editables.
     pub workspace_root: Arc<std::sync::Mutex<Option<PathBuf>>>,
+    /// Files discovered via pytest11 entry point plugins.
+    /// Used to mark fixtures from these files as `is_plugin` so the resolver
+    /// can find them even when they are not in conftest.py or site-packages.
+    pub plugin_fixture_files: Arc<DashMap<PathBuf, ()>>,
 }
 
 impl Default for FixtureDatabase {
@@ -142,6 +146,7 @@ impl FixtureDatabase {
             site_packages_paths: Arc::new(std::sync::Mutex::new(Vec::new())),
             editable_install_roots: Arc::new(std::sync::Mutex::new(Vec::new())),
             workspace_root: Arc::new(std::sync::Mutex::new(None)),
+            plugin_fixture_files: Arc::new(DashMap::new()),
         }
     }
 

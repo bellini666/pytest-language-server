@@ -428,6 +428,7 @@ impl FixtureDatabase {
 
             let is_third_party = file_path.to_string_lossy().contains("site-packages")
                 || self.is_editable_install_third_party(file_path);
+            let is_plugin = self.plugin_fixture_files.contains_key(file_path);
 
             // Fixtures can depend on other fixtures - collect dependencies first
             let mut declared_params: HashSet<String> = HashSet::new();
@@ -458,6 +459,7 @@ impl FixtureDatabase {
                 docstring,
                 return_type,
                 is_third_party,
+                is_plugin,
                 dependencies: dependencies.clone(),
                 scope,
                 yield_line: self.find_yield_line(body, line_index),
@@ -590,7 +592,9 @@ impl FixtureDatabase {
                             );
 
                             let is_third_party =
-                                file_path.to_string_lossy().contains("site-packages");
+                                file_path.to_string_lossy().contains("site-packages")
+                                    || self.is_editable_install_third_party(file_path);
+                            let is_plugin = self.plugin_fixture_files.contains_key(file_path);
                             let definition = FixtureDefinition {
                                 name: fixture_name.to_string(),
                                 file_path: file_path.clone(),
@@ -601,6 +605,7 @@ impl FixtureDatabase {
                                 docstring: None,
                                 return_type: None,
                                 is_third_party,
+                                is_plugin,
                                 dependencies: Vec::new(), // Assignment-style fixtures don't have explicit dependencies
                                 scope: FixtureScope::default(), // Assignment-style fixtures default to function scope
                                 yield_line: None, // Assignment-style fixtures don't have yield statements

@@ -94,6 +94,34 @@ pub fn extract_usefixtures_names(
         .collect()
 }
 
+/// Extracts fixture names from usefixtures calls within any expression,
+/// including nested structures like lists and tuples.
+/// This handles patterns like:
+///   pytestmark = pytest.mark.usefixtures("fix1")
+///   pytestmark = [pytest.mark.usefixtures("fix1"), pytest.mark.skip]
+///   pytestmark = (pytest.mark.usefixtures("fix1"), pytest.mark.usefixtures("fix2"))
+pub fn extract_usefixtures_from_expr(
+    expr: &Expr,
+) -> Vec<(String, rustpython_parser::text_size::TextRange)> {
+    match expr {
+        // Direct call: pytest.mark.usefixtures("fix1", "fix2")
+        Expr::Call(_) => extract_usefixtures_names(expr),
+        // List: [pytest.mark.usefixtures("fix1"), ...]
+        Expr::List(list) => list
+            .elts
+            .iter()
+            .flat_map(extract_usefixtures_from_expr)
+            .collect(),
+        // Tuple: (pytest.mark.usefixtures("fix1"), ...)
+        Expr::Tuple(tuple) => tuple
+            .elts
+            .iter()
+            .flat_map(extract_usefixtures_from_expr)
+            .collect(),
+        _ => vec![],
+    }
+}
+
 /// Checks if an expression is a pytest.mark.parametrize decorator.
 pub fn is_parametrize_decorator(expr: &Expr) -> bool {
     is_pytest_mark_decorator(expr, "parametrize")

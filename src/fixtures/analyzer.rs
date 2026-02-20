@@ -285,6 +285,30 @@ impl FixtureDatabase {
         // First check for assignment-style fixtures: fixture_name = pytest.fixture()(func)
         if let Stmt::Assign(assign) = stmt {
             self.visit_assignment_fixture(assign, file_path, content, line_index);
+
+            // Check for pytestmark = pytest.mark.usefixtures(...) or
+            // pytestmark = [pytest.mark.usefixtures(...), ...]
+            let is_pytestmark = assign.targets.iter().any(
+                |target| matches!(target, Expr::Name(name) if name.id.as_str() == "pytestmark"),
+            );
+            if is_pytestmark {
+                self.visit_pytestmark_assignment(Some(&assign.value), file_path, line_index);
+            }
+        }
+
+        // Check for annotated pytestmark: pytestmark: T = pytest.mark.usefixtures(...)
+        if let Stmt::AnnAssign(ann_assign) = stmt {
+            let is_pytestmark = matches!(
+                ann_assign.target.as_ref(),
+                Expr::Name(name) if name.id.as_str() == "pytestmark"
+            );
+            if is_pytestmark {
+                self.visit_pytestmark_assignment(
+                    ann_assign.value.as_deref(),
+                    file_path,
+                    line_index,
+                );
+            }
         }
 
         // Handle class definitions - recurse into class body to find test methods
@@ -612,6 +636,45 @@ impl FixtureDatabase {
                     }
                 }
             }
+        }
+    }
+
+    /// Handle pytestmark usefixtures — covers both plain and annotated assignments:
+    ///   pytestmark = pytest.mark.usefixtures("fix1", "fix2")
+    ///   pytestmark = [pytest.mark.usefixtures("fix1"), pytest.mark.skip]
+    ///   pytestmark = (pytest.mark.usefixtures("fix1"), pytest.mark.usefixtures("fix2"))
+    ///   pytestmark: list[MarkDecorator] = [pytest.mark.usefixtures("fix1"), ...]
+    ///
+    /// `value` is `None` for bare annotated assignments (`pytestmark: T`) which are a no-op.
+    fn visit_pytestmark_assignment(
+        &self,
+        value: Option<&Expr>,
+        file_path: &PathBuf,
+        line_index: &[usize],
+    ) {
+        let Some(value) = value else {
+            return;
+        };
+
+        let usefixtures = decorators::extract_usefixtures_from_expr(value);
+        for (fixture_name, range) in usefixtures {
+            let usage_line = self.get_line_from_offset(range.start().to_usize(), line_index);
+            let start_char =
+                self.get_char_position_from_offset(range.start().to_usize(), line_index);
+            let end_char = self.get_char_position_from_offset(range.end().to_usize(), line_index);
+
+            info!(
+                "Found usefixtures usage via pytestmark assignment: {} at {:?}:{}:{}",
+                fixture_name, file_path, usage_line, start_char
+            );
+
+            self.record_fixture_usage(
+                file_path,
+                fixture_name,
+                usage_line,
+                start_char.saturating_add(1),
+                end_char.saturating_sub(1),
+            );
         }
     }
 }

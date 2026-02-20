@@ -581,7 +581,8 @@ impl FixtureDatabase {
         None
     }
 
-    /// Check if the cursor is inside a decorator that needs fixture completions
+    /// Check if the cursor is inside a decorator that needs fixture completions,
+    /// or inside a pytestmark assignment's usefixtures call.
     fn check_decorator_context(
         &self,
         stmts: &[Stmt],
@@ -590,26 +591,69 @@ impl FixtureDatabase {
         line_index: &[usize],
     ) -> Option<CompletionContext> {
         for stmt in stmts {
+            // Check decorators on functions and classes
             let decorator_list = match stmt {
-                Stmt::FunctionDef(f) => &f.decorator_list,
-                Stmt::AsyncFunctionDef(f) => &f.decorator_list,
-                Stmt::ClassDef(c) => &c.decorator_list,
-                _ => continue,
+                Stmt::FunctionDef(f) => Some(f.decorator_list.as_slice()),
+                Stmt::AsyncFunctionDef(f) => Some(f.decorator_list.as_slice()),
+                Stmt::ClassDef(c) => Some(c.decorator_list.as_slice()),
+                _ => None,
             };
 
-            for decorator in decorator_list {
-                let dec_start_line =
-                    self.get_line_from_offset(decorator.range().start().to_usize(), line_index);
-                let dec_end_line =
-                    self.get_line_from_offset(decorator.range().end().to_usize(), line_index);
+            if let Some(decorator_list) = decorator_list {
+                for decorator in decorator_list {
+                    let dec_start_line =
+                        self.get_line_from_offset(decorator.range().start().to_usize(), line_index);
+                    let dec_end_line =
+                        self.get_line_from_offset(decorator.range().end().to_usize(), line_index);
 
-                if target_line >= dec_start_line && target_line <= dec_end_line {
-                    if decorators::is_usefixtures_decorator(decorator) {
-                        return Some(CompletionContext::UsefixuturesDecorator);
+                    if target_line >= dec_start_line && target_line <= dec_end_line {
+                        if decorators::is_usefixtures_decorator(decorator) {
+                            return Some(CompletionContext::UsefixuturesDecorator);
+                        }
+                        if decorators::is_parametrize_decorator(decorator) {
+                            return Some(CompletionContext::ParametrizeIndirect);
+                        }
                     }
-                    if decorators::is_parametrize_decorator(decorator) {
-                        return Some(CompletionContext::ParametrizeIndirect);
+                }
+            }
+
+            // Check pytestmark = ... and pytestmark: T = ... assignments
+            let pytestmark_value: Option<&Expr> = match stmt {
+                Stmt::Assign(assign) => {
+                    let is_pytestmark = assign
+                        .targets
+                        .iter()
+                        .any(|t| matches!(t, Expr::Name(n) if n.id.as_str() == "pytestmark"));
+                    if is_pytestmark {
+                        Some(assign.value.as_ref())
+                    } else {
+                        None
                     }
+                }
+                Stmt::AnnAssign(ann_assign) => {
+                    let is_pytestmark = matches!(
+                        ann_assign.target.as_ref(),
+                        Expr::Name(n) if n.id.as_str() == "pytestmark"
+                    );
+                    if is_pytestmark {
+                        ann_assign.value.as_ref().map(|v| v.as_ref())
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+
+            if let Some(value) = pytestmark_value {
+                let stmt_start =
+                    self.get_line_from_offset(stmt.range().start().to_usize(), line_index);
+                let stmt_end = self.get_line_from_offset(stmt.range().end().to_usize(), line_index);
+
+                if target_line >= stmt_start
+                    && target_line <= stmt_end
+                    && self.cursor_inside_usefixtures_call(value, target_line, line_index)
+                {
+                    return Some(CompletionContext::UsefixuturesDecorator);
                 }
             }
 
@@ -624,6 +668,37 @@ impl FixtureDatabase {
         }
 
         None
+    }
+
+    /// Returns true if `target_line` falls within any `pytest.mark.usefixtures(...)` call
+    /// anywhere inside `expr` (including nested in lists/tuples).
+    fn cursor_inside_usefixtures_call(
+        &self,
+        expr: &Expr,
+        target_line: usize,
+        line_index: &[usize],
+    ) -> bool {
+        match expr {
+            Expr::Call(call) => {
+                if decorators::is_usefixtures_decorator(&call.func) {
+                    let call_start =
+                        self.get_line_from_offset(expr.range().start().to_usize(), line_index);
+                    let call_end =
+                        self.get_line_from_offset(expr.range().end().to_usize(), line_index);
+                    return target_line >= call_start && target_line <= call_end;
+                }
+                false
+            }
+            Expr::List(list) => list
+                .elts
+                .iter()
+                .any(|e| self.cursor_inside_usefixtures_call(e, target_line, line_index)),
+            Expr::Tuple(tuple) => tuple
+                .elts
+                .iter()
+                .any(|e| self.cursor_inside_usefixtures_call(e, target_line, line_index)),
+            _ => false,
+        }
     }
 
     /// Get completion context when cursor is inside a function

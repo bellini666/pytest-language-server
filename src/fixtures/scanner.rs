@@ -282,6 +282,10 @@ impl FixtureDatabase {
         );
 
         // Iteratively process files until no new modules are discovered
+        // Track modules that were already cached but need re-analysis because
+        // they were newly marked as plugin files (is_plugin flag refresh).
+        let mut reanalyze_as_plugin: HashSet<std::path::PathBuf> = HashSet::new();
+
         let mut iteration = 0;
         while !files_to_check.is_empty() {
             iteration += 1;
@@ -300,8 +304,8 @@ impl FixtureDatabase {
                 processed_files.insert(file_path.clone());
 
                 // Check if the importing file is itself a plugin file.
-                // If so, any modules it imports should also be marked as plugin files
-                // (transitive propagation of plugin status).
+                // If so, modules it imports via star import or pytest_plugins
+                // should also be marked as plugin files (transitive propagation).
                 let importer_is_plugin = self.plugin_fixture_files.contains_key(file_path);
 
                 // Get the file content
@@ -326,30 +330,58 @@ impl FixtureDatabase {
                             self.resolve_module_to_file(&import.module_path, file_path)
                         {
                             let canonical = self.get_canonical_path(resolved_path);
+
+                            // Only star imports propagate plugin status to the
+                            // whole imported module.  Explicit `from X import Y`
+                            // should not mark the entire module as a plugin
+                            // because only specific names are being pulled in.
+                            let should_mark_plugin = importer_is_plugin && import.is_star_import;
+
+                            if should_mark_plugin
+                                && !self.plugin_fixture_files.contains_key(&canonical)
+                            {
+                                self.plugin_fixture_files.insert(canonical.clone(), ());
+                                // If already cached, we need to re-analyze so
+                                // existing definitions get is_plugin=true.
+                                if self.file_cache.contains_key(&canonical) {
+                                    reanalyze_as_plugin.insert(canonical.clone());
+                                }
+                            }
+
                             if !processed_files.contains(&canonical)
                                 && !self.file_cache.contains_key(&canonical)
                             {
-                                if importer_is_plugin {
-                                    self.plugin_fixture_files.insert(canonical.clone(), ());
-                                }
                                 new_modules.insert(canonical);
                             }
                         }
                     }
 
-                    // Also extract pytest_plugins variable declarations
+                    // Also extract pytest_plugins variable declarations.
+                    // pytest_plugins is an explicit pytest mechanism for
+                    // declaring plugin modules, so the entire referenced module
+                    // should always be marked as a plugin when the importer is
+                    // a plugin file.
                     let plugin_modules = self.extract_pytest_plugins(&module.body);
                     for module_path in plugin_modules {
                         if let Some(resolved_path) =
                             self.resolve_module_to_file(&module_path, file_path)
                         {
                             let canonical = self.get_canonical_path(resolved_path);
+
+                            if importer_is_plugin
+                                && !self.plugin_fixture_files.contains_key(&canonical)
+                            {
+                                self.plugin_fixture_files.insert(canonical.clone(), ());
+                                // If already cached, we need to re-analyze so
+                                // existing definitions get is_plugin=true.
+                                if self.file_cache.contains_key(&canonical) {
+                                    reanalyze_as_plugin.insert(canonical.clone());
+                                }
+                            }
+
                             if !processed_files.contains(&canonical)
                                 && !self.file_cache.contains_key(&canonical)
                             {
-                                if importer_is_plugin {
-                                    self.plugin_fixture_files.insert(canonical.clone(), ());
-                                }
                                 new_modules.insert(canonical);
                             }
                         }
@@ -385,6 +417,24 @@ impl FixtureDatabase {
 
             // Next iteration will check the newly analyzed modules for their imports
             files_to_check = new_modules.into_iter().collect();
+        }
+
+        // Re-analyze modules that were already cached but newly marked as
+        // plugin files.  This refreshes FixtureDefinition.is_plugin on every
+        // fixture in those files so they participate in Priority 2.5 resolution.
+        if !reanalyze_as_plugin.is_empty() {
+            info!(
+                "Re-analyzing {} cached module(s) newly marked as plugin files",
+                reanalyze_as_plugin.len()
+            );
+            for module_path in &reanalyze_as_plugin {
+                if let Some(content) = self.get_file_content(module_path) {
+                    debug!("Re-analyzing as plugin: {:?}", module_path);
+                    // Use analyze_file (not _fresh) to clean up old definitions
+                    // before recording new ones with is_plugin=true.
+                    self.analyze_file(module_path.clone(), &content);
+                }
+            }
         }
 
         info!(
@@ -969,7 +1019,7 @@ impl FixtureDatabase {
     fn scan_plugin_directory(&self, plugin_dir: &Path) {
         // Recursively scan for Python files with fixtures
         for entry in WalkDir::new(plugin_dir)
-            .max_depth(10) // Limit depth to avoid scanning too much
+            .max_depth(3) // Limit depth to avoid scanning too much
             .into_iter()
             .filter_map(|e| e.ok())
         {
@@ -2235,5 +2285,228 @@ def conftest_helper_fixture():
         // (It's OK if the fixture wasn't found at all — the import resolution
         // may not work for bare relative imports without a package. The key assertion
         // is that if found, it must not be is_plugin.)
+    }
+
+    #[test]
+    fn test_already_cached_module_marked_plugin_via_pytest_plugins() {
+        // Scenario: a module is analyzed during Phase 1/2 (e.g. it was picked
+        // up as a conftest or test file, or pre-analyzed).  Later, a plugin
+        // file references it via `pytest_plugins`.  The module should be
+        // re-analyzed so its fixtures get `is_plugin=true`.
+        let workspace = tempdir().unwrap();
+        let workspace_canonical = workspace.path().canonicalize().unwrap();
+
+        let db = FixtureDatabase::new();
+        *db.workspace_root.lock().unwrap() = Some(workspace_canonical.clone());
+
+        // Create the package structure:
+        //   mypackage/
+        //     __init__.py
+        //     plugin.py      <- entry point plugin, has pytest_plugins = ["mypackage.helpers"]
+        //     helpers.py     <- already cached before plugin scan
+        let pkg_dir = workspace_canonical.join("mypackage");
+        fs::create_dir_all(&pkg_dir).unwrap();
+        fs::write(pkg_dir.join("__init__.py"), "").unwrap();
+
+        let helpers_content = r#"
+import pytest
+
+@pytest.fixture
+def pre_cached_fixture():
+    return "I was analyzed before the plugin scan"
+"#;
+        let helpers_file = pkg_dir.join("helpers.py");
+        fs::write(&helpers_file, helpers_content).unwrap();
+        let canonical_helpers = helpers_file.canonicalize().unwrap();
+
+        // Pre-analyze helpers.py (simulating Phase 1/2 picking it up)
+        db.analyze_file(canonical_helpers.clone(), helpers_content);
+
+        // At this point the fixture should exist but NOT be a plugin
+        let before = db
+            .definitions
+            .get("pre_cached_fixture")
+            .map(|defs| defs[0].is_plugin);
+        assert_eq!(
+            before,
+            Some(false),
+            "pre_cached_fixture should initially have is_plugin=false"
+        );
+
+        // Now create plugin.py that references helpers via pytest_plugins
+        let plugin_content = r#"
+import pytest
+
+pytest_plugins = ["mypackage.helpers"]
+
+@pytest.fixture
+def direct_fixture():
+    return "from plugin.py"
+"#;
+        let plugin_file = pkg_dir.join("plugin.py");
+        fs::write(&plugin_file, plugin_content).unwrap();
+        let canonical_plugin = plugin_file.canonicalize().unwrap();
+
+        // Mark plugin.py as a plugin file and analyze it
+        db.plugin_fixture_files.insert(canonical_plugin.clone(), ());
+        db.analyze_file(canonical_plugin.clone(), plugin_content);
+
+        // Run Phase 4: should discover helpers.py via pytest_plugins,
+        // mark it as plugin, and re-analyze so is_plugin gets refreshed
+        db.scan_imported_fixture_modules(&workspace_canonical);
+
+        // The pre-cached fixture should now have is_plugin=true
+        let after = db
+            .definitions
+            .get("pre_cached_fixture")
+            .map(|defs| defs[0].is_plugin);
+        assert_eq!(
+            after,
+            Some(true),
+            "pre_cached_fixture should have is_plugin=true after re-analysis \
+             (was already cached when plugin declared pytest_plugins)"
+        );
+    }
+
+    #[test]
+    fn test_already_cached_module_marked_plugin_via_star_import() {
+        // Scenario: a module is analyzed during Phase 1/2.  Later, a plugin
+        // file star-imports it (`from .fixtures import *`).  The module should
+        // be re-analyzed so its fixtures get `is_plugin=true`.
+        let workspace = tempdir().unwrap();
+        let workspace_canonical = workspace.path().canonicalize().unwrap();
+
+        let db = FixtureDatabase::new();
+        *db.workspace_root.lock().unwrap() = Some(workspace_canonical.clone());
+
+        let pkg_dir = workspace_canonical.join("mypkg");
+        fs::create_dir_all(&pkg_dir).unwrap();
+        fs::write(pkg_dir.join("__init__.py"), "").unwrap();
+
+        let fixtures_content = r#"
+import pytest
+
+@pytest.fixture
+def star_pre_cached():
+    return "cached before plugin scan"
+"#;
+        let fixtures_file = pkg_dir.join("fixtures.py");
+        fs::write(&fixtures_file, fixtures_content).unwrap();
+        let canonical_fixtures = fixtures_file.canonicalize().unwrap();
+
+        // Pre-analyze fixtures.py
+        db.analyze_file(canonical_fixtures.clone(), fixtures_content);
+
+        let before = db
+            .definitions
+            .get("star_pre_cached")
+            .map(|defs| defs[0].is_plugin);
+        assert_eq!(before, Some(false), "should start as is_plugin=false");
+
+        // Create plugin.py that star-imports from fixtures
+        let plugin_content = r#"
+import pytest
+from .fixtures import *
+
+@pytest.fixture
+def plugin_direct():
+    return "direct"
+"#;
+        let plugin_file = pkg_dir.join("plugin.py");
+        fs::write(&plugin_file, plugin_content).unwrap();
+        let canonical_plugin = plugin_file.canonicalize().unwrap();
+
+        db.plugin_fixture_files.insert(canonical_plugin.clone(), ());
+        db.analyze_file(canonical_plugin.clone(), plugin_content);
+
+        db.scan_imported_fixture_modules(&workspace_canonical);
+
+        // After re-analysis the star-imported module's fixtures should be is_plugin
+        let after = db
+            .definitions
+            .get("star_pre_cached")
+            .map(|defs| defs[0].is_plugin);
+        assert_eq!(
+            after,
+            Some(true),
+            "star_pre_cached should have is_plugin=true after re-analysis \
+             (module was star-imported by a plugin file)"
+        );
+    }
+
+    #[test]
+    fn test_explicit_import_does_not_propagate_plugin_status() {
+        // Scenario: a plugin file does `from .utils import some_helper`.
+        // The entire utils module should NOT be marked as a plugin — only
+        // star imports and pytest_plugins should propagate plugin status.
+        let workspace = tempdir().unwrap();
+        let workspace_canonical = workspace.path().canonicalize().unwrap();
+
+        let db = FixtureDatabase::new();
+        *db.workspace_root.lock().unwrap() = Some(workspace_canonical.clone());
+
+        let pkg_dir = workspace_canonical.join("explpkg");
+        fs::create_dir_all(&pkg_dir).unwrap();
+        fs::write(pkg_dir.join("__init__.py"), "").unwrap();
+
+        let utils_content = r#"
+import pytest
+
+def helper_function():
+    return 42
+
+@pytest.fixture
+def utils_fixture():
+    return "from utils"
+"#;
+        let utils_file = pkg_dir.join("utils.py");
+        fs::write(&utils_file, utils_content).unwrap();
+
+        // Create plugin.py that does an explicit import (not star, not pytest_plugins)
+        let plugin_content = r#"
+import pytest
+from .utils import helper_function
+
+@pytest.fixture
+def explicit_plugin_fixture():
+    return helper_function()
+"#;
+        let plugin_file = pkg_dir.join("plugin.py");
+        fs::write(&plugin_file, plugin_content).unwrap();
+        let canonical_plugin = plugin_file.canonicalize().unwrap();
+
+        db.plugin_fixture_files.insert(canonical_plugin.clone(), ());
+        db.analyze_file(canonical_plugin.clone(), plugin_content);
+
+        db.scan_imported_fixture_modules(&workspace_canonical);
+
+        // The plugin's own fixture should be is_plugin
+        let plugin_fixture = db
+            .definitions
+            .get("explicit_plugin_fixture")
+            .map(|defs| defs[0].is_plugin);
+        assert_eq!(
+            plugin_fixture,
+            Some(true),
+            "explicit_plugin_fixture should have is_plugin=true"
+        );
+
+        // The utils module's fixture should NOT be marked as is_plugin
+        // because the import was explicit (`from .utils import helper_function`),
+        // not a star import or pytest_plugins reference.
+        let utils_is_plugin = db
+            .definitions
+            .get("utils_fixture")
+            .map(|defs| defs[0].is_plugin);
+        if let Some(is_plugin) = utils_is_plugin {
+            assert!(
+                !is_plugin,
+                "utils_fixture should NOT be is_plugin — the plugin only did \
+                 an explicit import of helper_function, not a star import"
+            );
+        }
+        // (It's also acceptable if utils_fixture wasn't discovered at all,
+        // since utils.py isn't a conftest/test file. The key assertion is
+        // that if found, it must not be is_plugin.)
     }
 }

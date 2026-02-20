@@ -145,6 +145,68 @@ fn test_extract_usefixtures() {
 
 #[test]
 #[timeout(30000)]
+fn test_extract_usefixtures_from_expr_direct_call() {
+    let code = "pytestmark = pytest.mark.usefixtures('f1', 'f2')";
+    let parsed = parse(code, Mode::Module, "").unwrap();
+
+    if let rustpython_parser::ast::Mod::Module(module) = parsed {
+        if let rustpython_parser::ast::Stmt::Assign(assign) = &module.body[0] {
+            let names = decorators::extract_usefixtures_from_expr(&assign.value);
+            assert_eq!(names.len(), 2);
+            assert_eq!(names[0].0, "f1");
+            assert_eq!(names[1].0, "f2");
+        }
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_extract_usefixtures_from_expr_list() {
+    let code = "pytestmark = [pytest.mark.usefixtures('f1'), pytest.mark.skip, pytest.mark.usefixtures('f2')]";
+    let parsed = parse(code, Mode::Module, "").unwrap();
+
+    if let rustpython_parser::ast::Mod::Module(module) = parsed {
+        if let rustpython_parser::ast::Stmt::Assign(assign) = &module.body[0] {
+            let names = decorators::extract_usefixtures_from_expr(&assign.value);
+            assert_eq!(names.len(), 2);
+            assert_eq!(names[0].0, "f1");
+            assert_eq!(names[1].0, "f2");
+        }
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_extract_usefixtures_from_expr_tuple() {
+    let code = "pytestmark = (pytest.mark.usefixtures('f1'), pytest.mark.usefixtures('f2'))";
+    let parsed = parse(code, Mode::Module, "").unwrap();
+
+    if let rustpython_parser::ast::Mod::Module(module) = parsed {
+        if let rustpython_parser::ast::Stmt::Assign(assign) = &module.body[0] {
+            let names = decorators::extract_usefixtures_from_expr(&assign.value);
+            assert_eq!(names.len(), 2);
+            assert_eq!(names[0].0, "f1");
+            assert_eq!(names[1].0, "f2");
+        }
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_extract_usefixtures_from_expr_no_usefixtures() {
+    let code = "pytestmark = [pytest.mark.skip, pytest.mark.slow]";
+    let parsed = parse(code, Mode::Module, "").unwrap();
+
+    if let rustpython_parser::ast::Mod::Module(module) = parsed {
+        if let rustpython_parser::ast::Stmt::Assign(assign) = &module.body[0] {
+            let names = decorators::extract_usefixtures_from_expr(&assign.value);
+            assert_eq!(names.len(), 0);
+        }
+    }
+}
+
+#[test]
+#[timeout(30000)]
 fn test_is_parametrize_decorator() {
     let code = "@pytest.mark.parametrize('x', [1])\ndef test_x(x): pass";
     let parsed = parse(code, Mode::Module, "").unwrap();

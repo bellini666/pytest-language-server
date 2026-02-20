@@ -8021,6 +8021,258 @@ def test_with_mark():
     );
 }
 
+#[test]
+#[timeout(30000)]
+fn test_pytestmark_usefixtures_single() {
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def db_connection():
+    return "connection"
+"#;
+
+    let test_content = r#"
+import pytest
+
+pytestmark = pytest.mark.usefixtures("db_connection")
+
+def test_something():
+    pass
+"#;
+
+    let conftest_path = PathBuf::from("/tmp/test_pytestmark/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_pytestmark/test_single.py");
+
+    db.analyze_file(conftest_path, conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    let usages = db.usages.get(&test_path).unwrap();
+    assert!(
+        usages.iter().any(|u| u.name == "db_connection"),
+        "db_connection should be detected from pytestmark = pytest.mark.usefixtures(...)"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_pytestmark_usefixtures_list() {
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def db_connection():
+    return "connection"
+
+@pytest.fixture
+def auth_user():
+    return "user"
+"#;
+
+    let test_content = r#"
+import pytest
+
+pytestmark = [pytest.mark.usefixtures("db_connection", "auth_user"), pytest.mark.skip]
+
+def test_something():
+    pass
+"#;
+
+    let conftest_path = PathBuf::from("/tmp/test_pytestmark_list/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_pytestmark_list/test_list.py");
+
+    db.analyze_file(conftest_path, conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    let usages = db.usages.get(&test_path).unwrap();
+    assert!(
+        usages.iter().any(|u| u.name == "db_connection"),
+        "db_connection should be detected from pytestmark list"
+    );
+    assert!(
+        usages.iter().any(|u| u.name == "auth_user"),
+        "auth_user should be detected from pytestmark list"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_pytestmark_usefixtures_tuple() {
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def fix1():
+    return 1
+
+@pytest.fixture
+def fix2():
+    return 2
+"#;
+
+    let test_content = r#"
+import pytest
+
+pytestmark = (pytest.mark.usefixtures("fix1"), pytest.mark.usefixtures("fix2"))
+
+def test_something():
+    pass
+"#;
+
+    let conftest_path = PathBuf::from("/tmp/test_pytestmark_tuple/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_pytestmark_tuple/test_tuple.py");
+
+    db.analyze_file(conftest_path, conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    let usages = db.usages.get(&test_path).unwrap();
+    assert!(
+        usages.iter().any(|u| u.name == "fix1"),
+        "fix1 should be detected from pytestmark tuple"
+    );
+    assert!(
+        usages.iter().any(|u| u.name == "fix2"),
+        "fix2 should be detected from pytestmark tuple"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_pytestmark_usefixtures_in_class() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def setup_fixture():
+    return "setup"
+
+class TestWithPytestmark:
+    pytestmark = [pytest.mark.usefixtures("setup_fixture")]
+
+    def test_something(self):
+        pass
+"#;
+
+    let file_path = PathBuf::from("/tmp/test_pytestmark_class/test_class.py");
+    db.analyze_file(file_path.clone(), content);
+
+    let usages = db.usages.get(&file_path).unwrap();
+    assert!(
+        usages.iter().any(|u| u.name == "setup_fixture"),
+        "setup_fixture should be detected from pytestmark inside class"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_pytestmark_usefixtures_affects_unused_detection() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def used_via_pytestmark():
+    return "used"
+
+@pytest.fixture
+def truly_unused():
+    return "unused"
+
+pytestmark = pytest.mark.usefixtures("used_via_pytestmark")
+
+def test_something():
+    pass
+"#;
+
+    let file_path = PathBuf::from("/tmp/test_pytestmark_unused/test_unused.py");
+    db.analyze_file(file_path.clone(), content);
+
+    let unused = db.get_unused_fixtures();
+
+    assert!(
+        !unused.iter().any(|(_, name)| name == "used_via_pytestmark"),
+        "used_via_pytestmark should NOT be in unused list"
+    );
+    assert!(
+        unused.iter().any(|(_, name)| name == "truly_unused"),
+        "truly_unused should be in unused list"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_pytestmark_usefixtures_annotated_assignment() {
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def db_connection():
+    return "connection"
+
+@pytest.fixture
+def auth_user():
+    return "user"
+"#;
+
+    let test_content = r#"
+import pytest
+from pytest import MarkDecorator
+
+pytestmark: list[MarkDecorator] = [pytest.mark.usefixtures("db_connection", "auth_user")]
+
+def test_something():
+    pass
+"#;
+
+    let conftest_path = PathBuf::from("/tmp/test_pytestmark_annassign/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_pytestmark_annassign/test_annotated.py");
+
+    db.analyze_file(conftest_path, conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    let usages = db.usages.get(&test_path).unwrap();
+    assert!(
+        usages.iter().any(|u| u.name == "db_connection"),
+        "db_connection should be detected from annotated pytestmark assignment"
+    );
+    assert!(
+        usages.iter().any(|u| u.name == "auth_user"),
+        "auth_user should be detected from annotated pytestmark assignment"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_pytestmark_bare_annotation_no_panic() {
+    // pytestmark: T  (no value) — should be handled without panic
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+from pytest import MarkDecorator
+
+pytestmark: list[MarkDecorator]
+
+def test_something():
+    pass
+"#;
+
+    let file_path = PathBuf::from("/tmp/test_pytestmark_bare_ann/test_bare.py");
+    // Should not panic or error
+    db.analyze_file(file_path.clone(), content);
+}
+
 // =============================================================================
 // pytest_plugins tests (basic detection)
 // =============================================================================
@@ -8621,6 +8873,134 @@ def test_something():
     let ctx = db.get_completion_context(&test_path, 3, 5);
 
     assert!(ctx.is_none());
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_pytestmark_usefixtures_single() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    // Line 0 (0-indexed): ""  (raw string starts with newline)
+    // Line 1: "import pytest"
+    // Line 2: ""
+    // Line 3: "pytestmark = pytest.mark.usefixtures("")"
+    let test_content = r#"
+import pytest
+
+pytestmark = pytest.mark.usefixtures("")
+"#;
+
+    let test_path = PathBuf::from("/tmp/test_completion_pytestmark/test_single.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Line 3 (0-indexed), cursor inside the empty string argument
+    // "pytestmark = pytest.mark.usefixtures("") -> quote is at col 38
+    let ctx = db.get_completion_context(&test_path, 3, 38);
+
+    assert!(
+        ctx.is_some(),
+        "Expected a completion context inside pytestmark usefixtures"
+    );
+    match ctx.unwrap() {
+        CompletionContext::UsefixuturesDecorator => {}
+        other => panic!("Expected UsefixuturesDecorator, got {:?}", other),
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_pytestmark_usefixtures_in_list() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    // Line 0: ""
+    // Line 1: "import pytest"
+    // Line 2: ""
+    // Line 3: "pytestmark = [pytest.mark.usefixtures(""), pytest.mark.skip]"
+    let test_content = r#"
+import pytest
+
+pytestmark = [pytest.mark.usefixtures(""), pytest.mark.skip]
+"#;
+
+    let test_path = PathBuf::from("/tmp/test_completion_pytestmark/test_list.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Line 3 (0-indexed), cursor inside the empty string argument
+    // "pytestmark = [pytest.mark.usefixtures("") -> quote at col 39
+    let ctx = db.get_completion_context(&test_path, 3, 39);
+
+    assert!(
+        ctx.is_some(),
+        "Expected a completion context inside pytestmark list usefixtures"
+    );
+    match ctx.unwrap() {
+        CompletionContext::UsefixuturesDecorator => {}
+        other => panic!("Expected UsefixuturesDecorator, got {:?}", other),
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_pytestmark_outside_usefixtures() {
+    // Cursor is on the pytestmark line but NOT inside a usefixtures() call
+    let db = FixtureDatabase::new();
+
+    // Line 3: "pytestmark = [pytest.mark.skip]"
+    let test_content = r#"
+import pytest
+
+pytestmark = [pytest.mark.skip]
+"#;
+
+    let test_path = PathBuf::from("/tmp/test_completion_pytestmark/test_outside.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Cursor inside pytest.mark.skip — not a usefixtures call
+    let ctx = db.get_completion_context(&test_path, 3, 20);
+
+    // Should NOT return UsefixuturesDecorator
+    assert!(
+        !matches!(
+            ctx,
+            Some(pytest_language_server::CompletionContext::UsefixuturesDecorator)
+        ),
+        "Should not return UsefixuturesDecorator for non-usefixtures marks"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_pytestmark_annotated_assignment() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    // Line 0: ""
+    // Line 1: "import pytest"
+    // Line 2: ""
+    // Line 3: "pytestmark: list = [pytest.mark.usefixtures("")]"
+    let test_content = r#"
+import pytest
+
+pytestmark: list = [pytest.mark.usefixtures("")]
+"#;
+
+    let test_path = PathBuf::from("/tmp/test_completion_pytestmark/test_annotated.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Line 3 (0-indexed), cursor inside the empty string argument
+    // "pytestmark: list = [pytest.mark.usefixtures("") -> quote at col 45
+    let ctx = db.get_completion_context(&test_path, 3, 45);
+
+    assert!(
+        ctx.is_some(),
+        "Expected completion context inside annotated pytestmark usefixtures"
+    );
+    match ctx.unwrap() {
+        CompletionContext::UsefixuturesDecorator => {}
+        other => panic!("Expected UsefixuturesDecorator, got {:?}", other),
+    }
 }
 
 #[test]

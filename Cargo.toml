@@ -29,7 +29,7 @@ once_cell = "1.21"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-clap = { version = "4.5.58", features = ["derive"] }
+clap = { version = "4.5.60", features = ["derive"] }
 colored = "3.1"
 rayon = "1.11.0"
 memchr = "2.8.0"

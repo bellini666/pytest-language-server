@@ -736,4 +736,425 @@ mod tests {
         let b = make_sort_text(1, "beta");
         assert!(a < b);
     }
+
+    // =========================================================================
+    // Integration tests for Backend completion methods
+    // =========================================================================
+
+    use crate::fixtures::FixtureDatabase;
+    use std::sync::Arc;
+    use tower_lsp_server::LspService;
+
+    /// Create a Backend instance for testing by using LspService to obtain a Client.
+    /// We capture a clone of the Backend from inside the LspService::new closure.
+    fn make_backend_with_db(db: Arc<FixtureDatabase>) -> Backend {
+        let backend_slot: Arc<std::sync::Mutex<Option<Backend>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let slot_clone = backend_slot.clone();
+        let (_svc, _sock) = LspService::new(move |client| {
+            let b = Backend::new(client, db.clone());
+            // Clone all Arc fields to capture a usable Backend outside
+            *slot_clone.lock().unwrap() = Some(Backend {
+                client: b.client.clone(),
+                fixture_db: b.fixture_db.clone(),
+                workspace_root: b.workspace_root.clone(),
+                original_workspace_root: b.original_workspace_root.clone(),
+                scan_task: b.scan_task.clone(),
+                uri_cache: b.uri_cache.clone(),
+                config: b.config.clone(),
+            });
+            b
+        });
+        let result = backend_slot
+            .lock()
+            .unwrap()
+            .take()
+            .expect("Backend should have been created");
+        result
+    }
+
+    /// Helper: build a test Backend with fixtures pre-loaded.
+    fn setup_backend_with_fixtures() -> (Backend, PathBuf) {
+        let db = Arc::new(FixtureDatabase::new());
+
+        let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def func_fixture():
+    return "func"
+
+@pytest.fixture(scope="session")
+def session_fixture():
+    """A session-scoped fixture."""
+    return "session"
+
+@pytest.fixture(scope="module")
+def module_fixture():
+    return "module"
+"#;
+
+        let test_content = r#"
+import pytest
+
+@pytest.fixture(scope="session")
+def local_session_fixture():
+    pass
+
+def test_something(func_fixture):
+    pass
+"#;
+
+        let conftest_path = PathBuf::from("/tmp/test_backend/conftest.py");
+        let test_path = PathBuf::from("/tmp/test_backend/test_example.py");
+
+        db.analyze_file(conftest_path, conftest_content);
+        db.analyze_file(test_path.clone(), test_content);
+
+        let backend = make_backend_with_db(db);
+        (backend, test_path)
+    }
+
+    fn extract_items(response: &CompletionResponse) -> &Vec<CompletionItem> {
+        match response {
+            CompletionResponse::Array(items) => items,
+            _ => panic!("Expected CompletionResponse::Array"),
+        }
+    }
+
+    // ---- create_fixture_completions ----
+
+    #[test]
+    fn test_create_fixture_completions_returns_items() {
+        let (backend, test_path) = setup_backend_with_fixtures();
+        let declared = vec![];
+        let response = backend.create_fixture_completions(&test_path, &declared, None, None);
+        let items = extract_items(&response);
+        assert!(!items.is_empty(), "Should return completion items");
+        // All items should have VARIABLE kind
+        for item in items {
+            assert_eq!(item.kind, Some(CompletionItemKind::VARIABLE));
+            assert!(item.insert_text.is_some());
+            assert!(item.sort_text.is_some());
+            assert!(item.detail.is_some());
+        }
+    }
+
+    #[test]
+    fn test_create_fixture_completions_filters_declared() {
+        let (backend, test_path) = setup_backend_with_fixtures();
+        let declared = vec!["func_fixture".to_string()];
+        let response = backend.create_fixture_completions(&test_path, &declared, None, None);
+        let items = extract_items(&response);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            !labels.contains(&"func_fixture"),
+            "func_fixture should be filtered out since it's declared"
+        );
+    }
+
+    #[test]
+    fn test_create_fixture_completions_scope_filtering() {
+        let (backend, test_path) = setup_backend_with_fixtures();
+        let declared = vec![];
+        // Session scope: only session-scoped fixtures should appear
+        let response = backend.create_fixture_completions(
+            &test_path,
+            &declared,
+            None,
+            Some(FixtureScope::Session),
+        );
+        let items = extract_items(&response);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            !labels.contains(&"func_fixture"),
+            "func_fixture should be excluded for session scope"
+        );
+        assert!(
+            labels.contains(&"session_fixture"),
+            "session_fixture should be included, got: {:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn test_create_fixture_completions_detail_and_sort() {
+        let (backend, test_path) = setup_backend_with_fixtures();
+        let declared = vec![];
+        let response = backend.create_fixture_completions(&test_path, &declared, None, None);
+        let items = extract_items(&response);
+
+        // Find the session_fixture — it should have scope in detail
+        let session_item = items.iter().find(|i| i.label == "session_fixture");
+        assert!(session_item.is_some(), "Should find session_fixture");
+        let session_item = session_item.unwrap();
+        assert!(
+            session_item.detail.as_ref().unwrap().contains("session"),
+            "session_fixture detail should contain scope, got: {:?}",
+            session_item.detail
+        );
+
+        // Find the func_fixture — default scope should not appear
+        let func_item = items.iter().find(|i| i.label == "func_fixture");
+        assert!(func_item.is_some(), "Should find func_fixture");
+        let func_item = func_item.unwrap();
+        assert!(
+            !func_item.detail.as_ref().unwrap().contains("function"),
+            "func_fixture detail should not contain 'function' (default scope), got: {:?}",
+            func_item.detail
+        );
+    }
+
+    #[test]
+    fn test_create_fixture_completions_documentation() {
+        let (backend, test_path) = setup_backend_with_fixtures();
+        let declared = vec![];
+        let response = backend.create_fixture_completions(&test_path, &declared, None, None);
+        let items = extract_items(&response);
+
+        // All items should have documentation
+        for item in items {
+            assert!(
+                item.documentation.is_some(),
+                "Item '{}' should have documentation",
+                item.label
+            );
+        }
+    }
+
+    #[test]
+    fn test_create_fixture_completions_with_workspace_root() {
+        let (backend, test_path) = setup_backend_with_fixtures();
+        let declared = vec![];
+        let workspace_root = PathBuf::from("/tmp/test_backend");
+        let response =
+            backend.create_fixture_completions(&test_path, &declared, Some(&workspace_root), None);
+        let items = extract_items(&response);
+        assert!(!items.is_empty());
+    }
+
+    // ---- create_fixture_completions_with_auto_add ----
+
+    #[test]
+    fn test_create_fixture_completions_with_auto_add_returns_items() {
+        let (backend, test_path) = setup_backend_with_fixtures();
+        let declared = vec![];
+        // function_line is 1-based internal line of `def test_something(func_fixture):`
+        // In test_content, test_something is at line 8 (1-indexed)
+        let response =
+            backend.create_fixture_completions_with_auto_add(&test_path, &declared, 8, None, None);
+        let items = extract_items(&response);
+        assert!(!items.is_empty(), "Should return completion items");
+        for item in items {
+            assert_eq!(item.kind, Some(CompletionItemKind::VARIABLE));
+            assert!(item.sort_text.is_some());
+            assert!(item.detail.is_some());
+        }
+    }
+
+    #[test]
+    fn test_create_fixture_completions_with_auto_add_has_text_edits() {
+        let (backend, test_path) = setup_backend_with_fixtures();
+        let declared = vec!["func_fixture".to_string()];
+        // Line 8 has: def test_something(func_fixture):
+        let response =
+            backend.create_fixture_completions_with_auto_add(&test_path, &declared, 8, None, None);
+        let items = extract_items(&response);
+        // Items should have additional_text_edits to add parameter
+        for item in items {
+            assert!(
+                item.additional_text_edits.is_some(),
+                "Item '{}' should have additional_text_edits for auto-add",
+                item.label
+            );
+            let edits = item.additional_text_edits.as_ref().unwrap();
+            assert_eq!(edits.len(), 1, "Should have exactly one text edit");
+        }
+    }
+
+    #[test]
+    fn test_create_fixture_completions_with_auto_add_scope_filter() {
+        let (backend, test_path) = setup_backend_with_fixtures();
+        let declared = vec![];
+        let response = backend.create_fixture_completions_with_auto_add(
+            &test_path,
+            &declared,
+            8,
+            None,
+            Some(FixtureScope::Session),
+        );
+        let items = extract_items(&response);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            !labels.contains(&"func_fixture"),
+            "func_fixture should be excluded for session scope"
+        );
+    }
+
+    #[test]
+    fn test_create_fixture_completions_with_auto_add_filters_declared() {
+        let (backend, test_path) = setup_backend_with_fixtures();
+        let declared = vec!["session_fixture".to_string(), "func_fixture".to_string()];
+        let response =
+            backend.create_fixture_completions_with_auto_add(&test_path, &declared, 8, None, None);
+        let items = extract_items(&response);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            !labels.contains(&"func_fixture"),
+            "func_fixture should be filtered"
+        );
+        assert!(
+            !labels.contains(&"session_fixture"),
+            "session_fixture should be filtered"
+        );
+    }
+
+    #[test]
+    fn test_create_fixture_completions_with_auto_add_no_existing_params() {
+        // Test the needs_comma = false branch: function with no existing parameters
+        let db = Arc::new(FixtureDatabase::new());
+
+        let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def db_fixture():
+    return "db"
+"#;
+
+        let test_content = r#"
+def test_empty_params():
+    pass
+"#;
+
+        let conftest_path = PathBuf::from("/tmp/test_no_params/conftest.py");
+        let test_path = PathBuf::from("/tmp/test_no_params/test_file.py");
+
+        db.analyze_file(conftest_path, conftest_content);
+        db.analyze_file(test_path.clone(), test_content);
+
+        let backend = make_backend_with_db(db);
+        let declared: Vec<String> = vec![];
+        // Line 2 (1-indexed) is `def test_empty_params():`
+        let response =
+            backend.create_fixture_completions_with_auto_add(&test_path, &declared, 2, None, None);
+        let items = extract_items(&response);
+        assert!(!items.is_empty(), "Should return completion items");
+
+        // The text edit should NOT have a comma since there are no existing params
+        let item = items.iter().find(|i| i.label == "db_fixture");
+        assert!(item.is_some(), "Should find db_fixture");
+        let item = item.unwrap();
+        let edits = item.additional_text_edits.as_ref().unwrap();
+        assert_eq!(edits.len(), 1);
+        // The new_text should be just the fixture name (no comma prefix)
+        assert_eq!(
+            edits[0].new_text, "db_fixture",
+            "Should insert fixture name without comma for empty params"
+        );
+    }
+
+    // ---- create_string_fixture_completions ----
+
+    #[test]
+    fn test_create_string_fixture_completions_returns_items() {
+        let (backend, test_path) = setup_backend_with_fixtures();
+        let response = backend.create_string_fixture_completions(&test_path, None);
+        let items = extract_items(&response);
+        assert!(!items.is_empty(), "Should return string completion items");
+        // String completions use TEXT kind
+        for item in items {
+            assert_eq!(
+                item.kind,
+                Some(CompletionItemKind::TEXT),
+                "String completions should use TEXT kind"
+            );
+            assert!(item.sort_text.is_some());
+            assert!(item.detail.is_some());
+            assert!(item.documentation.is_some());
+        }
+    }
+
+    #[test]
+    fn test_create_string_fixture_completions_no_scope_filtering() {
+        let (backend, test_path) = setup_backend_with_fixtures();
+        // String completions should NOT filter by scope
+        let response = backend.create_string_fixture_completions(&test_path, None);
+        let items = extract_items(&response);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        // Both function and session scoped fixtures should be present
+        assert!(
+            labels.contains(&"func_fixture"),
+            "func_fixture should be in string completions, got: {:?}",
+            labels
+        );
+        assert!(
+            labels.contains(&"session_fixture"),
+            "session_fixture should be in string completions, got: {:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn test_create_string_fixture_completions_with_workspace_root() {
+        let (backend, test_path) = setup_backend_with_fixtures();
+        let workspace_root = PathBuf::from("/tmp/test_backend");
+        let response = backend.create_string_fixture_completions(&test_path, Some(&workspace_root));
+        let items = extract_items(&response);
+        assert!(!items.is_empty());
+    }
+
+    #[test]
+    fn test_create_string_fixture_completions_has_detail_and_sort() {
+        let (backend, test_path) = setup_backend_with_fixtures();
+        let response = backend.create_string_fixture_completions(&test_path, None);
+        let items = extract_items(&response);
+
+        let session_item = items.iter().find(|i| i.label == "session_fixture");
+        assert!(session_item.is_some());
+        let session_item = session_item.unwrap();
+        assert!(
+            session_item.detail.as_ref().unwrap().contains("session"),
+            "session_fixture should have scope in detail"
+        );
+        // sort_text should be present and start with priority digit
+        let sort = session_item.sort_text.as_ref().unwrap();
+        assert!(
+            sort.starts_with('1') || sort.starts_with('0'),
+            "Sort text should start with priority digit, got: {}",
+            sort
+        );
+    }
+
+    // ---- Edge case: empty fixture database ----
+
+    #[test]
+    fn test_create_fixture_completions_empty_db() {
+        let db = Arc::new(FixtureDatabase::new());
+        let backend = make_backend_with_db(db);
+        let path = PathBuf::from("/tmp/empty/test_file.py");
+        let response = backend.create_fixture_completions(&path, &[], None, None);
+        let items = extract_items(&response);
+        assert!(items.is_empty(), "Empty DB should return no completions");
+    }
+
+    #[test]
+    fn test_create_fixture_completions_with_auto_add_empty_db() {
+        let db = Arc::new(FixtureDatabase::new());
+        let backend = make_backend_with_db(db);
+        let path = PathBuf::from("/tmp/empty/test_file.py");
+        let response = backend.create_fixture_completions_with_auto_add(&path, &[], 1, None, None);
+        let items = extract_items(&response);
+        assert!(items.is_empty(), "Empty DB should return no completions");
+    }
+
+    #[test]
+    fn test_create_string_fixture_completions_empty_db() {
+        let db = Arc::new(FixtureDatabase::new());
+        let backend = make_backend_with_db(db);
+        let path = PathBuf::from("/tmp/empty/test_file.py");
+        let response = backend.create_string_fixture_completions(&path, None);
+        let items = extract_items(&response);
+        assert!(items.is_empty(), "Empty DB should return no completions");
+    }
 }

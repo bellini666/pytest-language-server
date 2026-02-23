@@ -816,6 +816,17 @@ impl FixtureDatabase {
             return None;
         }
 
+        // Determine fixture scope for scope-aware completion filtering
+        let fixture_scope = if is_fixture {
+            let scope = decorator_list
+                .iter()
+                .find_map(decorators::extract_fixture_scope)
+                .unwrap_or(super::types::FixtureScope::Function);
+            Some(scope)
+        } else {
+            None
+        };
+
         // Collect all parameters
         let params: Vec<String> = FixtureDatabase::all_args(args)
             .map(|arg| arg.def.arg.to_string())
@@ -847,6 +858,7 @@ impl FixtureDatabase {
                 function_line: func_start_line,
                 is_fixture,
                 declared_params: params,
+                fixture_scope,
             }
         } else {
             CompletionContext::FunctionBody {
@@ -854,6 +866,7 @@ impl FixtureDatabase {
                 function_line: func_start_line,
                 is_fixture,
                 declared_params: params,
+                fixture_scope,
             }
         };
 

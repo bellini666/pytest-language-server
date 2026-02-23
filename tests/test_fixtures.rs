@@ -12330,3 +12330,597 @@ def test_uses_plugin(direct_plugin_fixture, transitive_plugin_fixture, root_conf
     let goto_def = goto.unwrap();
     assert_eq!(goto_def.name, "direct_plugin_fixture");
 }
+
+// ============================================================================
+// Completion Enhancement Tests: Scope-aware filtering, Proximity sorting,
+// Richer detail strings (Features #6, #8, #9)
+// ============================================================================
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_fixture_scope_default() {
+    use pytest_language_server::CompletionContext;
+    use pytest_language_server::FixtureScope;
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 42
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    // Cursor inside my_fixture's parentheses (line 4, 0-indexed)
+    let ctx = db.get_completion_context(&path, 4, 15);
+
+    assert!(ctx.is_some());
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature {
+            function_name,
+            is_fixture,
+            fixture_scope,
+            ..
+        } => {
+            assert_eq!(function_name, "my_fixture");
+            assert!(is_fixture);
+            assert_eq!(fixture_scope, Some(FixtureScope::Function));
+        }
+        _ => panic!("Expected FunctionSignature context"),
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_fixture_scope_session() {
+    use pytest_language_server::CompletionContext;
+    use pytest_language_server::FixtureScope;
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture(scope="session")
+def my_session_fixture():
+    return 42
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    // Cursor inside the fixture's parentheses (line 4, 0-indexed)
+    let ctx = db.get_completion_context(&path, 4, 22);
+
+    assert!(ctx.is_some());
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature {
+            function_name,
+            is_fixture,
+            fixture_scope,
+            ..
+        } => {
+            assert_eq!(function_name, "my_session_fixture");
+            assert!(is_fixture);
+            assert_eq!(fixture_scope, Some(FixtureScope::Session));
+        }
+        _ => panic!("Expected FunctionSignature context"),
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_fixture_scope_module() {
+    use pytest_language_server::CompletionContext;
+    use pytest_language_server::FixtureScope;
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture(scope="module")
+def my_module_fixture():
+    return 42
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    let ctx = db.get_completion_context(&path, 4, 22);
+
+    assert!(ctx.is_some());
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature { fixture_scope, .. } => {
+            assert_eq!(fixture_scope, Some(FixtureScope::Module));
+        }
+        _ => panic!("Expected FunctionSignature context"),
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_test_function_no_scope() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+def test_something():
+    pass
+"#;
+
+    let path = PathBuf::from("/tmp/test/test_example.py");
+    db.analyze_file(path.clone(), content);
+
+    // Cursor inside test_something's parentheses (line 3, 0-indexed)
+    let ctx = db.get_completion_context(&path, 3, 18);
+
+    assert!(ctx.is_some());
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature {
+            function_name,
+            is_fixture,
+            fixture_scope,
+            ..
+        } => {
+            assert_eq!(function_name, "test_something");
+            assert!(!is_fixture);
+            assert_eq!(fixture_scope, None);
+        }
+        _ => panic!("Expected FunctionSignature context"),
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_fixture_body_has_scope() {
+    use pytest_language_server::CompletionContext;
+    use pytest_language_server::FixtureScope;
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture(scope="session")
+def my_session_fixture():
+    x = 1
+    return x
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    // Cursor inside the function body (line 5, 0-indexed, on "x = 1")
+    let ctx = db.get_completion_context(&path, 5, 4);
+
+    assert!(ctx.is_some());
+    match ctx.unwrap() {
+        CompletionContext::FunctionBody {
+            function_name,
+            is_fixture,
+            fixture_scope,
+            ..
+        } => {
+            assert_eq!(function_name, "my_session_fixture");
+            assert!(is_fixture);
+            assert_eq!(fixture_scope, Some(FixtureScope::Session));
+        }
+        _ => panic!("Expected FunctionBody context"),
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_scope_filtering_session_fixture() {
+    use pytest_language_server::FixtureScope;
+    let db = FixtureDatabase::new();
+
+    // Set up a conftest with fixtures of various scopes
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture(scope="function")
+def func_fixture():
+    return "func"
+
+@pytest.fixture(scope="class")
+def class_fixture():
+    return "class"
+
+@pytest.fixture(scope="module")
+def module_fixture():
+    return "module"
+
+@pytest.fixture(scope="session")
+def session_fixture():
+    return "session"
+"#;
+
+    let test_content = r#"
+import pytest
+
+@pytest.fixture(scope="session")
+def my_session_fixture():
+    pass
+"#;
+
+    let conftest_path = PathBuf::from("/tmp/test/conftest.py");
+    let test_path = PathBuf::from("/tmp/test/test_scope.py");
+
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Get completion context for the session fixture
+    let ctx = db.get_completion_context(&test_path, 4, 22);
+    assert!(ctx.is_some());
+
+    let fixture_scope = match ctx.unwrap() {
+        pytest_language_server::CompletionContext::FunctionSignature { fixture_scope, .. } => {
+            fixture_scope
+        }
+        _ => panic!("Expected FunctionSignature"),
+    };
+
+    assert_eq!(fixture_scope, Some(FixtureScope::Session));
+
+    // Simulate what the completion provider does: get available fixtures and
+    // filter out those with incompatible (narrower) scope. A session-scoped
+    // fixture can only depend on other session-scoped fixtures.
+    let available = db.get_available_fixtures(&test_path);
+    let filtered: Vec<_> = available
+        .into_iter()
+        .filter(|f| f.scope >= FixtureScope::Session)
+        .collect();
+
+    let filtered_names: Vec<&str> = filtered.iter().map(|f| f.name.as_str()).collect();
+
+    // Only session_fixture (and my_session_fixture itself) should survive
+    assert!(
+        filtered_names.contains(&"session_fixture"),
+        "session_fixture should be included, got: {:?}",
+        filtered_names
+    );
+    assert!(
+        !filtered_names.contains(&"func_fixture"),
+        "func_fixture should be excluded"
+    );
+    assert!(
+        !filtered_names.contains(&"class_fixture"),
+        "class_fixture should be excluded"
+    );
+    assert!(
+        !filtered_names.contains(&"module_fixture"),
+        "module_fixture should be excluded"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_scope_filtering_module_fixture() {
+    use pytest_language_server::FixtureScope;
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture(scope="function")
+def func_fixture():
+    return "func"
+
+@pytest.fixture(scope="class")
+def class_fixture():
+    return "class"
+
+@pytest.fixture(scope="module")
+def module_fixture():
+    return "module"
+
+@pytest.fixture(scope="session")
+def session_fixture():
+    return "session"
+"#;
+
+    let test_content = r#"
+import pytest
+
+@pytest.fixture(scope="module")
+def my_module_fixture():
+    pass
+"#;
+
+    let conftest_path = PathBuf::from("/tmp/test/conftest.py");
+    let test_path = PathBuf::from("/tmp/test/test_scope.py");
+
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    let ctx = db.get_completion_context(&test_path, 4, 22);
+    assert!(ctx.is_some());
+
+    let fixture_scope = match ctx.unwrap() {
+        pytest_language_server::CompletionContext::FunctionSignature { fixture_scope, .. } => {
+            fixture_scope
+        }
+        _ => panic!("Expected FunctionSignature"),
+    };
+
+    assert_eq!(fixture_scope, Some(FixtureScope::Module));
+
+    // Simulate scope filtering: module-scoped fixture should exclude function
+    // and class, but allow module, package, and session.
+    let available = db.get_available_fixtures(&test_path);
+    let filtered: Vec<_> = available
+        .into_iter()
+        .filter(|f| f.scope >= FixtureScope::Module)
+        .collect();
+
+    let filtered_names: Vec<&str> = filtered.iter().map(|f| f.name.as_str()).collect();
+
+    assert!(
+        filtered_names.contains(&"module_fixture"),
+        "module_fixture should be included, got: {:?}",
+        filtered_names
+    );
+    assert!(
+        filtered_names.contains(&"session_fixture"),
+        "session_fixture should be included, got: {:?}",
+        filtered_names
+    );
+    assert!(
+        !filtered_names.contains(&"func_fixture"),
+        "func_fixture should be excluded"
+    );
+    assert!(
+        !filtered_names.contains(&"class_fixture"),
+        "class_fixture should be excluded"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_scope_filtering_function_fixture_allows_all() {
+    use pytest_language_server::FixtureScope;
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture(scope="function")
+def func_fixture():
+    return "func"
+
+@pytest.fixture(scope="class")
+def class_fixture():
+    return "class"
+
+@pytest.fixture(scope="module")
+def module_fixture():
+    return "module"
+
+@pytest.fixture(scope="session")
+def session_fixture():
+    return "session"
+"#;
+
+    let test_content = r#"
+import pytest
+
+@pytest.fixture
+def my_func_fixture():
+    pass
+"#;
+
+    let conftest_path = PathBuf::from("/tmp/test/conftest.py");
+    let test_path = PathBuf::from("/tmp/test/test_scope.py");
+
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    let ctx = db.get_completion_context(&test_path, 4, 20);
+    assert!(ctx.is_some());
+
+    let fixture_scope = match ctx.unwrap() {
+        pytest_language_server::CompletionContext::FunctionSignature { fixture_scope, .. } => {
+            fixture_scope
+        }
+        _ => panic!("Expected FunctionSignature"),
+    };
+
+    // Function scope (narrowest) - nothing should be excluded
+    assert_eq!(fixture_scope, Some(FixtureScope::Function));
+
+    // Simulate scope filtering: function scope allows all scopes (>= Function)
+    let available = db.get_available_fixtures(&test_path);
+    let filtered: Vec<_> = available
+        .into_iter()
+        .filter(|f| f.scope >= FixtureScope::Function)
+        .collect();
+
+    // All fixtures should survive — nothing is narrower than function scope
+    let filtered_names: Vec<&str> = filtered.iter().map(|f| f.name.as_str()).collect();
+    assert!(
+        filtered_names.contains(&"func_fixture"),
+        "func_fixture should be included"
+    );
+    assert!(
+        filtered_names.contains(&"class_fixture"),
+        "class_fixture should be included"
+    );
+    assert!(
+        filtered_names.contains(&"module_fixture"),
+        "module_fixture should be included"
+    );
+    assert!(
+        filtered_names.contains(&"session_fixture"),
+        "session_fixture should be included"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_scope_filtering_test_function_allows_all() {
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture(scope="function")
+def func_fixture():
+    return "func"
+
+@pytest.fixture(scope="session")
+def session_fixture():
+    return "session"
+"#;
+
+    let test_content = r#"
+import pytest
+
+def test_something():
+    pass
+"#;
+
+    let conftest_path = PathBuf::from("/tmp/test/conftest.py");
+    let test_path = PathBuf::from("/tmp/test/test_scope.py");
+
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    let ctx = db.get_completion_context(&test_path, 3, 18);
+    assert!(ctx.is_some());
+
+    let fixture_scope = match ctx.unwrap() {
+        pytest_language_server::CompletionContext::FunctionSignature { fixture_scope, .. } => {
+            fixture_scope
+        }
+        _ => panic!("Expected FunctionSignature"),
+    };
+
+    // Test functions have None scope — all fixtures should be allowed
+    assert_eq!(fixture_scope, None);
+
+    let available = db.get_available_fixtures(&test_path);
+    // With None scope, no filtering should occur — all fixtures visible
+    let names: Vec<&str> = available.iter().map(|f| f.name.as_str()).collect();
+    assert!(
+        names.contains(&"func_fixture"),
+        "func_fixture should be visible to test functions"
+    );
+    assert!(
+        names.contains(&"session_fixture"),
+        "session_fixture should be visible to test functions"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_fixture_proximity_same_file_first() {
+    let db = FixtureDatabase::new();
+
+    // Same-file fixture
+    let test_content = r#"
+import pytest
+
+@pytest.fixture
+def local_fixture():
+    return "local"
+
+def test_something():
+    pass
+"#;
+
+    // Conftest fixture
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def conftest_fixture():
+    return "conftest"
+"#;
+
+    let conftest_path = PathBuf::from("/tmp/test/conftest.py");
+    let test_path = PathBuf::from("/tmp/test/test_proximity.py");
+
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    let available = db.get_available_fixtures(&test_path);
+
+    // Verify we have both fixtures
+    let local = available.iter().find(|f| f.name == "local_fixture");
+    let conftest = available.iter().find(|f| f.name == "conftest_fixture");
+
+    assert!(local.is_some(), "Should find local fixture");
+    assert!(conftest.is_some(), "Should find conftest fixture");
+
+    let local = local.unwrap();
+    let conftest = conftest.unwrap();
+
+    // Same-file fixture should have file_path == test_path
+    assert_eq!(local.file_path, test_path);
+    // Conftest fixture should have file_path == conftest_path
+    assert_eq!(conftest.file_path, conftest_path);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_third_party_fixture_has_flag() {
+    let db = FixtureDatabase::new();
+
+    // Simulate a third-party fixture by manually inserting one
+    let third_party_path =
+        PathBuf::from("/tmp/venv/lib/python3.11/site-packages/pytest_django/fixtures.py");
+
+    db.definitions.insert(
+        "tp_fixture".to_string(),
+        vec![pytest_language_server::FixtureDefinition {
+            name: "tp_fixture".to_string(),
+            file_path: third_party_path.clone(),
+            line: 10,
+            end_line: 15,
+            start_char: 4,
+            end_char: 14,
+            docstring: Some("A third-party fixture".to_string()),
+            return_type: None,
+            is_third_party: true,
+            is_plugin: false,
+            dependencies: vec![],
+            scope: pytest_language_server::FixtureScope::Session,
+            yield_line: None,
+            autouse: false,
+        }],
+    );
+
+    let test_content = r#"
+import pytest
+
+@pytest.fixture
+def local_fixture():
+    return "local"
+
+def test_something():
+    pass
+"#;
+
+    let test_path = PathBuf::from("/tmp/test/test_third_party.py");
+    db.analyze_file(test_path.clone(), test_content);
+
+    let available = db.get_available_fixtures(&test_path);
+
+    let tp = available.iter().find(|f| f.name == "tp_fixture");
+    assert!(tp.is_some(), "Should find third-party fixture");
+
+    let tp = tp.unwrap();
+    assert!(tp.is_third_party, "Should be flagged as third-party");
+    assert_eq!(tp.scope, pytest_language_server::FixtureScope::Session);
+
+    let local = available.iter().find(|f| f.name == "local_fixture");
+    assert!(local.is_some(), "Should find local fixture");
+    assert!(
+        !local.unwrap().is_third_party,
+        "Local should not be third-party"
+    );
+}

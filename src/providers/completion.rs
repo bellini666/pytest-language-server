@@ -75,31 +75,25 @@ fn make_sort_text(priority: u8, fixture_name: &str) -> String {
 }
 
 /// Build a detail string for a fixture completion item.
-/// Format: `filename (scope) [origin]`
+/// Format: `(scope) [origin]`
 /// - scope is omitted when it's the default "function"
 /// - origin tag is only added for plugin or third-party fixtures
 fn make_fixture_detail(fixture: &FixtureDefinition) -> String {
-    let filename = fixture
-        .file_path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "unknown".into());
-
-    let mut detail = filename;
+    let mut parts = Vec::new();
 
     // Add scope if not the default "function"
     if fixture.scope != FixtureScope::Function {
-        detail.push_str(&format!(" ({})", fixture.scope.as_str()));
+        parts.push(format!("({})", fixture.scope.as_str()));
     }
 
     // Add origin tag
     if fixture.is_third_party {
-        detail.push_str(" [third-party]");
+        parts.push("[third-party]".to_string());
     } else if fixture.is_plugin {
-        detail.push_str(" [plugin]");
+        parts.push("[plugin]".to_string());
     }
 
-    detail
+    parts.join(" ")
 }
 
 /// A filtered and enriched fixture ready for completion item construction.
@@ -684,23 +678,22 @@ mod tests {
     fn test_make_fixture_detail_default_scope() {
         let fixture = make_fixture("f", FixtureScope::Function);
         let detail = make_fixture_detail(&fixture);
-        assert_eq!(detail, "conftest.py");
+        assert_eq!(detail, "");
     }
 
     #[test]
     fn test_make_fixture_detail_session_scope() {
         let fixture = make_fixture("f", FixtureScope::Session);
         let detail = make_fixture_detail(&fixture);
-        assert_eq!(detail, "conftest.py (session)");
+        assert_eq!(detail, "(session)");
     }
 
     #[test]
     fn test_make_fixture_detail_third_party() {
         let mut fixture = make_fixture("f", FixtureScope::Function);
         fixture.is_third_party = true;
-        fixture.file_path = PathBuf::from("/tmp/venv/lib/site-packages/pkg/fixtures.py");
         let detail = make_fixture_detail(&fixture);
-        assert_eq!(detail, "fixtures.py [third-party]");
+        assert_eq!(detail, "[third-party]");
     }
 
     #[test]
@@ -708,7 +701,7 @@ mod tests {
         let mut fixture = make_fixture("f", FixtureScope::Module);
         fixture.is_plugin = true;
         let detail = make_fixture_detail(&fixture);
-        assert_eq!(detail, "conftest.py (module) [plugin]");
+        assert_eq!(detail, "(module) [plugin]");
     }
 
     #[test]
@@ -718,7 +711,7 @@ mod tests {
         fixture.is_plugin = true;
         let detail = make_fixture_detail(&fixture);
         // Third-party tag takes precedence
-        assert_eq!(detail, "conftest.py (session) [third-party]");
+        assert_eq!(detail, "(session) [third-party]");
     }
 
     // =========================================================================

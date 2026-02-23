@@ -113,6 +113,8 @@ pub enum CompletionContext {
         function_line: usize,
         is_fixture: bool,
         declared_params: Vec<String>,
+        /// The fixture's scope if inside a fixture function, None for test functions.
+        fixture_scope: Option<FixtureScope>,
     },
     /// Inside a function body - suggest fixtures with auto-add to parameters.
     FunctionBody {
@@ -120,6 +122,8 @@ pub enum CompletionContext {
         function_line: usize,
         is_fixture: bool,
         declared_params: Vec<String>,
+        /// The fixture's scope if inside a fixture function, None for test functions.
+        fixture_scope: Option<FixtureScope>,
     },
     /// Inside @pytest.mark.usefixtures("...") decorator - suggest fixture names as strings.
     UsefixuturesDecorator,

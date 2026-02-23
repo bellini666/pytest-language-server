@@ -12566,20 +12566,35 @@ def my_session_fixture():
 
     assert_eq!(fixture_scope, Some(FixtureScope::Session));
 
-    // Get available fixtures and verify scope ordering
+    // Simulate what the completion provider does: get available fixtures and
+    // filter out those with incompatible (narrower) scope. A session-scoped
+    // fixture can only depend on other session-scoped fixtures.
     let available = db.get_available_fixtures(&test_path);
-    let session_scope = FixtureScope::Session;
+    let filtered: Vec<_> = available
+        .into_iter()
+        .filter(|f| f.scope >= FixtureScope::Session)
+        .collect();
 
-    // Session fixture should NOT see function, class, or module scoped fixtures
-    for fixture in &available {
-        match fixture.name.as_str() {
-            "func_fixture" => assert!(fixture.scope < session_scope, "func < session"),
-            "class_fixture" => assert!(fixture.scope < session_scope, "class < session"),
-            "module_fixture" => assert!(fixture.scope < session_scope, "module < session"),
-            "session_fixture" => assert!(fixture.scope >= session_scope, "session >= session"),
-            _ => {}
-        }
-    }
+    let filtered_names: Vec<&str> = filtered.iter().map(|f| f.name.as_str()).collect();
+
+    // Only session_fixture (and my_session_fixture itself) should survive
+    assert!(
+        filtered_names.contains(&"session_fixture"),
+        "session_fixture should be included, got: {:?}",
+        filtered_names
+    );
+    assert!(
+        !filtered_names.contains(&"func_fixture"),
+        "func_fixture should be excluded"
+    );
+    assert!(
+        !filtered_names.contains(&"class_fixture"),
+        "class_fixture should be excluded"
+    );
+    assert!(
+        !filtered_names.contains(&"module_fixture"),
+        "module_fixture should be excluded"
+    );
 }
 
 #[test]
@@ -12634,19 +12649,34 @@ def my_module_fixture():
 
     assert_eq!(fixture_scope, Some(FixtureScope::Module));
 
-    // Module fixture should exclude function and class, but allow module and session
+    // Simulate scope filtering: module-scoped fixture should exclude function
+    // and class, but allow module, package, and session.
     let available = db.get_available_fixtures(&test_path);
-    let module_scope = FixtureScope::Module;
+    let filtered: Vec<_> = available
+        .into_iter()
+        .filter(|f| f.scope >= FixtureScope::Module)
+        .collect();
 
-    for fixture in &available {
-        match fixture.name.as_str() {
-            "func_fixture" => assert!(fixture.scope < module_scope),
-            "class_fixture" => assert!(fixture.scope < module_scope),
-            "module_fixture" => assert!(fixture.scope >= module_scope),
-            "session_fixture" => assert!(fixture.scope >= module_scope),
-            _ => {}
-        }
-    }
+    let filtered_names: Vec<&str> = filtered.iter().map(|f| f.name.as_str()).collect();
+
+    assert!(
+        filtered_names.contains(&"module_fixture"),
+        "module_fixture should be included, got: {:?}",
+        filtered_names
+    );
+    assert!(
+        filtered_names.contains(&"session_fixture"),
+        "session_fixture should be included, got: {:?}",
+        filtered_names
+    );
+    assert!(
+        !filtered_names.contains(&"func_fixture"),
+        "func_fixture should be excluded"
+    );
+    assert!(
+        !filtered_names.contains(&"class_fixture"),
+        "class_fixture should be excluded"
+    );
 }
 
 #[test]
@@ -12661,6 +12691,14 @@ import pytest
 @pytest.fixture(scope="function")
 def func_fixture():
     return "func"
+
+@pytest.fixture(scope="class")
+def class_fixture():
+    return "class"
+
+@pytest.fixture(scope="module")
+def module_fixture():
+    return "module"
 
 @pytest.fixture(scope="session")
 def session_fixture():
@@ -12694,18 +12732,87 @@ def my_func_fixture():
     // Function scope (narrowest) - nothing should be excluded
     assert_eq!(fixture_scope, Some(FixtureScope::Function));
 
+    // Simulate scope filtering: function scope allows all scopes (>= Function)
     let available = db.get_available_fixtures(&test_path);
-    let func_scope = FixtureScope::Function;
+    let filtered: Vec<_> = available
+        .into_iter()
+        .filter(|f| f.scope >= FixtureScope::Function)
+        .collect();
 
-    // All fixtures should have scope >= function (i.e. nothing excluded)
-    for fixture in &available {
-        assert!(
-            fixture.scope >= func_scope,
-            "Fixture {} with scope {:?} should not be excluded for function-scoped fixture",
-            fixture.name,
-            fixture.scope
-        );
-    }
+    // All fixtures should survive — nothing is narrower than function scope
+    let filtered_names: Vec<&str> = filtered.iter().map(|f| f.name.as_str()).collect();
+    assert!(
+        filtered_names.contains(&"func_fixture"),
+        "func_fixture should be included"
+    );
+    assert!(
+        filtered_names.contains(&"class_fixture"),
+        "class_fixture should be included"
+    );
+    assert!(
+        filtered_names.contains(&"module_fixture"),
+        "module_fixture should be included"
+    );
+    assert!(
+        filtered_names.contains(&"session_fixture"),
+        "session_fixture should be included"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_scope_filtering_test_function_allows_all() {
+    let db = FixtureDatabase::new();
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture(scope="function")
+def func_fixture():
+    return "func"
+
+@pytest.fixture(scope="session")
+def session_fixture():
+    return "session"
+"#;
+
+    let test_content = r#"
+import pytest
+
+def test_something():
+    pass
+"#;
+
+    let conftest_path = PathBuf::from("/tmp/test/conftest.py");
+    let test_path = PathBuf::from("/tmp/test/test_scope.py");
+
+    db.analyze_file(conftest_path.clone(), conftest_content);
+    db.analyze_file(test_path.clone(), test_content);
+
+    let ctx = db.get_completion_context(&test_path, 3, 18);
+    assert!(ctx.is_some());
+
+    let fixture_scope = match ctx.unwrap() {
+        pytest_language_server::CompletionContext::FunctionSignature { fixture_scope, .. } => {
+            fixture_scope
+        }
+        _ => panic!("Expected FunctionSignature"),
+    };
+
+    // Test functions have None scope — all fixtures should be allowed
+    assert_eq!(fixture_scope, None);
+
+    let available = db.get_available_fixtures(&test_path);
+    // With None scope, no filtering should occur — all fixtures visible
+    let names: Vec<&str> = available.iter().map(|f| f.name.as_str()).collect();
+    assert!(
+        names.contains(&"func_fixture"),
+        "func_fixture should be visible to test functions"
+    );
+    assert!(
+        names.contains(&"session_fixture"),
+        "session_fixture should be visible to test functions"
+    );
 }
 
 #[test]

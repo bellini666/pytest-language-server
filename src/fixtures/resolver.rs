@@ -661,6 +661,7 @@ impl FixtureDatabase {
     /// Extract the fixture scope from decorator text above a function definition.
     ///
     /// Scans decorator lines above `def_line_idx` for `@pytest.fixture(scope="...")`.
+    /// Searches each decorator line individually to avoid quadratic string building.
     /// Returns `None` if no scope keyword is found (caller should default to `Function`).
     fn extract_fixture_scope_from_text(
         lines: &[&str],
@@ -670,8 +671,7 @@ impl FixtureDatabase {
             return None;
         }
 
-        // Collect decorator lines above the def into a single string
-        let mut decorator_text = String::new();
+        // Scan decorator lines above the def and search each one for scope=
         let mut i = def_line_idx - 1;
         loop {
             let trimmed = lines[i].trim();
@@ -683,11 +683,16 @@ impl FixtureDatabase {
                 continue;
             }
             if trimmed.starts_with('@') {
-                // Prepend (we're scanning upward)
-                if decorator_text.is_empty() {
-                    decorator_text = trimmed.to_string();
-                } else {
-                    decorator_text = format!("{}\n{}", trimmed, decorator_text);
+                // Check this decorator line for scope="..." or scope='...'
+                for pattern in &["scope=\"", "scope='"] {
+                    if let Some(pos) = trimmed.find(pattern) {
+                        let start = pos + pattern.len();
+                        let quote_char = if pattern.ends_with('"') { '"' } else { '\'' };
+                        if let Some(end) = trimmed[start..].find(quote_char) {
+                            let scope_str = &trimmed[start..start + end];
+                            return FixtureScope::parse(scope_str);
+                        }
+                    }
                 }
                 if i == 0 {
                     break;
@@ -696,18 +701,6 @@ impl FixtureDatabase {
                 continue;
             }
             break;
-        }
-
-        // Look for scope="..." or scope='...'
-        for pattern in &["scope=\"", "scope='"] {
-            if let Some(pos) = decorator_text.find(pattern) {
-                let start = pos + pattern.len();
-                let quote_char = if pattern.ends_with('"') { '"' } else { '\'' };
-                if let Some(end) = decorator_text[start..].find(quote_char) {
-                    let scope_str = &decorator_text[start..start + end];
-                    return FixtureScope::parse(scope_str);
-                }
-            }
         }
 
         None
@@ -746,7 +739,8 @@ impl FixtureDatabase {
                     }
                 }
 
-                // Continue counting on subsequent lines up to cursor
+                // Continue counting on subsequent lines up to cursor.
+                // When i == cursor_idx this produces an empty range, which is safe.
                 for line in &lines[(i + 1)..=cursor_idx] {
                     for ch in line.chars() {
                         if ch == '(' {
@@ -764,8 +758,26 @@ impl FixtureDatabase {
                 }
 
                 // depth == 0 and cursor is on the same line as the opening —
-                // Since AST failed, we're likely in an edge case — still offer completions
+                // Only offer completions if cursor is positioned between the parens,
+                // not after a fully closed usefixtures() call.
                 if i == cursor_idx && depth == 0 {
+                    // Find the closing paren position; if cursor is before it,
+                    // we're still inside the call.
+                    if let Some(close_pos) = line[pos..].rfind(')') {
+                        let abs_close = pos + close_pos;
+                        // Cursor column is approximated by line length at this point;
+                        // but since we don't have the cursor column here, we check
+                        // whether the opening and closing paren are adjacent (empty call)
+                        // — in that case the user likely wants completions inside "()".
+                        let open_pos = pos + line[pos..].find('(').unwrap_or(0);
+                        if abs_close == open_pos + 1 {
+                            // Empty parens like usefixtures() — offer completions
+                            return Some(CompletionContext::UsefixuturesDecorator);
+                        }
+                        // Parens are balanced with content — user may be done
+                        return None;
+                    }
+                    // No closing paren found on this line — unclosed call
                     return Some(CompletionContext::UsefixuturesDecorator);
                 }
             }
@@ -808,7 +820,12 @@ impl FixtureDatabase {
             return Some(ctx);
         }
 
-        // Scan backward for def/async def
+        // Scan backward for def/async def.
+        // Known limitation: only scans up to 50 lines backward. If the cursor is
+        // deep inside a very long incomplete function body (>50 lines), the text
+        // fallback won't find the enclosing `def`. This is acceptable because the
+        // AST-based path handles complete functions of any length; this fallback
+        // only runs for syntactically invalid (incomplete) Python.
         let mut def_line_idx = None;
         let scan_limit = cursor_idx.saturating_sub(50);
 
@@ -1196,15 +1213,17 @@ impl FixtureDatabase {
 
         // Scan forward from last_sig_line looking for trailing ":"
         let lines: Vec<&str> = content.lines().collect();
-        let scan_limit = first_body_line
+        let scan_end = first_body_line
             .unwrap_or(last_sig_line + 10)
-            .min(last_sig_line + 10);
+            .min(last_sig_line + 10)
+            .min(lines.len());
+        let scan_start = last_sig_line.saturating_sub(1);
 
         for (i, line) in lines
             .iter()
             .enumerate()
-            .skip(last_sig_line.saturating_sub(1))
-            .take(lines.len().min(scan_limit) - last_sig_line.saturating_sub(1))
+            .skip(scan_start)
+            .take(scan_end.saturating_sub(scan_start))
         {
             let trimmed = line.trim();
             if trimmed.ends_with(':') {

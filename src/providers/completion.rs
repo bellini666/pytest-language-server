@@ -145,6 +145,15 @@ impl Backend {
         let uri = params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
 
+        // Check if completion was triggered by a comma — if so, prefix insert text
+        // with a space so "fixture1," becomes "fixture1, fixture2"
+        let triggered_by_comma = params
+            .context
+            .as_ref()
+            .and_then(|ctx| ctx.trigger_character.as_deref())
+            == Some(",");
+        let insert_prefix = if triggered_by_comma { " " } else { "" };
+
         info!(
             "completion request: uri={:?}, line={}, char={}",
             uri, position.line, position.character
@@ -183,6 +192,7 @@ impl Backend {
                             workspace_root.as_ref(),
                             fixture_scope,
                             current_fixture_name,
+                            insert_prefix,
                         )));
                     }
                     CompletionContext::FunctionBody {
@@ -206,6 +216,7 @@ impl Backend {
                             workspace_root.as_ref(),
                             fixture_scope,
                             current_fixture_name,
+                            insert_prefix,
                         )));
                     }
                     CompletionContext::UsefixuturesDecorator
@@ -214,6 +225,7 @@ impl Backend {
                         return Ok(Some(self.create_string_fixture_completions(
                             &file_path,
                             workspace_root.as_ref(),
+                            insert_prefix,
                         )));
                     }
                 }
@@ -234,6 +246,7 @@ impl Backend {
         workspace_root: Option<&PathBuf>,
         fixture_scope: Option<FixtureScope>,
         current_fixture_name: Option<&str>,
+        insert_prefix: &str,
     ) -> CompletionResponse {
         let available = self.fixture_db.get_available_fixtures(file_path);
         let enriched = filter_and_enrich_fixtures(
@@ -257,7 +270,7 @@ impl Backend {
                     kind: Some(CompletionItemKind::VARIABLE),
                     detail: Some(ef.detail),
                     documentation,
-                    insert_text: Some(ef.fixture.name.clone()),
+                    insert_text: Some(format!("{}{}", insert_prefix, ef.fixture.name)),
                     insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
                     sort_text: Some(ef.sort_text),
                     ..Default::default()
@@ -268,8 +281,9 @@ impl Backend {
         CompletionResponse::Array(items)
     }
 
-    /// Create completion items for fixtures with auto-add to function parameters
-    /// When a completion is confirmed, it also inserts the fixture as a parameter
+    /// Create completion items for fixtures with auto-add to function parameters.
+    /// When a completion is confirmed, it also inserts the fixture as a parameter.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_fixture_completions_with_auto_add(
         &self,
         file_path: &std::path::Path,
@@ -278,6 +292,7 @@ impl Backend {
         workspace_root: Option<&PathBuf>,
         fixture_scope: Option<FixtureScope>,
         current_fixture_name: Option<&str>,
+        insert_prefix: &str,
     ) -> CompletionResponse {
         let available = self.fixture_db.get_available_fixtures(file_path);
         let enriched = filter_and_enrich_fixtures(
@@ -320,7 +335,7 @@ impl Backend {
                     kind: Some(CompletionItemKind::VARIABLE),
                     detail: Some(ef.detail),
                     documentation,
-                    insert_text: Some(ef.fixture.name.clone()),
+                    insert_text: Some(format!("{}{}", insert_prefix, ef.fixture.name)),
                     insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
                     additional_text_edits,
                     sort_text: Some(ef.sort_text),
@@ -339,6 +354,7 @@ impl Backend {
         &self,
         file_path: &std::path::Path,
         workspace_root: Option<&PathBuf>,
+        insert_prefix: &str,
     ) -> CompletionResponse {
         let available = self.fixture_db.get_available_fixtures(file_path);
         let enriched = filter_and_enrich_fixtures(available, file_path, None, None, None);
@@ -356,8 +372,7 @@ impl Backend {
                     kind: Some(CompletionItemKind::TEXT),
                     detail: Some(ef.detail),
                     documentation,
-                    // Don't add quotes - user is already inside a string
-                    insert_text: Some(ef.fixture.name.clone()),
+                    insert_text: Some(format!("{}{}", insert_prefix, ef.fixture.name)),
                     insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
                     sort_text: Some(ef.sort_text),
                     ..Default::default()
@@ -899,7 +914,8 @@ def test_something(func_fixture):
     fn test_create_fixture_completions_returns_items() {
         let (backend, test_path) = setup_backend_with_fixtures();
         let declared = vec![];
-        let response = backend.create_fixture_completions(&test_path, &declared, None, None, None);
+        let response =
+            backend.create_fixture_completions(&test_path, &declared, None, None, None, "");
         let items = extract_items(&response);
         assert!(!items.is_empty(), "Should return completion items");
         // All items should have VARIABLE kind
@@ -915,7 +931,8 @@ def test_something(func_fixture):
     fn test_create_fixture_completions_filters_declared() {
         let (backend, test_path) = setup_backend_with_fixtures();
         let declared = vec!["func_fixture".to_string()];
-        let response = backend.create_fixture_completions(&test_path, &declared, None, None, None);
+        let response =
+            backend.create_fixture_completions(&test_path, &declared, None, None, None, "");
         let items = extract_items(&response);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(
@@ -935,6 +952,7 @@ def test_something(func_fixture):
             None,
             Some(FixtureScope::Session),
             None,
+            "",
         );
         let items = extract_items(&response);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
@@ -953,7 +971,8 @@ def test_something(func_fixture):
     fn test_create_fixture_completions_detail_and_sort() {
         let (backend, test_path) = setup_backend_with_fixtures();
         let declared = vec![];
-        let response = backend.create_fixture_completions(&test_path, &declared, None, None, None);
+        let response =
+            backend.create_fixture_completions(&test_path, &declared, None, None, None, "");
         let items = extract_items(&response);
 
         // Find the session_fixture — it should have scope in detail
@@ -981,7 +1000,8 @@ def test_something(func_fixture):
     fn test_create_fixture_completions_documentation() {
         let (backend, test_path) = setup_backend_with_fixtures();
         let declared = vec![];
-        let response = backend.create_fixture_completions(&test_path, &declared, None, None, None);
+        let response =
+            backend.create_fixture_completions(&test_path, &declared, None, None, None, "");
         let items = extract_items(&response);
 
         // All items should have documentation
@@ -1005,6 +1025,7 @@ def test_something(func_fixture):
             Some(&workspace_root),
             None,
             None,
+            "",
         );
         let items = extract_items(&response);
         assert!(!items.is_empty());
@@ -1018,7 +1039,8 @@ def test_something(func_fixture):
         let declared = vec![];
         // function_line is 1-based internal line of `def test_something(func_fixture):`
         // In test_content, test_something is at line 8 (1-indexed)
-        let response = backend.create_fixture_completions(&test_path, &declared, None, None, None);
+        let response =
+            backend.create_fixture_completions(&test_path, &declared, None, None, None, "");
         let items = extract_items(&response);
         assert!(!items.is_empty(), "Should return completion items");
         for item in items {
@@ -1033,8 +1055,9 @@ def test_something(func_fixture):
         let (backend, test_path) = setup_backend_with_fixtures();
         let declared = vec!["func_fixture".to_string()];
         // Line 8 has: def test_something(func_fixture):
-        let response = backend
-            .create_fixture_completions_with_auto_add(&test_path, &declared, 8, None, None, None);
+        let response = backend.create_fixture_completions_with_auto_add(
+            &test_path, &declared, 8, None, None, None, "",
+        );
         let items = extract_items(&response);
         // Items should have additional_text_edits to add parameter
         for item in items {
@@ -1059,6 +1082,7 @@ def test_something(func_fixture):
             None,
             Some(FixtureScope::Session),
             None,
+            "",
         );
         let items = extract_items(&response);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
@@ -1072,8 +1096,9 @@ def test_something(func_fixture):
     fn test_create_fixture_completions_with_auto_add_filters_declared() {
         let (backend, test_path) = setup_backend_with_fixtures();
         let declared = vec!["session_fixture".to_string(), "func_fixture".to_string()];
-        let response = backend
-            .create_fixture_completions_with_auto_add(&test_path, &declared, 8, None, None, None);
+        let response = backend.create_fixture_completions_with_auto_add(
+            &test_path, &declared, 8, None, None, None, "",
+        );
         let items = extract_items(&response);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(
@@ -1096,6 +1121,7 @@ def test_something(func_fixture):
             None,
             Some(FixtureScope::Function),
             Some("func_fixture"),
+            "",
         );
         let items = extract_items(&response);
         assert!(
@@ -1104,6 +1130,49 @@ def test_something(func_fixture):
         );
         // Other fixtures should still appear
         assert!(items.iter().any(|i| i.label == "session_fixture"));
+    }
+
+    #[test]
+    fn test_create_fixture_completions_comma_trigger_adds_space() {
+        let (backend, test_path) = setup_backend_with_fixtures();
+        let declared = vec![];
+        // Simulate comma trigger by passing " " as insert_prefix
+        let response =
+            backend.create_fixture_completions(&test_path, &declared, None, None, None, " ");
+        let items = extract_items(&response);
+        assert!(!items.is_empty());
+        for item in items {
+            let text = item.insert_text.as_ref().unwrap();
+            assert!(
+                text.starts_with(' '),
+                "insert_text should start with space when triggered by comma, got: {:?}",
+                text
+            );
+            // The label should NOT have the leading space
+            assert!(
+                !item.label.starts_with(' '),
+                "label should not have leading space"
+            );
+        }
+    }
+
+    #[test]
+    fn test_create_fixture_completions_no_trigger_no_space() {
+        let (backend, test_path) = setup_backend_with_fixtures();
+        let declared = vec![];
+        // No trigger character — empty prefix
+        let response =
+            backend.create_fixture_completions(&test_path, &declared, None, None, None, "");
+        let items = extract_items(&response);
+        assert!(!items.is_empty());
+        for item in items {
+            let text = item.insert_text.as_ref().unwrap();
+            assert!(
+                !text.starts_with(' '),
+                "insert_text should NOT start with space without comma trigger, got: {:?}",
+                text
+            );
+        }
     }
 
     #[test]
@@ -1133,8 +1202,9 @@ def test_empty_params():
         let backend = make_backend_with_db(db);
         let declared: Vec<String> = vec![];
         // Line 2 (1-indexed) is `def test_empty_params():`
-        let response = backend
-            .create_fixture_completions_with_auto_add(&test_path, &declared, 2, None, None, None);
+        let response = backend.create_fixture_completions_with_auto_add(
+            &test_path, &declared, 2, None, None, None, "",
+        );
         let items = extract_items(&response);
         assert!(!items.is_empty(), "Should return completion items");
 
@@ -1156,7 +1226,7 @@ def test_empty_params():
     #[test]
     fn test_create_string_fixture_completions_returns_items() {
         let (backend, test_path) = setup_backend_with_fixtures();
-        let response = backend.create_string_fixture_completions(&test_path, None);
+        let response = backend.create_string_fixture_completions(&test_path, None, "");
         let items = extract_items(&response);
         assert!(!items.is_empty(), "Should return string completion items");
         // String completions use TEXT kind
@@ -1176,7 +1246,7 @@ def test_empty_params():
     fn test_create_string_fixture_completions_no_scope_filtering() {
         let (backend, test_path) = setup_backend_with_fixtures();
         // String completions should NOT filter by scope
-        let response = backend.create_string_fixture_completions(&test_path, None);
+        let response = backend.create_string_fixture_completions(&test_path, None, "");
         let items = extract_items(&response);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         // Both function and session scoped fixtures should be present
@@ -1196,7 +1266,8 @@ def test_empty_params():
     fn test_create_string_fixture_completions_with_workspace_root() {
         let (backend, test_path) = setup_backend_with_fixtures();
         let workspace_root = PathBuf::from("/tmp/test_backend");
-        let response = backend.create_string_fixture_completions(&test_path, Some(&workspace_root));
+        let response =
+            backend.create_string_fixture_completions(&test_path, Some(&workspace_root), "");
         let items = extract_items(&response);
         assert!(!items.is_empty());
     }
@@ -1204,7 +1275,7 @@ def test_empty_params():
     #[test]
     fn test_create_string_fixture_completions_has_detail_and_sort() {
         let (backend, test_path) = setup_backend_with_fixtures();
-        let response = backend.create_string_fixture_completions(&test_path, None);
+        let response = backend.create_string_fixture_completions(&test_path, None, "");
         let items = extract_items(&response);
 
         let session_item = items.iter().find(|i| i.label == "session_fixture");
@@ -1230,7 +1301,7 @@ def test_empty_params():
         let db = Arc::new(FixtureDatabase::new());
         let backend = make_backend_with_db(db);
         let path = PathBuf::from("/tmp/empty/test_file.py");
-        let response = backend.create_fixture_completions(&path, &[], None, None, None);
+        let response = backend.create_fixture_completions(&path, &[], None, None, None, "");
         let items = extract_items(&response);
         assert!(items.is_empty(), "Empty DB should return no completions");
     }
@@ -1241,7 +1312,7 @@ def test_empty_params():
         let backend = make_backend_with_db(db);
         let path = PathBuf::from("/tmp/empty/test_file.py");
         let response =
-            backend.create_fixture_completions_with_auto_add(&path, &[], 1, None, None, None);
+            backend.create_fixture_completions_with_auto_add(&path, &[], 1, None, None, None, "");
         let items = extract_items(&response);
         assert!(items.is_empty(), "Empty DB should return no completions");
     }
@@ -1251,7 +1322,7 @@ def test_empty_params():
         let db = Arc::new(FixtureDatabase::new());
         let backend = make_backend_with_db(db);
         let path = PathBuf::from("/tmp/empty/test_file.py");
-        let response = backend.create_string_fixture_completions(&path, None);
+        let response = backend.create_string_fixture_completions(&path, None, "");
         let items = extract_items(&response);
         assert!(items.is_empty(), "Empty DB should return no completions");
     }

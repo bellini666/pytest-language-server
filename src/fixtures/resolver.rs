@@ -5,7 +5,8 @@
 
 use super::decorators;
 use super::types::{
-    CompletionContext, FixtureDefinition, FixtureUsage, ParamInsertionInfo, UndeclaredFixture,
+    CompletionContext, FixtureDefinition, FixtureScope, FixtureUsage, ParamInsertionInfo,
+    UndeclaredFixture,
 };
 use super::FixtureDatabase;
 use rustpython_parser::ast::{Expr, Ranged, Stmt};
@@ -587,29 +588,382 @@ impl FixtureDatabase {
     ) -> Option<CompletionContext> {
         let content = self.get_file_content(file_path)?;
         let target_line = (line + 1) as usize;
-        let line_index = self.get_line_index(file_path, &content);
 
-        let parsed = self.get_parsed_ast(file_path, &content)?;
+        // Try AST-based analysis first
+        let parsed = self.get_parsed_ast(file_path, &content);
 
-        if let rustpython_parser::ast::Mod::Module(module) = parsed.as_ref() {
-            // First check if we're inside a decorator
-            if let Some(ctx) =
-                self.check_decorator_context(&module.body, &content, target_line, &line_index)
-            {
-                return Some(ctx);
+        if let Some(parsed) = parsed {
+            let line_index = self.get_line_index(file_path, &content);
+
+            if let rustpython_parser::ast::Mod::Module(module) = parsed.as_ref() {
+                // First check if we're inside a decorator
+                if let Some(ctx) =
+                    self.check_decorator_context(&module.body, &content, target_line, &line_index)
+                {
+                    return Some(ctx);
+                }
+
+                // Then check for function context
+                if let Some(ctx) = self.get_function_completion_context(
+                    &module.body,
+                    &content,
+                    target_line,
+                    character as usize,
+                    &line_index,
+                ) {
+                    return Some(ctx);
+                }
             }
+        }
 
-            // Then check for function context
-            return self.get_function_completion_context(
-                &module.body,
-                &content,
-                target_line,
-                character as usize,
-                &line_index,
-            );
+        // Fallback: text-based analysis for incomplete/invalid Python
+        self.get_completion_context_from_text(&content, target_line)
+    }
+
+    /// Check whether a `@pytest.fixture` decorator appears in the lines immediately
+    /// above `def_line_idx` (0-based index into `lines`).
+    ///
+    /// Scans upward through decorator lines (lines starting with `@` after stripping
+    /// whitespace) and blank lines, stopping at the first non-decorator, non-blank line.
+    fn has_fixture_decorator_above(lines: &[&str], def_line_idx: usize) -> bool {
+        if def_line_idx == 0 {
+            return false;
+        }
+        let mut i = def_line_idx - 1;
+        loop {
+            let trimmed = lines[i].trim();
+            if trimmed.is_empty() {
+                // Skip blank lines between decorators and def
+                if i == 0 {
+                    break;
+                }
+                i -= 1;
+                continue;
+            }
+            if trimmed.starts_with('@') {
+                // Check for @pytest.fixture or @fixture (with optional parens/args)
+                if trimmed.contains("pytest.fixture") || trimmed.starts_with("@fixture") {
+                    return true;
+                }
+                // Another decorator — keep scanning upward
+                if i == 0 {
+                    break;
+                }
+                i -= 1;
+                continue;
+            }
+            // Hit a non-decorator, non-blank line — stop
+            break;
+        }
+        false
+    }
+
+    /// Extract the fixture scope from decorator text above a function definition.
+    ///
+    /// Scans decorator lines above `def_line_idx` for `@pytest.fixture(scope="...")`.
+    /// Returns `None` if no scope keyword is found (caller should default to `Function`).
+    fn extract_fixture_scope_from_text(
+        lines: &[&str],
+        def_line_idx: usize,
+    ) -> Option<FixtureScope> {
+        if def_line_idx == 0 {
+            return None;
+        }
+
+        // Collect decorator lines above the def into a single string
+        let mut decorator_text = String::new();
+        let mut i = def_line_idx - 1;
+        loop {
+            let trimmed = lines[i].trim();
+            if trimmed.is_empty() {
+                if i == 0 {
+                    break;
+                }
+                i -= 1;
+                continue;
+            }
+            if trimmed.starts_with('@') {
+                // Prepend (we're scanning upward)
+                if decorator_text.is_empty() {
+                    decorator_text = trimmed.to_string();
+                } else {
+                    decorator_text = format!("{}\n{}", trimmed, decorator_text);
+                }
+                if i == 0 {
+                    break;
+                }
+                i -= 1;
+                continue;
+            }
+            break;
+        }
+
+        // Look for scope="..." or scope='...'
+        for pattern in &["scope=\"", "scope='"] {
+            if let Some(pos) = decorator_text.find(pattern) {
+                let start = pos + pattern.len();
+                let quote_char = if pattern.ends_with('"') { '"' } else { '\'' };
+                if let Some(end) = decorator_text[start..].find(quote_char) {
+                    let scope_str = &decorator_text[start..start + end];
+                    return FixtureScope::parse(scope_str);
+                }
+            }
         }
 
         None
+    }
+
+    /// Text-based fallback for detecting usefixtures decorator and pytestmark contexts.
+    ///
+    /// Handles cases like:
+    ///   `@pytest.mark.usefixtures(`
+    ///   `pytestmark = [pytest.mark.usefixtures(`
+    ///
+    /// Returns `Some(UsefixuturesDecorator)` if the cursor appears to be inside
+    /// an unclosed `pytest.mark.usefixtures(` call.
+    fn get_usefixtures_context_from_text(
+        lines: &[&str],
+        cursor_idx: usize,
+    ) -> Option<CompletionContext> {
+        // Scan backward from cursor line looking for usefixtures pattern
+        let scan_limit = cursor_idx.saturating_sub(10);
+
+        let mut i = cursor_idx;
+        loop {
+            let line = lines[i];
+            if let Some(pos) = line.find("usefixtures(") {
+                // Found the pattern — check if cursor is inside the unclosed call
+                // Count parens from the usefixtures( position to the cursor
+                let mut depth: i32 = 0;
+
+                // Count from the opening paren on this line
+                for ch in line[pos..].chars() {
+                    if ch == '(' {
+                        depth += 1;
+                    }
+                    if ch == ')' {
+                        depth -= 1;
+                    }
+                }
+
+                // Continue counting on subsequent lines up to cursor
+                for line in &lines[(i + 1)..=cursor_idx] {
+                    for ch in line.chars() {
+                        if ch == '(' {
+                            depth += 1;
+                        }
+                        if ch == ')' {
+                            depth -= 1;
+                        }
+                    }
+                }
+
+                // If depth > 0, we're inside the unclosed usefixtures call
+                if depth > 0 {
+                    return Some(CompletionContext::UsefixuturesDecorator);
+                }
+
+                // depth == 0 and cursor is on the same line as the opening —
+                // Since AST failed, we're likely in an edge case — still offer completions
+                if i == cursor_idx && depth == 0 {
+                    return Some(CompletionContext::UsefixuturesDecorator);
+                }
+            }
+
+            if i == 0 || i <= scan_limit {
+                break;
+            }
+            i -= 1;
+        }
+
+        None
+    }
+
+    /// Text-based fallback for completion context when the AST parser fails.
+    ///
+    /// Checks for two kinds of contexts:
+    /// 1. Usefixtures/pytestmark decorator contexts (checked first, like the AST path)
+    /// 2. Function signature contexts (def/async def lines)
+    fn get_completion_context_from_text(
+        &self,
+        content: &str,
+        target_line: usize,
+    ) -> Option<CompletionContext> {
+        let mut lines: Vec<&str> = content.lines().collect();
+
+        // Feature #2: handle trailing newline — str::lines() omits the trailing
+        // empty line when content ends with '\n'
+        if content.ends_with('\n') {
+            lines.push("");
+        }
+
+        if target_line == 0 || target_line > lines.len() {
+            return None;
+        }
+
+        let cursor_idx = target_line - 1; // 0-based
+
+        // Check usefixtures/pytestmark context first (mirrors AST path priority)
+        if let Some(ctx) = Self::get_usefixtures_context_from_text(&lines, cursor_idx) {
+            return Some(ctx);
+        }
+
+        // Scan backward for def/async def
+        let mut def_line_idx = None;
+        let scan_limit = cursor_idx.saturating_sub(50);
+
+        let mut i = cursor_idx;
+        loop {
+            let trimmed = lines[i].trim();
+            if trimmed.starts_with("def ") || trimmed.starts_with("async def ") {
+                def_line_idx = Some(i);
+                break;
+            }
+            if i == 0 || i <= scan_limit {
+                break;
+            }
+            i -= 1;
+        }
+
+        let def_line_idx = def_line_idx?;
+        let def_line = lines[def_line_idx].trim();
+
+        // Extract function name
+        let name_start = if def_line.starts_with("async def ") {
+            "async def ".len()
+        } else {
+            "def ".len()
+        };
+        let remaining = &def_line[name_start..];
+        let func_name: String = remaining
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+
+        if func_name.is_empty() {
+            return None;
+        }
+
+        // Determine is_test / is_fixture
+        let is_test = func_name.starts_with("test_");
+        let is_fixture = Self::has_fixture_decorator_above(&lines, def_line_idx);
+
+        // No completions for regular functions
+        if !is_test && !is_fixture {
+            return None;
+        }
+
+        // Check parenthesis state from def line to cursor, tracking whether
+        // the cursor is inside the parentheses (between '(' and ')').
+        // We need to determine if the cursor is within the signature parens,
+        // not just whether both parens exist in the scanned range.
+        let mut paren_depth: i32 = 0;
+        let mut cursor_inside_parens = false;
+        let mut found_open = false;
+        let mut signature_closed = false; // True when ')' found AND cursor is after it
+
+        for (line_idx_offset, line) in lines[def_line_idx..=cursor_idx].iter().enumerate() {
+            let current_line_idx = def_line_idx + line_idx_offset;
+            let is_cursor_line = current_line_idx == cursor_idx;
+
+            for ch in line.chars() {
+                if ch == '(' {
+                    paren_depth += 1;
+                    if paren_depth == 1 {
+                        found_open = true;
+                    }
+                } else if ch == ')' {
+                    paren_depth -= 1;
+                    if paren_depth == 0 && found_open {
+                        // Closing paren of the signature found
+                        if !is_cursor_line {
+                            // Cursor is on a line after the closing paren
+                            signature_closed = true;
+                        }
+                        // If on cursor line, cursor might be before or after ')'
+                        // but since this is a text fallback for broken syntax,
+                        // we treat cursor on the same line as still in-signature
+                    }
+                }
+            }
+
+            // After processing the cursor line, check if we're inside parens
+            if is_cursor_line && found_open && paren_depth > 0 {
+                cursor_inside_parens = true;
+            }
+        }
+
+        // Reject only if the signature is fully closed AND the cursor is on a
+        // subsequent line (i.e. in the body area). Since this fallback only runs
+        // when the AST parse failed (incomplete/invalid Python), having both
+        // parens on the def line does NOT mean the function is complete — there
+        // may be no body yet (e.g. "def test_bla():").
+        //
+        // When the cursor is on the same line as the def (between or after the
+        // parens), we still offer completions because the user is likely still
+        // editing the signature of an incomplete function.
+        if signature_closed && !cursor_inside_parens {
+            return None;
+        }
+
+        // If both parens are present on the def line but cursor is on that same
+        // line or inside parens, we still want to provide completions.
+        // Also handle the case where the cursor is on the def line after '):'
+        // — this is still useful since the function has no body.
+
+        // Extract existing parameters
+        let mut declared_params = Vec::new();
+        if found_open {
+            let mut param_text = String::new();
+            let mut past_open = false;
+            let mut past_close = false;
+            for line in &lines[def_line_idx..=cursor_idx] {
+                for ch in line.chars() {
+                    if past_close {
+                        // Stop collecting after closing paren
+                        continue;
+                    } else if past_open {
+                        if ch == ')' {
+                            past_close = true;
+                        } else {
+                            param_text.push(ch);
+                        }
+                    } else if ch == '(' {
+                        past_open = true;
+                    }
+                }
+                if past_open && !past_close {
+                    param_text.push(' ');
+                }
+            }
+            for param in param_text.split(',') {
+                let name: String = param
+                    .trim()
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if !name.is_empty() {
+                    declared_params.push(name);
+                }
+            }
+        }
+
+        // Determine fixture scope
+        let fixture_scope = if is_fixture {
+            let scope = Self::extract_fixture_scope_from_text(&lines, def_line_idx)
+                .unwrap_or(FixtureScope::Function);
+            Some(scope)
+        } else {
+            None
+        };
+
+        Some(CompletionContext::FunctionSignature {
+            function_name: func_name,
+            function_line: def_line_idx + 1, // 1-based
+            is_fixture,
+            declared_params,
+            fixture_scope,
+        })
     }
 
     /// Check if the cursor is inside a decorator that needs fixture completions,
@@ -748,6 +1102,8 @@ impl FixtureDatabase {
                         &func_def.name,
                         &func_def.decorator_list,
                         &func_def.args,
+                        &func_def.returns,
+                        &func_def.body,
                         func_def.range,
                         content,
                         target_line,
@@ -762,6 +1118,8 @@ impl FixtureDatabase {
                         &func_def.name,
                         &func_def.decorator_list,
                         &func_def.args,
+                        &func_def.returns,
+                        &func_def.body,
                         func_def.range,
                         content,
                         target_line,
@@ -789,6 +1147,80 @@ impl FixtureDatabase {
         None
     }
 
+    /// Find the line where the function signature ends (the line containing the trailing `:`).
+    ///
+    /// Uses AST range information from arguments, return annotation, and body statements
+    /// to locate the signature boundary. Falls back to scanning for `:` after the last
+    /// known signature element.
+    fn find_signature_end_line(
+        &self,
+        func_start_line: usize,
+        args: &rustpython_parser::ast::Arguments,
+        returns: &Option<Box<Expr>>,
+        body: &[Stmt],
+        content: &str,
+        line_index: &[usize],
+    ) -> usize {
+        // Find the last AST element in the signature
+        let mut last_sig_offset: Option<usize> = None;
+
+        // Check return annotation
+        if let Some(ret) = returns {
+            last_sig_offset = Some(ret.range().end().to_usize());
+        }
+
+        // Check all argument categories for the one ending latest
+        let all_arg_ends = args
+            .args
+            .iter()
+            .chain(args.posonlyargs.iter())
+            .chain(args.kwonlyargs.iter())
+            .map(|a| a.def.range.end().to_usize())
+            .chain(args.vararg.as_ref().map(|a| a.range.end().to_usize()))
+            .chain(args.kwarg.as_ref().map(|a| a.range.end().to_usize()));
+
+        if let Some(max_arg_end) = all_arg_ends.max() {
+            last_sig_offset =
+                Some(last_sig_offset.map_or(max_arg_end, |prev| prev.max(max_arg_end)));
+        }
+
+        // Convert to line number
+        let last_sig_line = last_sig_offset
+            .map(|offset| self.get_line_from_offset(offset, line_index))
+            .unwrap_or(func_start_line);
+
+        // Upper bound: line before first body statement
+        let first_body_line = body
+            .first()
+            .map(|stmt| self.get_line_from_offset(stmt.range().start().to_usize(), line_index));
+
+        // Scan forward from last_sig_line looking for trailing ":"
+        let lines: Vec<&str> = content.lines().collect();
+        let scan_limit = first_body_line
+            .unwrap_or(last_sig_line + 10)
+            .min(last_sig_line + 10);
+
+        for (i, line) in lines
+            .iter()
+            .enumerate()
+            .skip(last_sig_line.saturating_sub(1))
+            .take(lines.len().min(scan_limit) - last_sig_line.saturating_sub(1))
+        {
+            let trimmed = line.trim();
+            if trimmed.ends_with(':') {
+                return i + 1; // Convert to 1-based
+            }
+        }
+
+        // Fallback: if body exists, signature ends on the line before the body
+        if let Some(body_line) = first_body_line {
+            return body_line.saturating_sub(1).max(func_start_line);
+        }
+
+        // Last resort: function start line
+        func_start_line
+    }
+
     /// Helper to get function completion context
     #[allow(clippy::too_many_arguments)]
     fn get_func_context(
@@ -796,6 +1228,8 @@ impl FixtureDatabase {
         func_name: &rustpython_parser::ast::Identifier,
         decorator_list: &[Expr],
         args: &rustpython_parser::ast::Arguments,
+        returns: &Option<Box<Expr>>,
+        body: &[Stmt],
         range: rustpython_parser::text_size::TextRange,
         content: &str,
         target_line: usize,
@@ -832,23 +1266,9 @@ impl FixtureDatabase {
             .map(|arg| arg.def.arg.to_string())
             .collect();
 
-        // Find the line where the function signature ends
-        let lines: Vec<&str> = content.lines().collect();
-
-        let mut sig_end_line = func_start_line;
-        for (i, line) in lines
-            .iter()
-            .enumerate()
-            .skip(func_start_line.saturating_sub(1))
-        {
-            if line.contains("):") {
-                sig_end_line = i + 1;
-                break;
-            }
-            if i + 1 > func_start_line + 10 {
-                break;
-            }
-        }
+        // Find the line where the function signature ends using AST information
+        let sig_end_line =
+            self.find_signature_end_line(func_start_line, args, returns, body, content, line_index);
 
         let in_signature = target_line <= sig_end_line;
 

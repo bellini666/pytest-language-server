@@ -740,14 +740,16 @@ impl FixtureDatabase {
                 }
 
                 // Continue counting on subsequent lines up to cursor.
-                // When i == cursor_idx this produces an empty range, which is safe.
-                for line in &lines[(i + 1)..=cursor_idx] {
-                    for ch in line.chars() {
-                        if ch == '(' {
-                            depth += 1;
-                        }
-                        if ch == ')' {
-                            depth -= 1;
+                // Skip when i == cursor_idx since (i + 1)..=cursor_idx would panic.
+                if i < cursor_idx {
+                    for line in &lines[(i + 1)..=cursor_idx] {
+                        for ch in line.chars() {
+                            if ch == '(' {
+                                depth += 1;
+                            }
+                            if ch == ')' {
+                                depth -= 1;
+                            }
                         }
                     }
                 }

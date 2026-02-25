@@ -1059,7 +1059,8 @@ def test_something(func_fixture):
         };
         // function_line is 1-based internal line of `def test_something(func_fixture):`
         // In test_content, test_something is at line 8 (1-indexed)
-        let response = backend.create_fixture_completions(&test_path, &declared, None, &opts);
+        let response =
+            backend.create_fixture_completions_with_auto_add(&test_path, &declared, 8, None, &opts);
         let items = extract_items(&response);
         assert!(!items.is_empty(), "Should return completion items");
         for item in items {

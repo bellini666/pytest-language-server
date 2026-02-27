@@ -182,7 +182,7 @@ impl Backend {
                             fixture_scope,
                         )));
                     }
-                    CompletionContext::UsefixuturesDecorator
+                    CompletionContext::UsefixturesDecorator
                     | CompletionContext::ParametrizeIndirect => {
                         // In decorator - suggest fixture names as strings
                         return Ok(Some(self.create_string_fixture_completions(

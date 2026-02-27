@@ -639,7 +639,7 @@ impl FixtureDatabase {
 
                     if target_line >= dec_start_line && target_line <= dec_end_line {
                         if decorators::is_usefixtures_decorator(decorator) {
-                            return Some(CompletionContext::UsefixuturesDecorator);
+                            return Some(CompletionContext::UsefixturesDecorator);
                         }
                         if decorators::is_parametrize_decorator(decorator) {
                             return Some(CompletionContext::ParametrizeIndirect);
@@ -684,7 +684,7 @@ impl FixtureDatabase {
                     && target_line <= stmt_end
                     && self.cursor_inside_usefixtures_call(value, target_line, line_index)
                 {
-                    return Some(CompletionContext::UsefixuturesDecorator);
+                    return Some(CompletionContext::UsefixturesDecorator);
                 }
             }
 

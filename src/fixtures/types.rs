@@ -126,7 +126,7 @@ pub enum CompletionContext {
         fixture_scope: Option<FixtureScope>,
     },
     /// Inside @pytest.mark.usefixtures("...") decorator - suggest fixture names as strings.
-    UsefixuturesDecorator,
+    UsefixturesDecorator,
     /// Inside @pytest.mark.parametrize(..., indirect=...) - suggest fixture names as strings.
     ParametrizeIndirect,
 }

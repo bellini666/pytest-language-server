@@ -2007,8 +2007,8 @@ def test_example():
 
     assert!(ctx.is_some(), "Should detect usefixtures decorator context");
     match ctx.unwrap() {
-        CompletionContext::UsefixuturesDecorator => {}
-        _ => panic!("Expected UsefixuturesDecorator context"),
+        CompletionContext::UsefixturesDecorator => {}
+        _ => panic!("Expected UsefixturesDecorator context"),
     }
 }
 

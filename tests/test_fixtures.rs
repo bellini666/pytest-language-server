@@ -8846,8 +8846,8 @@ def test_something():
 
     assert!(ctx.is_some());
     match ctx.unwrap() {
-        CompletionContext::UsefixuturesDecorator => {}
-        _ => panic!("Expected UsefixuturesDecorator context"),
+        CompletionContext::UsefixturesDecorator => {}
+        _ => panic!("Expected UsefixturesDecorator context"),
     }
 }
 
@@ -8903,8 +8903,8 @@ pytestmark = pytest.mark.usefixtures("")
         "Expected a completion context inside pytestmark usefixtures"
     );
     match ctx.unwrap() {
-        CompletionContext::UsefixuturesDecorator => {}
-        other => panic!("Expected UsefixuturesDecorator, got {:?}", other),
+        CompletionContext::UsefixturesDecorator => {}
+        other => panic!("Expected UsefixturesDecorator, got {:?}", other),
     }
 }
 
@@ -8936,8 +8936,8 @@ pytestmark = [pytest.mark.usefixtures(""), pytest.mark.skip]
         "Expected a completion context inside pytestmark list usefixtures"
     );
     match ctx.unwrap() {
-        CompletionContext::UsefixuturesDecorator => {}
-        other => panic!("Expected UsefixuturesDecorator, got {:?}", other),
+        CompletionContext::UsefixturesDecorator => {}
+        other => panic!("Expected UsefixturesDecorator, got {:?}", other),
     }
 }
 
@@ -8960,13 +8960,13 @@ pytestmark = [pytest.mark.skip]
     // Cursor inside pytest.mark.skip — not a usefixtures call
     let ctx = db.get_completion_context(&test_path, 3, 20);
 
-    // Should NOT return UsefixuturesDecorator
+    // Should NOT return UsefixturesDecorator
     assert!(
         !matches!(
             ctx,
-            Some(pytest_language_server::CompletionContext::UsefixuturesDecorator)
+            Some(pytest_language_server::CompletionContext::UsefixturesDecorator)
         ),
-        "Should not return UsefixuturesDecorator for non-usefixtures marks"
+        "Should not return UsefixturesDecorator for non-usefixtures marks"
     );
 }
 
@@ -8998,8 +8998,8 @@ pytestmark: list = [pytest.mark.usefixtures("")]
         "Expected completion context inside annotated pytestmark usefixtures"
     );
     match ctx.unwrap() {
-        CompletionContext::UsefixuturesDecorator => {}
-        other => panic!("Expected UsefixuturesDecorator, got {:?}", other),
+        CompletionContext::UsefixturesDecorator => {}
+        other => panic!("Expected UsefixturesDecorator, got {:?}", other),
     }
 }
 

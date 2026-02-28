@@ -712,7 +712,7 @@ impl FixtureDatabase {
     ///   `@pytest.mark.usefixtures(`
     ///   `pytestmark = [pytest.mark.usefixtures(`
     ///
-    /// Returns `Some(UsefixuturesDecorator)` if the cursor appears to be inside
+    /// Returns `Some(UsefixturesDecorator)` if the cursor appears to be inside
     /// an unclosed `pytest.mark.usefixtures(` call.
     fn get_usefixtures_context_from_text(
         lines: &[&str],
@@ -756,7 +756,7 @@ impl FixtureDatabase {
 
                 // If depth > 0, we're inside the unclosed usefixtures call
                 if depth > 0 {
-                    return Some(CompletionContext::UsefixuturesDecorator);
+                    return Some(CompletionContext::UsefixturesDecorator);
                 }
 
                 // depth == 0 and cursor is on the same line as the opening —
@@ -774,13 +774,13 @@ impl FixtureDatabase {
                         let open_pos = pos + line[pos..].find('(').unwrap_or(0);
                         if abs_close == open_pos + 1 {
                             // Empty parens like usefixtures() — offer completions
-                            return Some(CompletionContext::UsefixuturesDecorator);
+                            return Some(CompletionContext::UsefixturesDecorator);
                         }
                         // Parens are balanced with content — user may be done
                         return None;
                     }
                     // No closing paren found on this line — unclosed call
-                    return Some(CompletionContext::UsefixuturesDecorator);
+                    return Some(CompletionContext::UsefixturesDecorator);
                 }
             }
 

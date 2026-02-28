@@ -13557,8 +13557,8 @@ fn test_completion_context_incomplete_usefixtures_decorator() {
         "Should get usefixtures context from text fallback"
     );
     match ctx.unwrap() {
-        CompletionContext::UsefixuturesDecorator => {}
-        other => panic!("Expected UsefixuturesDecorator, got {:?}", other),
+        CompletionContext::UsefixturesDecorator => {}
+        other => panic!("Expected UsefixturesDecorator, got {:?}", other),
     }
 }
 
@@ -13581,8 +13581,8 @@ fn test_completion_context_incomplete_usefixtures_with_function_below() {
         "Should get usefixtures context with function below"
     );
     match ctx.unwrap() {
-        CompletionContext::UsefixuturesDecorator => {}
-        other => panic!("Expected UsefixuturesDecorator, got {:?}", other),
+        CompletionContext::UsefixturesDecorator => {}
+        other => panic!("Expected UsefixturesDecorator, got {:?}", other),
     }
 }
 
@@ -13605,8 +13605,8 @@ fn test_completion_context_incomplete_pytestmark_usefixtures() {
         "Should get usefixtures context in pytestmark list"
     );
     match ctx.unwrap() {
-        CompletionContext::UsefixuturesDecorator => {}
-        other => panic!("Expected UsefixuturesDecorator, got {:?}", other),
+        CompletionContext::UsefixturesDecorator => {}
+        other => panic!("Expected UsefixturesDecorator, got {:?}", other),
     }
 }
 
@@ -13629,8 +13629,8 @@ fn test_completion_context_incomplete_pytestmark_usefixtures_unclosed_bracket() 
         "Should get usefixtures context with unclosed bracket"
     );
     match ctx.unwrap() {
-        CompletionContext::UsefixuturesDecorator => {}
-        other => panic!("Expected UsefixuturesDecorator, got {:?}", other),
+        CompletionContext::UsefixturesDecorator => {}
+        other => panic!("Expected UsefixturesDecorator, got {:?}", other),
     }
 }
 
@@ -13653,8 +13653,8 @@ fn test_completion_context_incomplete_pytestmark_usefixtures_closed_paren() {
         "Should get usefixtures context when cursor inside ()"
     );
     match ctx.unwrap() {
-        CompletionContext::UsefixuturesDecorator => {}
-        other => panic!("Expected UsefixuturesDecorator, got {:?}", other),
+        CompletionContext::UsefixturesDecorator => {}
+        other => panic!("Expected UsefixturesDecorator, got {:?}", other),
     }
 }
 
@@ -14026,8 +14026,8 @@ fn test_completion_context_text_fallback_usefixtures_balanced_with_content() {
     // Should fall through to the function signature context for the def on line 1,
     // or return None for line 0 since it's not inside usefixtures
     // Any other result (None or FunctionSignature) is acceptable
-    if let Some(CompletionContext::UsefixuturesDecorator) = ctx {
-        panic!("Should NOT return UsefixuturesDecorator for balanced usefixtures with content");
+    if let Some(CompletionContext::UsefixturesDecorator) = ctx {
+        panic!("Should NOT return UsefixturesDecorator for balanced usefixtures with content");
     }
 }
 
@@ -14051,8 +14051,8 @@ fn test_completion_context_text_fallback_usefixtures_empty_parens() {
         "Empty usefixtures() should offer completions via text fallback"
     );
     match ctx.unwrap() {
-        CompletionContext::UsefixuturesDecorator => {}
-        other => panic!("Expected UsefixuturesDecorator, got {:?}", other),
+        CompletionContext::UsefixturesDecorator => {}
+        other => panic!("Expected UsefixturesDecorator, got {:?}", other),
     }
 }
 
@@ -14088,8 +14088,8 @@ fn test_completion_context_text_fallback_usefixtures_no_close_paren_on_line() {
 
     let ctx = db.get_completion_context(&path, 0, 30);
     // Balanced with content — should NOT offer usefixtures completions
-    if let Some(CompletionContext::UsefixuturesDecorator) = ctx {
-        panic!("Should NOT return UsefixuturesDecorator for balanced usefixtures(func())");
+    if let Some(CompletionContext::UsefixturesDecorator) = ctx {
+        panic!("Should NOT return UsefixturesDecorator for balanced usefixtures(func())");
     }
 }
 
@@ -14118,8 +14118,8 @@ fn test_completion_context_text_fallback_usefixtures_multiline_paren_counting() 
         "Should get usefixtures context on continuation line"
     );
     match ctx.unwrap() {
-        CompletionContext::UsefixuturesDecorator => {}
-        other => panic!("Expected UsefixuturesDecorator, got {:?}", other),
+        CompletionContext::UsefixturesDecorator => {}
+        other => panic!("Expected UsefixturesDecorator, got {:?}", other),
     }
 }
 
@@ -14143,8 +14143,8 @@ fn test_completion_context_text_fallback_usefixtures_multiline_closed() {
     // Falls through to None for usefixtures, then tries function context.
     let ctx = db.get_completion_context(&path, 1, 1);
     // None or FunctionSignature is fine
-    if let Some(CompletionContext::UsefixuturesDecorator) = ctx {
-        panic!("Should NOT return UsefixuturesDecorator after balanced multiline usefixtures");
+    if let Some(CompletionContext::UsefixturesDecorator) = ctx {
+        panic!("Should NOT return UsefixturesDecorator after balanced multiline usefixtures");
     }
 }
 

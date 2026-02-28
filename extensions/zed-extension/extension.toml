@@ -1,6 +1,6 @@
 id = "pytest-language-server"
 name = "pytest Language Server"
-version = "0.21.0"
+version = "0.21.1"
 schema_version = 1
 authors = ["Thiago Bellini Ribeiro <hackedbellini@gmail.com>"]
 description = "A blazingly fast Language Server Protocol implementation for pytest"

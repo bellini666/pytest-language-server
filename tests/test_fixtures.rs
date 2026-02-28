@@ -12924,3 +12924,1436 @@ def test_something():
         "Local should not be third-party"
     );
 }
+
+// ============================================================================
+// Feature 5: AST-based signature end detection tests
+// ============================================================================
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_multiline_signature() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+def test_foo(
+    a,
+    b,
+):
+    pass
+"#;
+
+    let path = PathBuf::from("/tmp/test/test_multiline.py");
+    db.analyze_file(path.clone(), content);
+
+    // Line 3 (0-indexed): "def test_foo(" — should be signature
+    let ctx = db.get_completion_context(&path, 3, 13);
+    assert!(ctx.is_some());
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature { function_name, .. } => {
+            assert_eq!(function_name, "test_foo");
+        }
+        other => panic!("Expected FunctionSignature, got {:?}", other),
+    }
+
+    // Line 4 (0-indexed): "    a," — should still be signature
+    let ctx = db.get_completion_context(&path, 4, 5);
+    assert!(ctx.is_some());
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature { function_name, .. } => {
+            assert_eq!(function_name, "test_foo");
+        }
+        other => panic!("Expected FunctionSignature on param line, got {:?}", other),
+    }
+
+    // Line 5 (0-indexed): "    b," — should still be signature
+    let ctx = db.get_completion_context(&path, 5, 5);
+    assert!(ctx.is_some());
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature { function_name, .. } => {
+            assert_eq!(function_name, "test_foo");
+        }
+        other => panic!(
+            "Expected FunctionSignature on second param line, got {:?}",
+            other
+        ),
+    }
+
+    // Line 6 (0-indexed): "):" — should still be signature
+    let ctx = db.get_completion_context(&path, 6, 1);
+    assert!(ctx.is_some());
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature { function_name, .. } => {
+            assert_eq!(function_name, "test_foo");
+        }
+        other => panic!(
+            "Expected FunctionSignature on closing line, got {:?}",
+            other
+        ),
+    }
+
+    // Line 7 (0-indexed): "    pass" — should be body
+    let ctx = db.get_completion_context(&path, 7, 4);
+    assert!(ctx.is_some());
+    match ctx.unwrap() {
+        CompletionContext::FunctionBody { function_name, .. } => {
+            assert_eq!(function_name, "test_foo");
+        }
+        other => panic!("Expected FunctionBody, got {:?}", other),
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_return_type_annotation() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture(a) -> int:
+    return 42
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    // Line 4 (0-indexed): "def my_fixture(a) -> int:" — should be signature
+    let ctx = db.get_completion_context(&path, 4, 15);
+    assert!(ctx.is_some());
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature { function_name, .. } => {
+            assert_eq!(function_name, "my_fixture");
+        }
+        other => panic!("Expected FunctionSignature, got {:?}", other),
+    }
+
+    // Line 5 (0-indexed): "    return 42" — should be body
+    let ctx = db.get_completion_context(&path, 5, 4);
+    assert!(ctx.is_some());
+    match ctx.unwrap() {
+        CompletionContext::FunctionBody { function_name, .. } => {
+            assert_eq!(function_name, "my_fixture");
+        }
+        other => panic!("Expected FunctionBody, got {:?}", other),
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_multiline_signature_with_return_type() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture(
+    a,
+    b,
+) -> int:
+    return 42
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    // Line 7 (0-indexed): ") -> int:" — should be signature
+    let ctx = db.get_completion_context(&path, 7, 1);
+    assert!(ctx.is_some());
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature { function_name, .. } => {
+            assert_eq!(function_name, "my_fixture");
+        }
+        other => panic!(
+            "Expected FunctionSignature on return type line, got {:?}",
+            other
+        ),
+    }
+
+    // Line 8 (0-indexed): "    return 42" — should be body
+    let ctx = db.get_completion_context(&path, 8, 4);
+    assert!(ctx.is_some());
+    match ctx.unwrap() {
+        CompletionContext::FunctionBody { function_name, .. } => {
+            assert_eq!(function_name, "my_fixture");
+        }
+        other => panic!("Expected FunctionBody, got {:?}", other),
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_single_line_def() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+def test_foo(a):
+    pass
+"#;
+
+    let path = PathBuf::from("/tmp/test/test_single.py");
+    db.analyze_file(path.clone(), content);
+
+    // Line 3 (0-indexed): "def test_foo(a):" — signature
+    let ctx = db.get_completion_context(&path, 3, 13);
+    assert!(ctx.is_some());
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature { function_name, .. } => {
+            assert_eq!(function_name, "test_foo");
+        }
+        other => panic!("Expected FunctionSignature, got {:?}", other),
+    }
+
+    // Line 4 (0-indexed): "    pass" — body
+    let ctx = db.get_completion_context(&path, 4, 4);
+    assert!(ctx.is_some());
+    match ctx.unwrap() {
+        CompletionContext::FunctionBody { function_name, .. } => {
+            assert_eq!(function_name, "test_foo");
+        }
+        other => panic!("Expected FunctionBody, got {:?}", other),
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_fixture_with_many_params_multiline() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture(
+    param_a,
+    param_b,
+    param_c,
+    param_d,
+    param_e,
+):
+    return 42
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    // All lines 4-10 should be signature context
+    for line in 4..=10 {
+        let ctx = db.get_completion_context(&path, line, 4);
+        assert!(ctx.is_some(), "Expected context on line {}", line);
+        match ctx.unwrap() {
+            CompletionContext::FunctionSignature { function_name, .. } => {
+                assert_eq!(function_name, "my_fixture", "Wrong name on line {}", line);
+            }
+            other => panic!(
+                "Expected FunctionSignature on line {}, got {:?}",
+                line, other
+            ),
+        }
+    }
+
+    // Line 11 (0-indexed): "    return 42" — body
+    let ctx = db.get_completion_context(&path, 11, 4);
+    assert!(ctx.is_some());
+    match ctx.unwrap() {
+        CompletionContext::FunctionBody { function_name, .. } => {
+            assert_eq!(function_name, "my_fixture");
+        }
+        other => panic!("Expected FunctionBody, got {:?}", other),
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_async_fixture() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+async def my_async_fixture(
+    a,
+) -> int:
+    return 42
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    // Line 6 (0-indexed): ") -> int:" — signature
+    let ctx = db.get_completion_context(&path, 6, 1);
+    assert!(ctx.is_some());
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature { function_name, .. } => {
+            assert_eq!(function_name, "my_async_fixture");
+        }
+        other => panic!("Expected FunctionSignature, got {:?}", other),
+    }
+
+    // Line 7 (0-indexed): "    return 42" — body
+    let ctx = db.get_completion_context(&path, 7, 4);
+    assert!(ctx.is_some());
+    match ctx.unwrap() {
+        CompletionContext::FunctionBody { function_name, .. } => {
+            assert_eq!(function_name, "my_async_fixture");
+        }
+        other => panic!("Expected FunctionBody, got {:?}", other),
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_empty_line_between_signature_and_body() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+def test_foo(a):
+
+    pass
+"#;
+
+    let path = PathBuf::from("/tmp/test/test_empty.py");
+    db.analyze_file(path.clone(), content);
+
+    // Line 4 (0-indexed): empty line — should be body (after the ":")
+    let ctx = db.get_completion_context(&path, 4, 0);
+    assert!(ctx.is_some());
+    match ctx.unwrap() {
+        CompletionContext::FunctionBody { function_name, .. } => {
+            assert_eq!(function_name, "test_foo");
+        }
+        other => panic!("Expected FunctionBody on blank line, got {:?}", other),
+    }
+}
+
+// ============================================================================
+// Feature 1: Text-based fallback for incomplete signatures
+// ============================================================================
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_incomplete_ast_test_function_open_paren() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    // Syntactically invalid — no closing paren
+    let content = "def test_foo(";
+
+    let path = PathBuf::from("/tmp/test/test_incomplete.py");
+    db.analyze_file(path.clone(), content);
+
+    // Line 0 (0-indexed), cursor after the opening paren
+    let ctx = db.get_completion_context(&path, 0, 13);
+    assert!(ctx.is_some(), "Should get context from text fallback");
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature {
+            function_name,
+            is_fixture,
+            declared_params,
+            ..
+        } => {
+            assert_eq!(function_name, "test_foo");
+            assert!(!is_fixture);
+            assert!(declared_params.is_empty());
+        }
+        other => panic!("Expected FunctionSignature, got {:?}", other),
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_incomplete_ast_fixture_function_open_paren() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    let content = "@pytest.fixture\ndef bar(";
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    // Line 1 (0-indexed), cursor after the opening paren
+    let ctx = db.get_completion_context(&path, 1, 8);
+    assert!(
+        ctx.is_some(),
+        "Should get context from text fallback for fixture"
+    );
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature {
+            function_name,
+            is_fixture,
+            ..
+        } => {
+            assert_eq!(function_name, "bar");
+            assert!(is_fixture);
+        }
+        other => panic!("Expected FunctionSignature, got {:?}", other),
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_incomplete_ast_fixture_with_scope() {
+    use pytest_language_server::CompletionContext;
+    use pytest_language_server::FixtureScope;
+    let db = FixtureDatabase::new();
+
+    let content = "@pytest.fixture(scope=\"session\")\ndef bar(";
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    let ctx = db.get_completion_context(&path, 1, 8);
+    assert!(
+        ctx.is_some(),
+        "Should get context with scope from text fallback"
+    );
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature {
+            function_name,
+            is_fixture,
+            fixture_scope,
+            ..
+        } => {
+            assert_eq!(function_name, "bar");
+            assert!(is_fixture);
+            assert_eq!(fixture_scope, Some(FixtureScope::Session));
+        }
+        other => panic!(
+            "Expected FunctionSignature with session scope, got {:?}",
+            other
+        ),
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_incomplete_ast_with_existing_params() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    let content = "def test_foo(existing_fixture, ";
+
+    let path = PathBuf::from("/tmp/test/test_params.py");
+    db.analyze_file(path.clone(), content);
+
+    let ctx = db.get_completion_context(&path, 0, 31);
+    assert!(ctx.is_some(), "Should get context with existing params");
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature {
+            declared_params, ..
+        } => {
+            assert!(
+                declared_params.contains(&"existing_fixture".to_string()),
+                "Should contain existing_fixture in declared_params, got {:?}",
+                declared_params
+            );
+        }
+        other => panic!("Expected FunctionSignature, got {:?}", other),
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_incomplete_ast_multiline_params() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    let content = "def test_foo(\n    a,\n    b,\n";
+
+    let path = PathBuf::from("/tmp/test/test_multiline.py");
+    db.analyze_file(path.clone(), content);
+
+    // Cursor on line 3 (0-indexed), after "    b,"
+    let ctx = db.get_completion_context(&path, 3, 0);
+    assert!(
+        ctx.is_some(),
+        "Should get context for multiline incomplete sig"
+    );
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature {
+            declared_params, ..
+        } => {
+            assert!(
+                declared_params.contains(&"a".to_string()),
+                "Should contain 'a', got {:?}",
+                declared_params
+            );
+            assert!(
+                declared_params.contains(&"b".to_string()),
+                "Should contain 'b', got {:?}",
+                declared_params
+            );
+        }
+        other => panic!("Expected FunctionSignature, got {:?}", other),
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_incomplete_ast_async_test() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    let content = "async def test_foo(";
+
+    let path = PathBuf::from("/tmp/test/test_async.py");
+    db.analyze_file(path.clone(), content);
+
+    let ctx = db.get_completion_context(&path, 0, 19);
+    assert!(ctx.is_some(), "Should get context for async test");
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature { function_name, .. } => {
+            assert_eq!(function_name, "test_foo");
+        }
+        other => panic!("Expected FunctionSignature for async test, got {:?}", other),
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_incomplete_ast_regular_function_no_completions() {
+    let db = FixtureDatabase::new();
+
+    let content = "def regular_func(";
+
+    let path = PathBuf::from("/tmp/test/test_regular.py");
+    db.analyze_file(path.clone(), content);
+
+    let ctx = db.get_completion_context(&path, 0, 17);
+    assert!(
+        ctx.is_none(),
+        "Regular function should not get completion context"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_incomplete_ast_with_prior_complete_code() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    let content = r#"import pytest
+
+@pytest.fixture
+def existing_fixture():
+    return 42
+
+def test_new("#;
+
+    let path = PathBuf::from("/tmp/test/test_prior.py");
+    db.analyze_file(path.clone(), content);
+
+    // Cursor on line 6 (0-indexed): "def test_new("
+    let ctx = db.get_completion_context(&path, 6, 14);
+    assert!(
+        ctx.is_some(),
+        "Should get context from text fallback with prior valid code"
+    );
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature { function_name, .. } => {
+            assert_eq!(function_name, "test_new");
+        }
+        other => panic!("Expected FunctionSignature for test_new, got {:?}", other),
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_incomplete_fixture_bar_exact_user_scenario() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    // Exact user scenario: typing a fixture with open paren
+    let content = "@pytest.fixture\ndef bar(";
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    let ctx = db.get_completion_context(&path, 1, 8);
+    assert!(
+        ctx.is_some(),
+        "Exact user scenario should produce completions"
+    );
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature {
+            function_name,
+            is_fixture,
+            ..
+        } => {
+            assert_eq!(function_name, "bar");
+            assert!(is_fixture);
+        }
+        other => panic!("Expected FunctionSignature, got {:?}", other),
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_incomplete_ast_fixture_with_existing_param() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    // Example 2 from the plan: fixture with existing param and trailing comma
+    let content = "@pytest.fixture\ndef bar(other_fixture, ";
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    let ctx = db.get_completion_context(&path, 1, 23);
+    assert!(ctx.is_some(), "Should get context with existing param");
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature {
+            function_name,
+            is_fixture,
+            declared_params,
+            ..
+        } => {
+            assert_eq!(function_name, "bar");
+            assert!(is_fixture);
+            assert!(
+                declared_params.contains(&"other_fixture".to_string()),
+                "Should contain other_fixture, got {:?}",
+                declared_params
+            );
+        }
+        other => panic!("Expected FunctionSignature, got {:?}", other),
+    }
+}
+
+// ============================================================================
+// Feature 1: Text-based fallback for usefixtures/pytestmark
+// ============================================================================
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_incomplete_usefixtures_decorator() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    // Example 4: usefixtures decorator with open paren
+    let content = "@pytest.mark.usefixtures(";
+
+    let path = PathBuf::from("/tmp/test/test_usefixtures.py");
+    db.analyze_file(path.clone(), content);
+
+    let ctx = db.get_completion_context(&path, 0, 25);
+    assert!(
+        ctx.is_some(),
+        "Should get usefixtures context from text fallback"
+    );
+    match ctx.unwrap() {
+        CompletionContext::UsefixuturesDecorator => {}
+        other => panic!("Expected UsefixuturesDecorator, got {:?}", other),
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_incomplete_usefixtures_with_function_below() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    // Example 5: usefixtures with function below
+    let content = "@pytest.mark.usefixtures(\ndef test_something():";
+
+    let path = PathBuf::from("/tmp/test/test_usefixtures.py");
+    db.analyze_file(path.clone(), content);
+
+    // Cursor on line 0, inside the usefixtures call
+    let ctx = db.get_completion_context(&path, 0, 25);
+    assert!(
+        ctx.is_some(),
+        "Should get usefixtures context with function below"
+    );
+    match ctx.unwrap() {
+        CompletionContext::UsefixuturesDecorator => {}
+        other => panic!("Expected UsefixuturesDecorator, got {:?}", other),
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_incomplete_pytestmark_usefixtures() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    // Example 6: pytestmark list with usefixtures open paren
+    let content = "pytestmark = [\n    pytest.mark.usefixtures(";
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    // Cursor on line 1, inside the usefixtures call
+    let ctx = db.get_completion_context(&path, 1, 28);
+    assert!(
+        ctx.is_some(),
+        "Should get usefixtures context in pytestmark list"
+    );
+    match ctx.unwrap() {
+        CompletionContext::UsefixuturesDecorator => {}
+        other => panic!("Expected UsefixuturesDecorator, got {:?}", other),
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_incomplete_pytestmark_usefixtures_unclosed_bracket() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    // Example 7: pytestmark list with usefixtures, unclosed bracket
+    let content = "pytestmark = [\n    pytest.mark.usefixtures(\n]";
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    // Cursor on line 1, inside the usefixtures call
+    let ctx = db.get_completion_context(&path, 1, 28);
+    assert!(
+        ctx.is_some(),
+        "Should get usefixtures context with unclosed bracket"
+    );
+    match ctx.unwrap() {
+        CompletionContext::UsefixuturesDecorator => {}
+        other => panic!("Expected UsefixuturesDecorator, got {:?}", other),
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_incomplete_pytestmark_usefixtures_closed_paren() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    // Example 8: pytestmark with usefixtures, cursor inside closed ()
+    let content = "pytestmark = [\n    pytest.mark.usefixtures()\n]";
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    // Cursor on line 1, inside the usefixtures() — between ( and )
+    let ctx = db.get_completion_context(&path, 1, 28);
+    assert!(
+        ctx.is_some(),
+        "Should get usefixtures context when cursor inside ()"
+    );
+    match ctx.unwrap() {
+        CompletionContext::UsefixuturesDecorator => {}
+        other => panic!("Expected UsefixuturesDecorator, got {:?}", other),
+    }
+}
+
+// ============================================================================
+// Feature 2: Trailing-newline cursor positioning
+// ============================================================================
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_incomplete_fixture_trailing_newline() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    // Content ends with \n — cursor on the phantom empty line
+    let content = "@pytest.fixture\ndef bar(\n";
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    // Cursor on line 2 (0-indexed) — the phantom empty line after trailing \n
+    let ctx = db.get_completion_context(&path, 2, 0);
+    assert!(
+        ctx.is_some(),
+        "Should get context on trailing newline phantom line"
+    );
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature {
+            function_name,
+            is_fixture,
+            ..
+        } => {
+            assert_eq!(function_name, "bar");
+            assert!(is_fixture);
+        }
+        other => panic!("Expected FunctionSignature, got {:?}", other),
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_incomplete_fixture_newline_with_indent() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    // Content ends with newline + indent
+    let content = "@pytest.fixture\ndef bar(\n    ";
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    // Cursor on line 2 (0-indexed), indented
+    let ctx = db.get_completion_context(&path, 2, 4);
+    assert!(
+        ctx.is_some(),
+        "Should get context on indented line after newline"
+    );
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature {
+            function_name,
+            is_fixture,
+            ..
+        } => {
+            assert_eq!(function_name, "bar");
+            assert!(is_fixture);
+        }
+        other => panic!("Expected FunctionSignature, got {:?}", other),
+    }
+}
+
+// ============================================================================
+// Feature 3: Handle signatures without an opening parenthesis
+// ============================================================================
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_incomplete_fixture_no_paren() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    let content = "@pytest.fixture\ndef bar";
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    let ctx = db.get_completion_context(&path, 1, 7);
+    assert!(ctx.is_some(), "Fixture without paren should get context");
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature {
+            function_name,
+            is_fixture,
+            ..
+        } => {
+            assert_eq!(function_name, "bar");
+            assert!(is_fixture);
+        }
+        other => panic!("Expected FunctionSignature, got {:?}", other),
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_incomplete_test_no_paren() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    let content = "def test_foo";
+
+    let path = PathBuf::from("/tmp/test/test_noparen.py");
+    db.analyze_file(path.clone(), content);
+
+    let ctx = db.get_completion_context(&path, 0, 12);
+    assert!(
+        ctx.is_some(),
+        "Test function without paren should get context"
+    );
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature { function_name, .. } => {
+            assert_eq!(function_name, "test_foo");
+        }
+        other => panic!("Expected FunctionSignature, got {:?}", other),
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_completion_context_incomplete_regular_func_no_paren_no_completions() {
+    let db = FixtureDatabase::new();
+
+    let content = "def regular";
+
+    let path = PathBuf::from("/tmp/test/test_regular.py");
+    db.analyze_file(path.clone(), content);
+
+    let ctx = db.get_completion_context(&path, 0, 11);
+    assert!(
+        ctx.is_none(),
+        "Regular function without paren should not get context"
+    );
+}
+
+/// Test completion inside closed parens with colon but no body: def test_bla():
+#[test]
+fn test_completion_context_incomplete_closed_parens_with_colon_no_body() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    // User scenario: "def test_bla():" with no body — parser fails
+    let content = "def test_bla():";
+
+    let path = PathBuf::from("/tmp/test/test_closed_parens.py");
+    db.analyze_file(path.clone(), content);
+
+    // Cursor inside the parens at position 13 (between '(' and ')')
+    let ctx = db.get_completion_context(&path, 0, 13);
+    assert!(
+        ctx.is_some(),
+        "Should get completion context inside closed parens with no body"
+    );
+    if let Some(CompletionContext::FunctionSignature {
+        function_name,
+        is_fixture,
+        ..
+    }) = ctx
+    {
+        assert_eq!(function_name, "test_bla");
+        assert!(!is_fixture);
+    } else {
+        panic!("Expected FunctionSignature context");
+    }
+}
+
+/// Test completion inside closed parens without colon or body: def test_bla()
+#[test]
+fn test_completion_context_incomplete_closed_parens_no_colon_no_body() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    // User scenario: "def test_bla()" with no colon or body — parser fails
+    let content = "def test_bla()";
+
+    let path = PathBuf::from("/tmp/test/test_no_colon.py");
+    db.analyze_file(path.clone(), content);
+
+    // Cursor inside the parens at position 13 (between '(' and ')')
+    let ctx = db.get_completion_context(&path, 0, 13);
+    assert!(
+        ctx.is_some(),
+        "Should get completion context inside closed parens without colon"
+    );
+    if let Some(CompletionContext::FunctionSignature {
+        function_name,
+        is_fixture,
+        ..
+    }) = ctx
+    {
+        assert_eq!(function_name, "test_bla");
+        assert!(!is_fixture);
+    } else {
+        panic!("Expected FunctionSignature context");
+    }
+}
+
+/// Test completion with closed parens, colon, trailing newline but no body
+#[test]
+fn test_completion_context_incomplete_closed_parens_colon_trailing_newline() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    let content = "def test_bla():\n";
+
+    let path = PathBuf::from("/tmp/test/test_trailing_nl.py");
+    db.analyze_file(path.clone(), content);
+
+    // Cursor inside the parens on line 0, position 13
+    let ctx = db.get_completion_context(&path, 0, 13);
+    assert!(
+        ctx.is_some(),
+        "Should get completion context inside parens even with trailing newline"
+    );
+    if let Some(CompletionContext::FunctionSignature { function_name, .. }) = ctx {
+        assert_eq!(function_name, "test_bla");
+    } else {
+        panic!("Expected FunctionSignature context");
+    }
+}
+
+/// Test completion for fixture with closed parens but no body
+#[test]
+fn test_completion_context_incomplete_fixture_closed_parens_no_body() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    let content = "@pytest.fixture\ndef my_fixture():";
+
+    let path = PathBuf::from("/tmp/test/conftest_closed.py");
+    db.analyze_file(path.clone(), content);
+
+    // Cursor inside parens on line 1, position 15 (between '(' and ')')
+    let ctx = db.get_completion_context(&path, 1, 15);
+    assert!(
+        ctx.is_some(),
+        "Fixture with closed parens but no body should get context"
+    );
+    if let Some(CompletionContext::FunctionSignature {
+        function_name,
+        is_fixture,
+        ..
+    }) = ctx
+    {
+        assert_eq!(function_name, "my_fixture");
+        assert!(is_fixture);
+    } else {
+        panic!("Expected FunctionSignature context");
+    }
+}
+
+/// Test completion with closed parens and existing params but no body
+#[test]
+fn test_completion_context_incomplete_closed_parens_with_existing_params_no_body() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    // User is adding a second fixture param, function has no body yet
+    let content = "def test_bla(my_fixture, ):";
+
+    let path = PathBuf::from("/tmp/test/test_with_params.py");
+    db.analyze_file(path.clone(), content);
+
+    // Cursor after the comma+space, position 25 (before ')')
+    let ctx = db.get_completion_context(&path, 0, 25);
+    assert!(
+        ctx.is_some(),
+        "Should get context inside closed parens with existing params"
+    );
+    if let Some(CompletionContext::FunctionSignature {
+        function_name,
+        declared_params,
+        ..
+    }) = ctx
+    {
+        assert_eq!(function_name, "test_bla");
+        assert!(
+            declared_params.contains(&"my_fixture".to_string()),
+            "Should list existing param 'my_fixture', got: {:?}",
+            declared_params
+        );
+    } else {
+        panic!("Expected FunctionSignature context");
+    }
+}
+
+/// Test that complete valid function with body does NOT trigger from text fallback
+/// (This verifies we don't regress by always returning completions)
+#[test]
+fn test_completion_context_complete_function_with_body_no_text_fallback() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    // This is valid Python that parses successfully — AST path handles it
+    let content = "def test_bla():\n    pass\n";
+
+    let path = PathBuf::from("/tmp/test/test_complete.py");
+    db.analyze_file(path.clone(), content);
+
+    // Cursor inside parens — AST path should handle this (not text fallback)
+    let ctx = db.get_completion_context(&path, 0, 13);
+    assert!(
+        ctx.is_some(),
+        "Complete function should still provide completions via AST path"
+    );
+    if let Some(CompletionContext::FunctionSignature { function_name, .. }) = ctx {
+        assert_eq!(function_name, "test_bla");
+    } else {
+        panic!("Expected FunctionSignature context");
+    }
+}
+
+/// Test with valid code above and incomplete function at end
+#[test]
+fn test_completion_context_valid_code_then_incomplete_closed_parens() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    let content = r#"import pytest
+
+@pytest.fixture
+def existing():
+    return 1
+
+def test_new():"#;
+
+    let path = PathBuf::from("/tmp/test/test_mixed.py");
+    db.analyze_file(path.clone(), content);
+
+    // Cursor inside parens of the incomplete test_new on line 6
+    let ctx = db.get_completion_context(&path, 6, 13);
+    assert!(
+        ctx.is_some(),
+        "Should get context for incomplete function after valid code"
+    );
+    if let Some(CompletionContext::FunctionSignature { function_name, .. }) = ctx {
+        assert_eq!(function_name, "test_new");
+    } else {
+        panic!("Expected FunctionSignature context");
+    }
+}
+
+// ============================================================================
+// Coverage gap: usefixtures text fallback depth==0 branch
+// ============================================================================
+
+/// Test that balanced usefixtures() with content does NOT offer completions
+/// when the text fallback handles it (depth==0, non-empty parens).
+#[test]
+#[timeout(30000)]
+fn test_completion_context_text_fallback_usefixtures_balanced_with_content() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    // Invalid Python (no def body) so AST fails, but usefixtures("a") is balanced
+    let content = "@pytest.mark.usefixtures(\"a\")\ndef test_foo(";
+
+    let path = PathBuf::from("/tmp/test/test_balanced_usefixtures.py");
+    db.analyze_file(path.clone(), content);
+
+    // Cursor on line 0 (the usefixtures line) — parens are balanced with content
+    // The text fallback should NOT offer usefixtures completions here
+    let ctx = db.get_completion_context(&path, 0, 28);
+    // Should fall through to the function signature context for the def on line 1,
+    // or return None for line 0 since it's not inside usefixtures
+    // Any other result (None or FunctionSignature) is acceptable
+    if let Some(CompletionContext::UsefixuturesDecorator) = ctx {
+        panic!("Should NOT return UsefixuturesDecorator for balanced usefixtures with content");
+    }
+}
+
+/// Test that balanced empty usefixtures() DOES offer completions via text fallback.
+#[test]
+#[timeout(30000)]
+fn test_completion_context_text_fallback_usefixtures_empty_parens() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    // Invalid Python so AST fails, usefixtures() has empty parens
+    let content = "@pytest.mark.usefixtures()\ndef test_foo(";
+
+    let path = PathBuf::from("/tmp/test/test_empty_usefixtures.py");
+    db.analyze_file(path.clone(), content);
+
+    // Cursor on line 0 inside the empty usefixtures() — should offer completions
+    let ctx = db.get_completion_context(&path, 0, 25);
+    assert!(
+        ctx.is_some(),
+        "Empty usefixtures() should offer completions via text fallback"
+    );
+    match ctx.unwrap() {
+        CompletionContext::UsefixuturesDecorator => {}
+        other => panic!("Expected UsefixuturesDecorator, got {:?}", other),
+    }
+}
+
+/// Test usefixtures with no closing paren on cursor line (depth==0 but no ')' found).
+#[test]
+#[timeout(30000)]
+fn test_completion_context_text_fallback_usefixtures_no_close_paren_on_line() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    // usefixtures( on line 0, closing ) on line 1 but cursor stays on line 0
+    // Since the opening line has depth 1 (only '(' seen), this hits depth > 0.
+    // To hit the "no closing paren on this line" branch we need depth==0 on cursor line
+    // with no ')' on that line. This requires a multiline scenario where parens balance
+    // across lines but cursor is on the opening line.
+    //
+    // Actually, to hit the unclosed-on-line branch: depth==0, i==cursor_idx,
+    // and no ')' on the line. That means we need '(' and ')' to cancel out
+    // with no ')' at rfind... which can't happen if '(' was found.
+    // The realistic case is: usefixtures( with content on the next line closing it,
+    // but we only count the *opening* line. If the opening line has `usefixtures(` only,
+    // depth is 1, hitting depth > 0. So this branch is only reachable if something
+    // like `usefixtures(() )` where parens balance on the same line but rfind(')') finds
+    // the outer one. Let's test a different realistic case instead.
+    //
+    // We can test a scenario where usefixtures has nested parens that balance:
+    // e.g. `usefixtures(func())` — depth goes +1 for usefixtures(, +1 for func(, -1 for ),
+    // -1 for ) = 0. And rfind(')') finds the last ')'. Not empty, so returns None.
+    let content = "@pytest.mark.usefixtures(func())\ndef test_foo(";
+
+    let path = PathBuf::from("/tmp/test/test_nested_usefixtures.py");
+    db.analyze_file(path.clone(), content);
+
+    let ctx = db.get_completion_context(&path, 0, 30);
+    // Balanced with content — should NOT offer usefixtures completions
+    if let Some(CompletionContext::UsefixuturesDecorator) = ctx {
+        panic!("Should NOT return UsefixuturesDecorator for balanced usefixtures(func())");
+    }
+}
+
+// ============================================================================
+// Coverage gap: multi-line usefixtures paren counting in text fallback
+// ============================================================================
+
+/// Test usefixtures spanning multiple lines where cursor is on a subsequent line.
+#[test]
+#[timeout(30000)]
+fn test_completion_context_text_fallback_usefixtures_multiline_paren_counting() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    // usefixtures( on line 0, cursor on line 1 (still inside unclosed call)
+    // AST fails because there's no closing paren or valid def
+    let content = "@pytest.mark.usefixtures(\n    ";
+
+    let path = PathBuf::from("/tmp/test/test_multiline_usefixtures.py");
+    db.analyze_file(path.clone(), content);
+
+    // Cursor on line 1 — should detect we're inside unclosed usefixtures(
+    let ctx = db.get_completion_context(&path, 1, 4);
+    assert!(
+        ctx.is_some(),
+        "Should get usefixtures context on continuation line"
+    );
+    match ctx.unwrap() {
+        CompletionContext::UsefixuturesDecorator => {}
+        other => panic!("Expected UsefixuturesDecorator, got {:?}", other),
+    }
+}
+
+/// Test usefixtures spanning multiple lines with closing paren on a later line.
+#[test]
+#[timeout(30000)]
+fn test_completion_context_text_fallback_usefixtures_multiline_closed() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    // usefixtures( on line 0, ) on line 1, cursor on line 1 after closing
+    let content = "@pytest.mark.usefixtures(\n)\ndef test_foo(";
+
+    let path = PathBuf::from("/tmp/test/test_multiline_usefixtures_closed.py");
+    db.analyze_file(path.clone(), content);
+
+    // Cursor on line 1 which has ')' — parens are balanced (depth 0)
+    // The usefixtures( is found on line 0 (i=0), cursor_idx=1, so i != cursor_idx.
+    // depth goes: line0 has '(' → depth=1. line1 has ')' → depth=0. depth==0, not > 0.
+    // i (0) != cursor_idx (1), so the depth==0 same-line branch is skipped.
+    // Falls through to None for usefixtures, then tries function context.
+    let ctx = db.get_completion_context(&path, 1, 1);
+    // None or FunctionSignature is fine
+    if let Some(CompletionContext::UsefixuturesDecorator) = ctx {
+        panic!("Should NOT return UsefixuturesDecorator after balanced multiline usefixtures");
+    }
+}
+
+// ============================================================================
+// Coverage gap: signature_closed branch in text fallback
+// ============================================================================
+
+/// Test that the text fallback rejects completion when cursor is on a line
+/// after the closing paren (signature_closed = true).
+#[test]
+#[timeout(30000)]
+fn test_completion_context_text_fallback_signature_closed_cursor_after() {
+    let db = FixtureDatabase::new();
+
+    // Incomplete Python: def with closed parens + colon, then a line, but no body statement.
+    // AST parse fails because there's no body. The text fallback should detect
+    // that the signature is closed and the cursor is on a subsequent line.
+    let content = "def test_foo():\n    \ndef broken";
+
+    let path = PathBuf::from("/tmp/test/test_sig_closed.py");
+    db.analyze_file(path.clone(), content);
+
+    // Cursor on line 1 (0-indexed) — after the signature close on line 0
+    // The paren depth goes: '(' → 1, ')' → 0 on line 0 (not cursor line),
+    // so signature_closed = true, cursor_inside_parens = false → returns None.
+    let ctx = db.get_completion_context(&path, 1, 4);
+    assert!(
+        ctx.is_none(),
+        "Cursor after closed signature should not get completion context, got: {:?}",
+        ctx
+    );
+}
+
+/// Test that the text fallback still provides completions when signature spans
+/// multiple lines and cursor is inside the parens on a later line.
+#[test]
+#[timeout(30000)]
+fn test_completion_context_text_fallback_multiline_cursor_inside_parens() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    // Incomplete: multiline def with open paren, cursor on continuation line
+    let content = "def test_foo(\n    existing,\n    ";
+
+    let path = PathBuf::from("/tmp/test/test_multiline_inside.py");
+    db.analyze_file(path.clone(), content);
+
+    // Cursor on line 2 (0-indexed) — inside the open parens
+    let ctx = db.get_completion_context(&path, 2, 4);
+    assert!(
+        ctx.is_some(),
+        "Cursor inside multiline open parens should get context"
+    );
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature {
+            function_name,
+            declared_params,
+            ..
+        } => {
+            assert_eq!(function_name, "test_foo");
+            assert!(
+                declared_params.contains(&"existing".to_string()),
+                "Should contain 'existing', got {:?}",
+                declared_params
+            );
+        }
+        other => panic!("Expected FunctionSignature, got {:?}", other),
+    }
+}
+
+// ============================================================================
+// Coverage gap: has_fixture_decorator_above — non-fixture decorator skip
+// ============================================================================
+
+/// Test that non-fixture decorators are skipped when scanning upward
+/// and a @pytest.fixture further above is still found.
+#[test]
+#[timeout(30000)]
+fn test_completion_context_text_fallback_non_fixture_decorator_above() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    // A fixture decorator with another decorator stacked between it and the def
+    let content = "@pytest.fixture\n@some_other_decorator\ndef bar(";
+
+    let path = PathBuf::from("/tmp/test/conftest_stacked.py");
+    db.analyze_file(path.clone(), content);
+
+    // Cursor on line 2 after the opening paren
+    let ctx = db.get_completion_context(&path, 2, 8);
+    assert!(
+        ctx.is_some(),
+        "Should find fixture decorator above non-fixture decorator"
+    );
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature {
+            function_name,
+            is_fixture,
+            ..
+        } => {
+            assert_eq!(function_name, "bar");
+            assert!(
+                is_fixture,
+                "Should be detected as fixture despite intermediate decorator"
+            );
+        }
+        other => panic!("Expected FunctionSignature, got {:?}", other),
+    }
+}
+
+/// Test that a function with only non-fixture decorators is NOT detected as a fixture.
+#[test]
+#[timeout(30000)]
+fn test_completion_context_text_fallback_only_non_fixture_decorators() {
+    let db = FixtureDatabase::new();
+
+    // Only non-fixture decorators — should not be detected as fixture
+    let content = "@some_decorator\n@another_decorator\ndef helper_func(";
+
+    let path = PathBuf::from("/tmp/test/test_non_fixture_decs.py");
+    db.analyze_file(path.clone(), content);
+
+    // Not a test_ function and not a fixture — should return None
+    let ctx = db.get_completion_context(&path, 2, 16);
+    assert!(
+        ctx.is_none(),
+        "Non-test, non-fixture function with only non-fixture decorators should not get context"
+    );
+}
+
+// ============================================================================
+// Coverage gap: find_signature_end_line body-line fallback
+// ============================================================================
+
+/// Test find_signature_end_line when the trailing ':' is not found by scanning.
+/// This happens when the function has no colon (e.g., the parser still produces
+/// an AST for certain edge cases). We test indirectly through get_completion_context.
+/// Since this is hard to trigger via the AST path (AST requires valid Python with ':'),
+/// we verify the primary path (colon found) is robust for multiline signatures.
+#[test]
+#[timeout(30000)]
+fn test_completion_context_multiline_signature_colon_on_separate_line() {
+    use pytest_language_server::CompletionContext;
+    let db = FixtureDatabase::new();
+
+    // Valid Python with closing paren and colon on a separate line from the params.
+    // This exercises the scan-forward-for-colon logic across multiple lines.
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture(
+    param_a,
+    param_b
+):
+    return 42
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest_colon_separate.py");
+    db.analyze_file(path.clone(), content);
+
+    // Line 7 (0-indexed): "):" — should be signature
+    let ctx = db.get_completion_context(&path, 7, 1);
+    assert!(ctx.is_some());
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature { function_name, .. } => {
+            assert_eq!(function_name, "my_fixture");
+        }
+        other => panic!("Expected FunctionSignature on '):', got {:?}", other),
+    }
+
+    // Line 8 (0-indexed): "    return 42" — should be body
+    let ctx = db.get_completion_context(&path, 8, 4);
+    assert!(ctx.is_some());
+    match ctx.unwrap() {
+        CompletionContext::FunctionBody { function_name, .. } => {
+            assert_eq!(function_name, "my_fixture");
+        }
+        other => panic!("Expected FunctionBody, got {:?}", other),
+    }
+}
+
+/// Test extract_fixture_scope_from_text with single-quoted scope.
+#[test]
+#[timeout(30000)]
+fn test_completion_context_text_fallback_fixture_scope_single_quotes() {
+    use pytest_language_server::CompletionContext;
+    use pytest_language_server::FixtureScope;
+    let db = FixtureDatabase::new();
+
+    let content = "@pytest.fixture(scope='module')\ndef bar(";
+
+    let path = PathBuf::from("/tmp/test/conftest_single_quote.py");
+    db.analyze_file(path.clone(), content);
+
+    let ctx = db.get_completion_context(&path, 1, 8);
+    assert!(ctx.is_some(), "Should get context with single-quoted scope");
+    match ctx.unwrap() {
+        CompletionContext::FunctionSignature {
+            fixture_scope,
+            is_fixture,
+            ..
+        } => {
+            assert!(is_fixture);
+            assert_eq!(fixture_scope, Some(FixtureScope::Module));
+        }
+        other => panic!(
+            "Expected FunctionSignature with module scope, got {:?}",
+            other
+        ),
+    }
+}

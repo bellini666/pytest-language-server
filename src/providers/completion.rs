@@ -12,6 +12,21 @@ use tracing::info;
 /// Parameter names that should never appear in fixture completions, they should be handled by another lsp.
 const EXCLUDED_PARAM_NAMES: &[&str] = &["self", "cls"];
 
+/// Per-request completion options bundling fixture scope, self-exclusion name, and
+/// trigger-character insert prefix. Passed through the completion pipeline to avoid
+/// threading many individual parameters.
+pub(crate) struct CompletionOpts<'a> {
+    /// When editing a fixture, its scope constrains which other fixtures are eligible.
+    /// `None` for test functions (all scopes allowed).
+    fixture_scope: Option<FixtureScope>,
+    /// Name of the fixture currently being edited, so it is excluded from its own
+    /// suggestions. `None` when editing a test function.
+    current_fixture_name: Option<&'a str>,
+    /// Prefix prepended to each completion's insert text. Set to `" "` when the
+    /// completion was triggered by a comma, otherwise `""`.
+    insert_prefix: &'a str,
+}
+
 /// Check whether a fixture should be excluded from completions based on scope rules.
 /// A fixture with a broader scope cannot depend on a fixture with a narrower scope.
 fn should_exclude_fixture(
@@ -28,15 +43,23 @@ fn should_exclude_fixture(
 }
 
 /// Check whether a fixture should be excluded based on common rules
-/// (excluded param names, already-declared params, and scope compatibility).
+/// (excluded param names, already-declared params, scope compatibility,
+/// and self-exclusion).
 fn is_fixture_excluded(
     fixture: &FixtureDefinition,
     declared_params: Option<&[String]>,
-    fixture_scope: Option<FixtureScope>,
+    opts: &CompletionOpts<'_>,
 ) -> bool {
     // Skip special parameter names
     if EXCLUDED_PARAM_NAMES.contains(&fixture.name.as_str()) {
         return true;
+    }
+
+    // Skip the fixture currently being edited (don't suggest yourself)
+    if let Some(name) = opts.current_fixture_name {
+        if fixture.name == name {
+            return true;
+        }
     }
 
     // Skip fixtures that are already declared as parameters
@@ -47,7 +70,7 @@ fn is_fixture_excluded(
     }
 
     // Skip fixtures with incompatible scope
-    if should_exclude_fixture(fixture, fixture_scope) {
+    if should_exclude_fixture(fixture, opts.fixture_scope) {
         return true;
     }
 
@@ -109,11 +132,11 @@ fn filter_and_enrich_fixtures(
     available: Vec<FixtureDefinition>,
     file_path: &std::path::Path,
     declared_params: Option<&[String]>,
-    fixture_scope: Option<FixtureScope>,
+    opts: &CompletionOpts<'_>,
 ) -> Vec<EnrichedFixture> {
     available
         .into_iter()
-        .filter(|f| !is_fixture_excluded(f, declared_params, fixture_scope))
+        .filter(|f| !is_fixture_excluded(f, declared_params, opts))
         .map(|f| {
             let detail = make_fixture_detail(&f);
             let priority = fixture_sort_priority(&f, file_path);
@@ -136,6 +159,15 @@ impl Backend {
         let uri = params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
 
+        // Check if completion was triggered by a comma — if so, prefix insert text
+        // with a space so "fixture1," becomes "fixture1, fixture2"
+        let triggered_by_comma = params
+            .context
+            .as_ref()
+            .and_then(|ctx| ctx.trigger_character.as_deref())
+            == Some(",");
+        let insert_prefix = if triggered_by_comma { " " } else { "" };
+
         info!(
             "completion request: uri={:?}, line={}, char={}",
             uri, position.line, position.character
@@ -155,31 +187,54 @@ impl Backend {
 
                 match ctx {
                     CompletionContext::FunctionSignature {
+                        function_name,
+                        is_fixture,
                         declared_params,
                         fixture_scope,
                         ..
                     } => {
                         // In function signature - suggest fixtures as parameters (filter already declared)
+                        // When editing a fixture, exclude itself from suggestions
+                        let opts = CompletionOpts {
+                            fixture_scope,
+                            current_fixture_name: if is_fixture {
+                                Some(function_name.as_str())
+                            } else {
+                                None
+                            },
+                            insert_prefix,
+                        };
                         return Ok(Some(self.create_fixture_completions(
                             &file_path,
                             &declared_params,
                             workspace_root.as_ref(),
-                            fixture_scope,
+                            &opts,
                         )));
                     }
                     CompletionContext::FunctionBody {
+                        function_name,
                         function_line,
+                        is_fixture,
                         declared_params,
                         fixture_scope,
                         ..
                     } => {
                         // In function body - suggest fixtures with auto-add to parameters
+                        let opts = CompletionOpts {
+                            fixture_scope,
+                            current_fixture_name: if is_fixture {
+                                Some(function_name.as_str())
+                            } else {
+                                None
+                            },
+                            insert_prefix,
+                        };
                         return Ok(Some(self.create_fixture_completions_with_auto_add(
                             &file_path,
                             &declared_params,
                             function_line,
                             workspace_root.as_ref(),
-                            fixture_scope,
+                            &opts,
                         )));
                     }
                     CompletionContext::UsefixturesDecorator
@@ -188,6 +243,7 @@ impl Backend {
                         return Ok(Some(self.create_string_fixture_completions(
                             &file_path,
                             workspace_root.as_ref(),
+                            insert_prefix,
                         )));
                     }
                 }
@@ -206,11 +262,11 @@ impl Backend {
         file_path: &std::path::Path,
         declared_params: &[String],
         workspace_root: Option<&PathBuf>,
-        fixture_scope: Option<FixtureScope>,
+        opts: &CompletionOpts<'_>,
     ) -> CompletionResponse {
         let available = self.fixture_db.get_available_fixtures(file_path);
         let enriched =
-            filter_and_enrich_fixtures(available, file_path, Some(declared_params), fixture_scope);
+            filter_and_enrich_fixtures(available, file_path, Some(declared_params), opts);
 
         let items = enriched
             .into_iter()
@@ -225,7 +281,7 @@ impl Backend {
                     kind: Some(CompletionItemKind::VARIABLE),
                     detail: Some(ef.detail),
                     documentation,
-                    insert_text: Some(ef.fixture.name.clone()),
+                    insert_text: Some(format!("{}{}", opts.insert_prefix, ef.fixture.name)),
                     insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
                     sort_text: Some(ef.sort_text),
                     ..Default::default()
@@ -236,19 +292,19 @@ impl Backend {
         CompletionResponse::Array(items)
     }
 
-    /// Create completion items for fixtures with auto-add to function parameters
-    /// When a completion is confirmed, it also inserts the fixture as a parameter
+    /// Create completion items for fixtures with auto-add to function parameters.
+    /// When a completion is confirmed, it also inserts the fixture as a parameter.
     pub fn create_fixture_completions_with_auto_add(
         &self,
         file_path: &std::path::Path,
         declared_params: &[String],
         function_line: usize,
         workspace_root: Option<&PathBuf>,
-        fixture_scope: Option<FixtureScope>,
+        opts: &CompletionOpts<'_>,
     ) -> CompletionResponse {
         let available = self.fixture_db.get_available_fixtures(file_path);
         let enriched =
-            filter_and_enrich_fixtures(available, file_path, Some(declared_params), fixture_scope);
+            filter_and_enrich_fixtures(available, file_path, Some(declared_params), opts);
 
         // Get insertion info for adding new parameters
         let insertion_info = self
@@ -282,7 +338,7 @@ impl Backend {
                     kind: Some(CompletionItemKind::VARIABLE),
                     detail: Some(ef.detail),
                     documentation,
-                    insert_text: Some(ef.fixture.name.clone()),
+                    insert_text: Some(format!("{}{}", opts.insert_prefix, ef.fixture.name)),
                     insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
                     additional_text_edits,
                     sort_text: Some(ef.sort_text),
@@ -301,10 +357,15 @@ impl Backend {
         &self,
         file_path: &std::path::Path,
         workspace_root: Option<&PathBuf>,
+        insert_prefix: &str,
     ) -> CompletionResponse {
         let available = self.fixture_db.get_available_fixtures(file_path);
-        // No scope filtering for string completions — pass None for fixture_scope
-        let enriched = filter_and_enrich_fixtures(available, file_path, None, None);
+        let no_filter_opts = CompletionOpts {
+            fixture_scope: None,
+            current_fixture_name: None,
+            insert_prefix,
+        };
+        let enriched = filter_and_enrich_fixtures(available, file_path, None, &no_filter_opts);
 
         let items = enriched
             .into_iter()
@@ -319,8 +380,7 @@ impl Backend {
                     kind: Some(CompletionItemKind::TEXT),
                     detail: Some(ef.detail),
                     documentation,
-                    // Don't add quotes - user is already inside a string
-                    insert_text: Some(ef.fixture.name.clone()),
+                    insert_text: Some(format!("{}{}", insert_prefix, ef.fixture.name)),
                     insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
                     sort_text: Some(ef.sort_text),
                     ..Default::default()
@@ -335,10 +395,10 @@ impl Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // =========================================================================
-    // Unit tests for should_exclude_fixture
-    // =========================================================================
+    use crate::fixtures::types::FixtureScope;
+    use crate::fixtures::FixtureDatabase;
+    use std::path::PathBuf;
+    use std::sync::Arc;
 
     fn make_fixture(name: &str, scope: FixtureScope) -> FixtureDefinition {
         FixtureDefinition {
@@ -359,120 +419,90 @@ mod tests {
         }
     }
 
+    // =========================================================================
+    // Unit tests for should_exclude_fixture
+    // =========================================================================
+
     #[test]
     fn test_should_exclude_fixture_test_function_allows_all() {
-        // Test functions (None scope) should see all fixtures
-        for scope in [
-            FixtureScope::Function,
-            FixtureScope::Class,
-            FixtureScope::Module,
-            FixtureScope::Package,
-            FixtureScope::Session,
-        ] {
-            let fixture = make_fixture("f", scope);
-            assert!(
-                !should_exclude_fixture(&fixture, None),
-                "Test function should allow {:?}-scoped fixture",
-                scope
-            );
-        }
+        // Test functions (None scope) should allow all fixture scopes
+        let func = make_fixture("f", FixtureScope::Function);
+        let class = make_fixture("c", FixtureScope::Class);
+        let module = make_fixture("m", FixtureScope::Module);
+        let package = make_fixture("p", FixtureScope::Package);
+        let session = make_fixture("s", FixtureScope::Session);
+
+        assert!(!should_exclude_fixture(&func, None));
+        assert!(!should_exclude_fixture(&class, None));
+        assert!(!should_exclude_fixture(&module, None));
+        assert!(!should_exclude_fixture(&package, None));
+        assert!(!should_exclude_fixture(&session, None));
     }
 
     #[test]
     fn test_should_exclude_fixture_session_excludes_narrower() {
-        let session_scope = Some(FixtureScope::Session);
+        let func = make_fixture("f", FixtureScope::Function);
+        let class = make_fixture("c", FixtureScope::Class);
+        let module = make_fixture("m", FixtureScope::Module);
+        let package = make_fixture("p", FixtureScope::Package);
+        let session = make_fixture("s", FixtureScope::Session);
 
-        assert!(should_exclude_fixture(
-            &make_fixture("f", FixtureScope::Function),
-            session_scope
-        ));
-        assert!(should_exclude_fixture(
-            &make_fixture("f", FixtureScope::Class),
-            session_scope
-        ));
-        assert!(should_exclude_fixture(
-            &make_fixture("f", FixtureScope::Module),
-            session_scope
-        ));
-        assert!(should_exclude_fixture(
-            &make_fixture("f", FixtureScope::Package),
-            session_scope
-        ));
-        assert!(!should_exclude_fixture(
-            &make_fixture("f", FixtureScope::Session),
-            session_scope
-        ));
+        let session_scope = Some(FixtureScope::Session);
+        // Session scope should exclude everything narrower
+        assert!(should_exclude_fixture(&func, session_scope));
+        assert!(should_exclude_fixture(&class, session_scope));
+        assert!(should_exclude_fixture(&module, session_scope));
+        assert!(should_exclude_fixture(&package, session_scope));
+        // But not session itself
+        assert!(!should_exclude_fixture(&session, session_scope));
     }
 
     #[test]
     fn test_should_exclude_fixture_module_excludes_narrower() {
-        let module_scope = Some(FixtureScope::Module);
+        let func = make_fixture("f", FixtureScope::Function);
+        let class = make_fixture("c", FixtureScope::Class);
+        let module = make_fixture("m", FixtureScope::Module);
+        let package = make_fixture("p", FixtureScope::Package);
+        let session = make_fixture("s", FixtureScope::Session);
 
-        assert!(should_exclude_fixture(
-            &make_fixture("f", FixtureScope::Function),
-            module_scope
-        ));
-        assert!(should_exclude_fixture(
-            &make_fixture("f", FixtureScope::Class),
-            module_scope
-        ));
-        assert!(!should_exclude_fixture(
-            &make_fixture("f", FixtureScope::Module),
-            module_scope
-        ));
-        assert!(!should_exclude_fixture(
-            &make_fixture("f", FixtureScope::Package),
-            module_scope
-        ));
-        assert!(!should_exclude_fixture(
-            &make_fixture("f", FixtureScope::Session),
-            module_scope
-        ));
+        let module_scope = Some(FixtureScope::Module);
+        assert!(should_exclude_fixture(&func, module_scope));
+        assert!(should_exclude_fixture(&class, module_scope));
+        assert!(!should_exclude_fixture(&module, module_scope));
+        assert!(!should_exclude_fixture(&package, module_scope));
+        assert!(!should_exclude_fixture(&session, module_scope));
     }
 
     #[test]
     fn test_should_exclude_fixture_function_allows_all() {
-        let function_scope = Some(FixtureScope::Function);
+        let func = make_fixture("f", FixtureScope::Function);
+        let class = make_fixture("c", FixtureScope::Class);
+        let module = make_fixture("m", FixtureScope::Module);
+        let session = make_fixture("s", FixtureScope::Session);
 
-        for scope in [
-            FixtureScope::Function,
-            FixtureScope::Class,
-            FixtureScope::Module,
-            FixtureScope::Package,
-            FixtureScope::Session,
-        ] {
-            assert!(
-                !should_exclude_fixture(&make_fixture("f", scope), function_scope),
-                "Function-scoped fixture should allow {:?}-scoped dependency",
-                scope
-            );
-        }
+        let function_scope = Some(FixtureScope::Function);
+        assert!(!should_exclude_fixture(&func, function_scope));
+        assert!(!should_exclude_fixture(&class, function_scope));
+        assert!(!should_exclude_fixture(&module, function_scope));
+        assert!(!should_exclude_fixture(&session, function_scope));
     }
 
     #[test]
     fn test_should_exclude_fixture_class_excludes_function() {
-        let class_scope = Some(FixtureScope::Class);
+        let func = make_fixture("f", FixtureScope::Function);
+        let class = make_fixture("c", FixtureScope::Class);
+        let module = make_fixture("m", FixtureScope::Module);
+        let session = make_fixture("s", FixtureScope::Session);
 
-        assert!(should_exclude_fixture(
-            &make_fixture("f", FixtureScope::Function),
-            class_scope
-        ));
-        assert!(!should_exclude_fixture(
-            &make_fixture("f", FixtureScope::Class),
-            class_scope
-        ));
-        assert!(!should_exclude_fixture(
-            &make_fixture("f", FixtureScope::Module),
-            class_scope
-        ));
-        assert!(!should_exclude_fixture(
-            &make_fixture("f", FixtureScope::Session),
-            class_scope
-        ));
+        let class_scope = Some(FixtureScope::Class);
+        assert!(should_exclude_fixture(&func, class_scope));
+        assert!(!should_exclude_fixture(&class, class_scope));
+        assert!(!should_exclude_fixture(&module, class_scope));
+        assert!(!should_exclude_fixture(&session, class_scope));
     }
 
     // =========================================================================
-    // Unit tests for is_fixture_excluded (combined filtering)
+    // Unit tests for is_fixture_excluded
     // =========================================================================
 
     #[test]
@@ -481,9 +511,14 @@ mod tests {
         let cls_fixture = make_fixture("cls", FixtureScope::Function);
         let normal_fixture = make_fixture("db", FixtureScope::Function);
 
-        assert!(is_fixture_excluded(&self_fixture, None, None));
-        assert!(is_fixture_excluded(&cls_fixture, None, None));
-        assert!(!is_fixture_excluded(&normal_fixture, None, None));
+        let opts = CompletionOpts {
+            fixture_scope: None,
+            current_fixture_name: None,
+            insert_prefix: "",
+        };
+        assert!(is_fixture_excluded(&self_fixture, None, &opts));
+        assert!(is_fixture_excluded(&cls_fixture, None, &opts));
+        assert!(!is_fixture_excluded(&normal_fixture, None, &opts));
     }
 
     #[test]
@@ -491,54 +526,89 @@ mod tests {
         let fixture = make_fixture("db", FixtureScope::Function);
         let declared = vec!["db".to_string()];
 
-        assert!(is_fixture_excluded(&fixture, Some(&declared), None));
-        assert!(!is_fixture_excluded(&fixture, None, None));
+        let opts = CompletionOpts {
+            fixture_scope: None,
+            current_fixture_name: None,
+            insert_prefix: "",
+        };
+        assert!(is_fixture_excluded(&fixture, Some(&declared), &opts));
+        assert!(!is_fixture_excluded(&fixture, None, &opts));
         assert!(!is_fixture_excluded(
             &fixture,
             Some(&["other".to_string()]),
-            None
+            &opts,
         ));
     }
 
     #[test]
     fn test_is_fixture_excluded_combines_scope_and_params() {
         let func_fixture = make_fixture("db", FixtureScope::Function);
-        let session_scope = Some(FixtureScope::Session);
         let declared = vec!["db".to_string()];
+        let session_scope = Some(FixtureScope::Session);
 
-        // Both reasons to exclude
-        assert!(is_fixture_excluded(
-            &func_fixture,
-            Some(&declared),
-            session_scope
-        ));
+        // Both scope and declared params exclude
+        let opts = CompletionOpts {
+            fixture_scope: session_scope,
+            current_fixture_name: None,
+            insert_prefix: "",
+        };
+        assert!(is_fixture_excluded(&func_fixture, Some(&declared), &opts,));
 
         // Only scope excludes
         let undeclared: Vec<String> = vec![];
-        assert!(is_fixture_excluded(
-            &func_fixture,
-            Some(&undeclared),
-            session_scope
-        ));
+        assert!(is_fixture_excluded(&func_fixture, Some(&undeclared), &opts,));
 
         // Only declared params exclude
+        let session_opts = CompletionOpts {
+            fixture_scope: session_scope,
+            current_fixture_name: None,
+            insert_prefix: "",
+        };
         assert!(is_fixture_excluded(
             &make_fixture("db", FixtureScope::Session),
             Some(&declared),
-            session_scope
+            &session_opts,
         ));
 
         // Neither excludes
         assert!(!is_fixture_excluded(
             &make_fixture("other", FixtureScope::Session),
             Some(&undeclared),
-            session_scope
+            &session_opts,
         ));
     }
 
     // =========================================================================
     // Unit tests for filter_and_enrich_fixtures
     // =========================================================================
+
+    #[test]
+    fn test_filter_and_enrich_excludes_current_fixture() {
+        let file = std::path::Path::new("/tmp/test/conftest.py");
+        let fixtures = vec![
+            make_fixture("my_fixture", FixtureScope::Function),
+            make_fixture("other_fixture", FixtureScope::Function),
+        ];
+
+        // When editing my_fixture, it should be excluded
+        let opts = CompletionOpts {
+            fixture_scope: Some(FixtureScope::Function),
+            current_fixture_name: Some("my_fixture"),
+            insert_prefix: "",
+        };
+        let enriched = filter_and_enrich_fixtures(fixtures.clone(), file, None, &opts);
+        assert_eq!(enriched.len(), 1);
+        assert_eq!(enriched[0].fixture.name, "other_fixture");
+
+        // When editing a test (no current_fixture_name), both should be included
+        let test_opts = CompletionOpts {
+            fixture_scope: None,
+            current_fixture_name: None,
+            insert_prefix: "",
+        };
+        let enriched = filter_and_enrich_fixtures(fixtures, file, None, &test_opts);
+        assert_eq!(enriched.len(), 2);
+    }
 
     #[test]
     fn test_filter_and_enrich_excludes_scope_incompatible() {
@@ -550,37 +620,42 @@ mod tests {
             make_fixture("session_fix", FixtureScope::Session),
         ];
 
-        // Session-scoped fixture context: only session-scoped should survive
-        let enriched = filter_and_enrich_fixtures(
-            fixtures.clone(),
-            &file_path,
-            Some(&[]),
-            Some(FixtureScope::Session),
-        );
+        // Session scope fixture: only session-scoped fixtures should survive
+        let opts = CompletionOpts {
+            fixture_scope: Some(FixtureScope::Session),
+            current_fixture_name: None,
+            insert_prefix: "",
+        };
+        let enriched = filter_and_enrich_fixtures(fixtures.clone(), &file_path, Some(&[]), &opts);
         let names: Vec<&str> = enriched.iter().map(|e| e.fixture.name.as_str()).collect();
         assert_eq!(names, vec!["session_fix"]);
 
-        // Module-scoped fixture context: module, package, session should survive
-        let enriched = filter_and_enrich_fixtures(
-            fixtures.clone(),
-            &file_path,
-            Some(&[]),
-            Some(FixtureScope::Module),
-        );
+        // Module scope fixture: module and session should survive
+        let opts = CompletionOpts {
+            fixture_scope: Some(FixtureScope::Module),
+            current_fixture_name: None,
+            insert_prefix: "",
+        };
+        let enriched = filter_and_enrich_fixtures(fixtures.clone(), &file_path, Some(&[]), &opts);
         let names: Vec<&str> = enriched.iter().map(|e| e.fixture.name.as_str()).collect();
         assert_eq!(names, vec!["module_fix", "session_fix"]);
 
-        // Function-scoped fixture context: all should survive
-        let enriched = filter_and_enrich_fixtures(
-            fixtures.clone(),
-            &file_path,
-            Some(&[]),
-            Some(FixtureScope::Function),
-        );
+        // Function scope fixture: all should survive
+        let opts = CompletionOpts {
+            fixture_scope: Some(FixtureScope::Function),
+            current_fixture_name: None,
+            insert_prefix: "",
+        };
+        let enriched = filter_and_enrich_fixtures(fixtures.clone(), &file_path, Some(&[]), &opts);
         assert_eq!(enriched.len(), 4);
 
         // Test function context (None scope): all should survive
-        let enriched = filter_and_enrich_fixtures(fixtures.clone(), &file_path, Some(&[]), None);
+        let opts = CompletionOpts {
+            fixture_scope: None,
+            current_fixture_name: None,
+            insert_prefix: "",
+        };
+        let enriched = filter_and_enrich_fixtures(fixtures.clone(), &file_path, Some(&[]), &opts);
         assert_eq!(enriched.len(), 4);
     }
 
@@ -594,7 +669,12 @@ mod tests {
         ];
 
         let declared = vec!["db".to_string(), "client".to_string()];
-        let enriched = filter_and_enrich_fixtures(fixtures, &file_path, Some(&declared), None);
+        let opts = CompletionOpts {
+            fixture_scope: None,
+            current_fixture_name: None,
+            insert_prefix: "",
+        };
+        let enriched = filter_and_enrich_fixtures(fixtures, &file_path, Some(&declared), &opts);
         let names: Vec<&str> = enriched.iter().map(|e| e.fixture.name.as_str()).collect();
         assert_eq!(names, vec!["app"]);
     }
@@ -607,11 +687,16 @@ mod tests {
             make_fixture("cls", FixtureScope::Function),
             make_fixture("real_fixture", FixtureScope::Function),
         ];
-        // Make self/cls look like they came from somewhere
+        // Override names for the first two
         fixtures[0].name = "self".to_string();
         fixtures[1].name = "cls".to_string();
 
-        let enriched = filter_and_enrich_fixtures(fixtures, &file_path, None, None);
+        let opts = CompletionOpts {
+            fixture_scope: None,
+            current_fixture_name: None,
+            insert_prefix: "",
+        };
+        let enriched = filter_and_enrich_fixtures(fixtures, &file_path, None, &opts);
         let names: Vec<&str> = enriched.iter().map(|e| e.fixture.name.as_str()).collect();
         assert_eq!(names, vec!["real_fixture"]);
     }
@@ -678,7 +763,7 @@ mod tests {
     fn test_make_fixture_detail_default_scope() {
         let fixture = make_fixture("f", FixtureScope::Function);
         let detail = make_fixture_detail(&fixture);
-        assert_eq!(detail, "");
+        assert_eq!(detail, ""); // default scope not shown
     }
 
     #[test]
@@ -710,7 +795,7 @@ mod tests {
         fixture.is_third_party = true;
         fixture.is_plugin = true;
         let detail = make_fixture_detail(&fixture);
-        // Third-party tag takes precedence
+        // third_party tag takes precedence over plugin tag
         assert_eq!(detail, "(session) [third-party]");
     }
 
@@ -722,27 +807,26 @@ mod tests {
     fn test_make_sort_text_ordering() {
         let same_file = make_sort_text(0, "zzz");
         let conftest = make_sort_text(1, "aaa");
+        let plugin = make_sort_text(2, "aaa");
         let third_party = make_sort_text(3, "aaa");
 
-        // Same-file should sort before conftest even with later alpha name
+        // Group ordering: same_file < conftest < plugin < third_party
         assert!(same_file < conftest);
-        // Conftest should sort before third-party
-        assert!(conftest < third_party);
+        assert!(conftest < plugin);
+        assert!(plugin < third_party);
     }
 
     #[test]
     fn test_make_sort_text_alpha_within_group() {
-        let a = make_sort_text(1, "alpha");
-        let b = make_sort_text(1, "beta");
+        let a = make_sort_text(0, "alpha");
+        let b = make_sort_text(0, "beta");
         assert!(a < b);
     }
 
     // =========================================================================
-    // Integration tests for Backend completion methods
+    // Integration tests with Backend
     // =========================================================================
 
-    use crate::fixtures::FixtureDatabase;
-    use std::sync::Arc;
     use tower_lsp_server::LspService;
 
     /// Create a Backend instance for testing by using LspService to obtain a Client.
@@ -822,13 +906,20 @@ def test_something(func_fixture):
         }
     }
 
-    // ---- create_fixture_completions ----
+    // =========================================================================
+    // Tests for create_fixture_completions
+    // =========================================================================
 
     #[test]
     fn test_create_fixture_completions_returns_items() {
         let (backend, test_path) = setup_backend_with_fixtures();
         let declared = vec![];
-        let response = backend.create_fixture_completions(&test_path, &declared, None, None);
+        let opts = CompletionOpts {
+            fixture_scope: None,
+            current_fixture_name: None,
+            insert_prefix: "",
+        };
+        let response = backend.create_fixture_completions(&test_path, &declared, None, &opts);
         let items = extract_items(&response);
         assert!(!items.is_empty(), "Should return completion items");
         // All items should have VARIABLE kind
@@ -844,12 +935,17 @@ def test_something(func_fixture):
     fn test_create_fixture_completions_filters_declared() {
         let (backend, test_path) = setup_backend_with_fixtures();
         let declared = vec!["func_fixture".to_string()];
-        let response = backend.create_fixture_completions(&test_path, &declared, None, None);
+        let opts = CompletionOpts {
+            fixture_scope: None,
+            current_fixture_name: None,
+            insert_prefix: "",
+        };
+        let response = backend.create_fixture_completions(&test_path, &declared, None, &opts);
         let items = extract_items(&response);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(
             !labels.contains(&"func_fixture"),
-            "func_fixture should be filtered out since it's declared"
+            "func_fixture should be filtered out"
         );
     }
 
@@ -858,21 +954,21 @@ def test_something(func_fixture):
         let (backend, test_path) = setup_backend_with_fixtures();
         let declared = vec![];
         // Session scope: only session-scoped fixtures should appear
-        let response = backend.create_fixture_completions(
-            &test_path,
-            &declared,
-            None,
-            Some(FixtureScope::Session),
-        );
+        let opts = CompletionOpts {
+            fixture_scope: Some(FixtureScope::Session),
+            current_fixture_name: None,
+            insert_prefix: "",
+        };
+        let response = backend.create_fixture_completions(&test_path, &declared, None, &opts);
         let items = extract_items(&response);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(
             !labels.contains(&"func_fixture"),
-            "func_fixture should be excluded for session scope"
+            "func_fixture should be excluded by session scope filter"
         );
         assert!(
             labels.contains(&"session_fixture"),
-            "session_fixture should be included, got: {:?}",
+            "session_fixture should be present, got: {:?}",
             labels
         );
     }
@@ -881,7 +977,12 @@ def test_something(func_fixture):
     fn test_create_fixture_completions_detail_and_sort() {
         let (backend, test_path) = setup_backend_with_fixtures();
         let declared = vec![];
-        let response = backend.create_fixture_completions(&test_path, &declared, None, None);
+        let opts = CompletionOpts {
+            fixture_scope: None,
+            current_fixture_name: None,
+            insert_prefix: "",
+        };
+        let response = backend.create_fixture_completions(&test_path, &declared, None, &opts);
         let items = extract_items(&response);
 
         // Find the session_fixture — it should have scope in detail
@@ -909,14 +1010,19 @@ def test_something(func_fixture):
     fn test_create_fixture_completions_documentation() {
         let (backend, test_path) = setup_backend_with_fixtures();
         let declared = vec![];
-        let response = backend.create_fixture_completions(&test_path, &declared, None, None);
+        let opts = CompletionOpts {
+            fixture_scope: None,
+            current_fixture_name: None,
+            insert_prefix: "",
+        };
+        let response = backend.create_fixture_completions(&test_path, &declared, None, &opts);
         let items = extract_items(&response);
 
         // All items should have documentation
         for item in items {
             assert!(
                 item.documentation.is_some(),
-                "Item '{}' should have documentation",
+                "Completion item '{}' should have documentation",
                 item.label
             );
         }
@@ -927,22 +1033,34 @@ def test_something(func_fixture):
         let (backend, test_path) = setup_backend_with_fixtures();
         let declared = vec![];
         let workspace_root = PathBuf::from("/tmp/test_backend");
+        let opts = CompletionOpts {
+            fixture_scope: None,
+            current_fixture_name: None,
+            insert_prefix: "",
+        };
         let response =
-            backend.create_fixture_completions(&test_path, &declared, Some(&workspace_root), None);
+            backend.create_fixture_completions(&test_path, &declared, Some(&workspace_root), &opts);
         let items = extract_items(&response);
         assert!(!items.is_empty());
     }
 
-    // ---- create_fixture_completions_with_auto_add ----
+    // =========================================================================
+    // Tests for create_fixture_completions_with_auto_add
+    // =========================================================================
 
     #[test]
     fn test_create_fixture_completions_with_auto_add_returns_items() {
         let (backend, test_path) = setup_backend_with_fixtures();
         let declared = vec![];
+        let opts = CompletionOpts {
+            fixture_scope: None,
+            current_fixture_name: None,
+            insert_prefix: "",
+        };
         // function_line is 1-based internal line of `def test_something(func_fixture):`
         // In test_content, test_something is at line 8 (1-indexed)
         let response =
-            backend.create_fixture_completions_with_auto_add(&test_path, &declared, 8, None, None);
+            backend.create_fixture_completions_with_auto_add(&test_path, &declared, 8, None, &opts);
         let items = extract_items(&response);
         assert!(!items.is_empty(), "Should return completion items");
         for item in items {
@@ -957,8 +1075,13 @@ def test_something(func_fixture):
         let (backend, test_path) = setup_backend_with_fixtures();
         let declared = vec!["func_fixture".to_string()];
         // Line 8 has: def test_something(func_fixture):
+        let opts = CompletionOpts {
+            fixture_scope: None,
+            current_fixture_name: None,
+            insert_prefix: "",
+        };
         let response =
-            backend.create_fixture_completions_with_auto_add(&test_path, &declared, 8, None, None);
+            backend.create_fixture_completions_with_auto_add(&test_path, &declared, 8, None, &opts);
         let items = extract_items(&response);
         // Items should have additional_text_edits to add parameter
         for item in items {
@@ -976,18 +1099,18 @@ def test_something(func_fixture):
     fn test_create_fixture_completions_with_auto_add_scope_filter() {
         let (backend, test_path) = setup_backend_with_fixtures();
         let declared = vec![];
-        let response = backend.create_fixture_completions_with_auto_add(
-            &test_path,
-            &declared,
-            8,
-            None,
-            Some(FixtureScope::Session),
-        );
+        let opts = CompletionOpts {
+            fixture_scope: Some(FixtureScope::Session),
+            current_fixture_name: None,
+            insert_prefix: "",
+        };
+        let response =
+            backend.create_fixture_completions_with_auto_add(&test_path, &declared, 8, None, &opts);
         let items = extract_items(&response);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(
             !labels.contains(&"func_fixture"),
-            "func_fixture should be excluded for session scope"
+            "func_fixture should be excluded by session scope"
         );
     }
 
@@ -995,8 +1118,13 @@ def test_something(func_fixture):
     fn test_create_fixture_completions_with_auto_add_filters_declared() {
         let (backend, test_path) = setup_backend_with_fixtures();
         let declared = vec!["session_fixture".to_string(), "func_fixture".to_string()];
+        let opts = CompletionOpts {
+            fixture_scope: None,
+            current_fixture_name: None,
+            insert_prefix: "",
+        };
         let response =
-            backend.create_fixture_completions_with_auto_add(&test_path, &declared, 8, None, None);
+            backend.create_fixture_completions_with_auto_add(&test_path, &declared, 8, None, &opts);
         let items = extract_items(&response);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(
@@ -1007,6 +1135,75 @@ def test_something(func_fixture):
             !labels.contains(&"session_fixture"),
             "session_fixture should be filtered"
         );
+    }
+
+    #[test]
+    fn test_create_fixture_completions_with_auto_add_filters_current_fixture() {
+        let (backend, file_path) = setup_backend_with_fixtures();
+        // When editing func_fixture, it should not appear in completions
+        let opts = CompletionOpts {
+            fixture_scope: Some(FixtureScope::Function),
+            current_fixture_name: Some("func_fixture"),
+            insert_prefix: "",
+        };
+        let response = backend.create_fixture_completions(&file_path, &[], None, &opts);
+        let items = extract_items(&response);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            !labels.contains(&"func_fixture"),
+            "Current fixture should be excluded from completions, got: {:?}",
+            labels
+        );
+        assert!(
+            labels.contains(&"session_fixture"),
+            "Other fixtures should still appear"
+        );
+    }
+
+    #[test]
+    fn test_create_fixture_completions_comma_trigger_adds_space() {
+        let (backend, test_path) = setup_backend_with_fixtures();
+        let declared = vec![];
+        // Comma trigger — space prefix
+        let opts = CompletionOpts {
+            fixture_scope: None,
+            current_fixture_name: None,
+            insert_prefix: " ",
+        };
+        let response = backend.create_fixture_completions(&test_path, &declared, None, &opts);
+        let items = extract_items(&response);
+        assert!(!items.is_empty());
+        for item in items {
+            let text = item.insert_text.as_ref().unwrap();
+            assert!(
+                text.starts_with(' '),
+                "insert_text should start with space for comma trigger, got: {:?}",
+                text
+            );
+        }
+    }
+
+    #[test]
+    fn test_create_fixture_completions_no_trigger_no_space() {
+        let (backend, test_path) = setup_backend_with_fixtures();
+        let declared = vec![];
+        // No trigger character — empty prefix
+        let opts = CompletionOpts {
+            fixture_scope: None,
+            current_fixture_name: None,
+            insert_prefix: "",
+        };
+        let response = backend.create_fixture_completions(&test_path, &declared, None, &opts);
+        let items = extract_items(&response);
+        assert!(!items.is_empty());
+        for item in items {
+            let text = item.insert_text.as_ref().unwrap();
+            assert!(
+                !text.starts_with(' '),
+                "insert_text should NOT start with space without comma trigger, got: {:?}",
+                text
+            );
+        }
     }
 
     #[test]
@@ -1036,8 +1233,13 @@ def test_empty_params():
         let backend = make_backend_with_db(db);
         let declared: Vec<String> = vec![];
         // Line 2 (1-indexed) is `def test_empty_params():`
+        let opts = CompletionOpts {
+            fixture_scope: None,
+            current_fixture_name: None,
+            insert_prefix: "",
+        };
         let response =
-            backend.create_fixture_completions_with_auto_add(&test_path, &declared, 2, None, None);
+            backend.create_fixture_completions_with_auto_add(&test_path, &declared, 2, None, &opts);
         let items = extract_items(&response);
         assert!(!items.is_empty(), "Should return completion items");
 
@@ -1054,12 +1256,14 @@ def test_empty_params():
         );
     }
 
-    // ---- create_string_fixture_completions ----
+    // =========================================================================
+    // Tests for create_string_fixture_completions
+    // =========================================================================
 
     #[test]
     fn test_create_string_fixture_completions_returns_items() {
         let (backend, test_path) = setup_backend_with_fixtures();
-        let response = backend.create_string_fixture_completions(&test_path, None);
+        let response = backend.create_string_fixture_completions(&test_path, None, "");
         let items = extract_items(&response);
         assert!(!items.is_empty(), "Should return string completion items");
         // String completions use TEXT kind
@@ -1079,7 +1283,7 @@ def test_empty_params():
     fn test_create_string_fixture_completions_no_scope_filtering() {
         let (backend, test_path) = setup_backend_with_fixtures();
         // String completions should NOT filter by scope
-        let response = backend.create_string_fixture_completions(&test_path, None);
+        let response = backend.create_string_fixture_completions(&test_path, None, "");
         let items = extract_items(&response);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         // Both function and session scoped fixtures should be present
@@ -1099,7 +1303,8 @@ def test_empty_params():
     fn test_create_string_fixture_completions_with_workspace_root() {
         let (backend, test_path) = setup_backend_with_fixtures();
         let workspace_root = PathBuf::from("/tmp/test_backend");
-        let response = backend.create_string_fixture_completions(&test_path, Some(&workspace_root));
+        let response =
+            backend.create_string_fixture_completions(&test_path, Some(&workspace_root), "");
         let items = extract_items(&response);
         assert!(!items.is_empty());
     }
@@ -1107,7 +1312,7 @@ def test_empty_params():
     #[test]
     fn test_create_string_fixture_completions_has_detail_and_sort() {
         let (backend, test_path) = setup_backend_with_fixtures();
-        let response = backend.create_string_fixture_completions(&test_path, None);
+        let response = backend.create_string_fixture_completions(&test_path, None, "");
         let items = extract_items(&response);
 
         let session_item = items.iter().find(|i| i.label == "session_fixture");
@@ -1126,14 +1331,21 @@ def test_empty_params():
         );
     }
 
-    // ---- Edge case: empty fixture database ----
+    // =========================================================================
+    // Edge case tests
+    // =========================================================================
 
     #[test]
     fn test_create_fixture_completions_empty_db() {
         let db = Arc::new(FixtureDatabase::new());
         let backend = make_backend_with_db(db);
         let path = PathBuf::from("/tmp/empty/test_file.py");
-        let response = backend.create_fixture_completions(&path, &[], None, None);
+        let opts = CompletionOpts {
+            fixture_scope: None,
+            current_fixture_name: None,
+            insert_prefix: "",
+        };
+        let response = backend.create_fixture_completions(&path, &[], None, &opts);
         let items = extract_items(&response);
         assert!(items.is_empty(), "Empty DB should return no completions");
     }
@@ -1143,7 +1355,12 @@ def test_empty_params():
         let db = Arc::new(FixtureDatabase::new());
         let backend = make_backend_with_db(db);
         let path = PathBuf::from("/tmp/empty/test_file.py");
-        let response = backend.create_fixture_completions_with_auto_add(&path, &[], 1, None, None);
+        let opts = CompletionOpts {
+            fixture_scope: None,
+            current_fixture_name: None,
+            insert_prefix: "",
+        };
+        let response = backend.create_fixture_completions_with_auto_add(&path, &[], 1, None, &opts);
         let items = extract_items(&response);
         assert!(items.is_empty(), "Empty DB should return no completions");
     }
@@ -1153,7 +1370,7 @@ def test_empty_params():
         let db = Arc::new(FixtureDatabase::new());
         let backend = make_backend_with_db(db);
         let path = PathBuf::from("/tmp/empty/test_file.py");
-        let response = backend.create_string_fixture_completions(&path, None);
+        let response = backend.create_string_fixture_completions(&path, None, "");
         let items = extract_items(&response);
         assert!(items.is_empty(), "Empty DB should return no completions");
     }

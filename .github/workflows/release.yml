@@ -260,7 +260,7 @@ jobs:
           path: binaries
 
       - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: "wheels/*/*.whl"
 

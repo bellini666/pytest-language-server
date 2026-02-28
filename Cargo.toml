@@ -41,5 +41,5 @@ glob = "0.3"
 insta = { version = "1.46", features = ["yaml"] }
 assert_cmd = "2.1"
 predicates = "3.1"
-tempfile = "3.25.0"
+tempfile = "3.26.0"
 ntest = "0.9"

@@ -76,16 +76,15 @@ impl FixtureDatabase {
 
     /// Scan a workspace directory with custom exclude patterns.
     pub fn scan_workspace_with_excludes(&self, root_path: &Path, exclude_patterns: &[Pattern]) {
+        let root_path = root_path
+            .canonicalize()
+            .unwrap_or_else(|_| root_path.to_path_buf());
+        let root_path = root_path.as_path();
+
         info!("Scanning workspace: {:?}", root_path);
 
-        // Store workspace root for editable install third-party detection
-        *self.workspace_root.lock().unwrap() = Some(
-            root_path
-                .canonicalize()
-                .unwrap_or_else(|_| root_path.to_path_buf()),
-        );
+        *self.workspace_root.lock().unwrap() = Some(root_path.to_path_buf());
 
-        // Defensive check: ensure the root path exists
         if !root_path.exists() {
             warn!(
                 "Workspace path does not exist, skipping scan: {:?}",
@@ -134,14 +133,15 @@ impl FixtureDatabase {
 
             let path = entry.path();
 
-            // Skip files in filtered directories (shouldn't happen with filter_entry, but just in case)
-            if path.components().any(|c| {
-                c.as_os_str()
-                    .to_str()
-                    .is_some_and(Self::should_skip_directory)
-            }) {
-                skipped_dirs += 1;
-                continue;
+            if let Ok(relative) = path.strip_prefix(root_path) {
+                if relative.components().any(|c| {
+                    c.as_os_str()
+                        .to_str()
+                        .is_some_and(Self::should_skip_directory)
+                }) {
+                    skipped_dirs += 1;
+                    continue;
+                }
             }
 
             // Skip files matching user-configured exclude patterns

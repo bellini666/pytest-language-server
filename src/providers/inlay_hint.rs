@@ -75,8 +75,10 @@ impl Backend {
         // visible area, parameters outside the viewport are silently dropped, causing hints to
         // appear/disappear as the user scrolls.
         //
-        // Fixture files are small enough that returning all hints at once is not a performance
-        // concern.
+        // This handler is invoked for any opened Python file,
+        // but the hint count is naturally bounded: only parameter usages of fixtures that carry
+        // an explicit return-type annotation produce a hint, so the result set stays small even
+        // for large test modules.
 
         let mut hints = Vec::new();
 

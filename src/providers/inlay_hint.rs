@@ -81,6 +81,12 @@ impl Backend {
         let mut hints = Vec::new();
 
         for usage in usages.iter() {
+            // Only show hints for function parameter usages, not string literals
+            // inside decorators like @pytest.mark.usefixtures("name")
+            if !usage.is_parameter {
+                continue;
+            }
+
             // Look up return type from pre-computed map
             if let Some(&return_type) = fixture_map.get(usage.name.as_str()) {
                 // Check if this parameter already has a type annotation

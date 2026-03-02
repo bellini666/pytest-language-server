@@ -218,9 +218,6 @@ impl FixtureDatabase {
             .chain(args.kwonlyargs.iter())
     }
 
-    /// Helper to record a fixture usage in the database.
-    /// Reduces code duplication across multiple call sites.
-    /// Also maintains usage_by_fixture reverse index for efficient reference lookups.
     fn record_fixture_usage(
         &self,
         file_path: &Path,
@@ -228,6 +225,7 @@ impl FixtureDatabase {
         line: usize,
         start_char: usize,
         end_char: usize,
+        is_parameter: bool,
     ) {
         let file_path_buf = file_path.to_path_buf();
         let usage = FixtureUsage {
@@ -236,6 +234,7 @@ impl FixtureDatabase {
             line,
             start_char,
             end_char,
+            is_parameter,
         };
 
         // Add to per-file usages map
@@ -335,6 +334,7 @@ impl FixtureDatabase {
                         usage_line,
                         start_char + 1,
                         end_char - 1,
+                        false,
                     );
                 }
             }
@@ -389,6 +389,7 @@ impl FixtureDatabase {
                     usage_line,
                     start_char + 1,
                     end_char - 1,
+                    false,
                 );
             }
         }
@@ -414,6 +415,7 @@ impl FixtureDatabase {
                     usage_line,
                     start_char + 1,
                     end_char - 1,
+                    false,
                 );
             }
         }
@@ -517,6 +519,7 @@ impl FixtureDatabase {
                         arg_line,
                         start_char,
                         end_char,
+                        true,
                     );
                 }
             }
@@ -568,6 +571,7 @@ impl FixtureDatabase {
                         arg_line,
                         start_char,
                         end_char,
+                        true,
                     );
                 }
             }
@@ -679,6 +683,7 @@ impl FixtureDatabase {
                 usage_line,
                 start_char.saturating_add(1),
                 end_char.saturating_sub(1),
+                false,
             );
         }
     }

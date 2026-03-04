@@ -5,7 +5,7 @@
 //! and undeclared fixture scanning is in `undeclared.rs`.
 
 use super::decorators;
-use super::types::{FixtureDefinition, FixtureScope, FixtureUsage};
+use super::types::{FixtureDefinition, FixtureUsage};
 use super::FixtureDatabase;
 use rustpython_parser::ast::{ArgWithDefault, Arguments, Expr, Stmt};
 use rustpython_parser::{parse, Mode};
@@ -631,7 +631,8 @@ impl FixtureDatabase {
                                 is_third_party,
                                 is_plugin,
                                 dependencies: Vec::new(), // Assignment-style fixtures don't have explicit dependencies
-                                scope: FixtureScope::default(), // Assignment-style fixtures default to function scope
+                                scope: decorators::extract_fixture_scope(&outer_call.func)
+                                    .unwrap_or_default(),
                                 yield_line: None, // Assignment-style fixtures don't have yield statements
                                 autouse: false,   // Assignment-style fixtures are never autouse
                             };

@@ -9610,6 +9610,209 @@ def session_fix():
     );
 }
 
+// ============ Assignment-Style Fixture Scope Tests ============
+
+#[test]
+#[timeout(30000)]
+fn test_assignment_fixture_default_scope_is_function() {
+    use pytest_language_server::FixtureScope;
+
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+def _mocker():
+    pass
+
+mocker = pytest.fixture()(_mocker)
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    assert!(
+        db.definitions.contains_key("mocker"),
+        "mocker fixture should be detected"
+    );
+    assert_eq!(
+        db.definitions.get("mocker").unwrap()[0].scope,
+        FixtureScope::Function,
+        "mocker with no scope argument should default to function scope"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_assignment_fixture_class_scope() {
+    use pytest_language_server::FixtureScope;
+
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+def _mocker():
+    pass
+
+class_mocker = pytest.fixture(scope="class")(_mocker)
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    assert!(
+        db.definitions.contains_key("class_mocker"),
+        "class_mocker fixture should be detected"
+    );
+    assert_eq!(
+        db.definitions.get("class_mocker").unwrap()[0].scope,
+        FixtureScope::Class,
+        "class_mocker should have class scope"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_assignment_fixture_module_scope() {
+    use pytest_language_server::FixtureScope;
+
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+def _mocker():
+    pass
+
+module_mocker = pytest.fixture(scope="module")(_mocker)
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    assert!(
+        db.definitions.contains_key("module_mocker"),
+        "module_mocker fixture should be detected"
+    );
+    assert_eq!(
+        db.definitions.get("module_mocker").unwrap()[0].scope,
+        FixtureScope::Module,
+        "module_mocker should have module scope"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_assignment_fixture_package_scope() {
+    use pytest_language_server::FixtureScope;
+
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+def _mocker():
+    pass
+
+package_mocker = pytest.fixture(scope="package")(_mocker)
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    assert!(
+        db.definitions.contains_key("package_mocker"),
+        "package_mocker fixture should be detected"
+    );
+    assert_eq!(
+        db.definitions.get("package_mocker").unwrap()[0].scope,
+        FixtureScope::Package,
+        "package_mocker should have package scope"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_assignment_fixture_session_scope() {
+    use pytest_language_server::FixtureScope;
+
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+def _mocker():
+    pass
+
+session_mocker = pytest.fixture(scope="session")(_mocker)
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    assert!(
+        db.definitions.contains_key("session_mocker"),
+        "session_mocker fixture should be detected"
+    );
+    assert_eq!(
+        db.definitions.get("session_mocker").unwrap()[0].scope,
+        FixtureScope::Session,
+        "session_mocker should have session scope"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_assignment_fixture_all_scopes_together() {
+    use pytest_language_server::FixtureScope;
+
+    let db = FixtureDatabase::new();
+
+    // This mirrors the real pytest-mock pattern exactly
+    let content = r#"
+import pytest
+
+def _mocker():
+    pass
+
+mocker = pytest.fixture()(_mocker)
+class_mocker = pytest.fixture(scope="class")(_mocker)
+module_mocker = pytest.fixture(scope="module")(_mocker)
+package_mocker = pytest.fixture(scope="package")(_mocker)
+session_mocker = pytest.fixture(scope="session")(_mocker)
+"#;
+
+    let path = PathBuf::from("/tmp/test/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    assert_eq!(
+        db.definitions.get("mocker").unwrap()[0].scope,
+        FixtureScope::Function,
+        "mocker (no scope arg) should be function scope"
+    );
+    assert_eq!(
+        db.definitions.get("class_mocker").unwrap()[0].scope,
+        FixtureScope::Class,
+        "class_mocker should be class scope"
+    );
+    assert_eq!(
+        db.definitions.get("module_mocker").unwrap()[0].scope,
+        FixtureScope::Module,
+        "module_mocker should be module scope"
+    );
+    assert_eq!(
+        db.definitions.get("package_mocker").unwrap()[0].scope,
+        FixtureScope::Package,
+        "package_mocker should be package scope"
+    );
+    assert_eq!(
+        db.definitions.get("session_mocker").unwrap()[0].scope,
+        FixtureScope::Session,
+        "session_mocker should be session scope"
+    );
+}
+
 // ============ Yield Line Extraction Tests ============
 
 #[test]

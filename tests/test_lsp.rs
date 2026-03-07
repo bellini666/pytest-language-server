@@ -3373,6 +3373,102 @@ def test_multiline(
     );
 }
 
+#[test]
+#[timeout(30000)]
+fn test_inlay_hints_not_shown_for_usefixtures_or_parametrize_indirect() {
+    // Regression test: inlay hints must only be emitted for function *parameter* usages.
+    // String-literal usages inside @pytest.mark.usefixtures(...) and
+    // @pytest.mark.parametrize(..., indirect=...) must never produce hints, even when the
+    // referenced fixture carries an explicit return-type annotation.
+    use pytest_language_server::FixtureDatabase;
+    use std::path::PathBuf;
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_inlay_nostring/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_inlay_nostring/test_example.py");
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def db_fixture() -> Database:
+    return Database()
+
+@pytest.fixture
+def user_fixture() -> User:
+    return User()
+
+@pytest.fixture
+def param_fixture() -> Config:
+    return Config()
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // The test file exercises all three usage kinds:
+    //   1. @pytest.mark.usefixtures("db_fixture")              — string literal on function
+    //   2. parametrize indirect=["user_fixture"]               — string literal in decorator
+    //      (parametrize arg name must match the fixture name for indirect to be recorded)
+    //   3. param_fixture as a plain parameter                  — the only one that should get a hint
+    let test_content = r#"
+import pytest
+
+@pytest.mark.usefixtures("db_fixture")
+@pytest.mark.parametrize("user_fixture", [1, 2], indirect=["user_fixture"])
+def test_example(param_fixture):
+    pass
+"#;
+    db.analyze_file(test_path.clone(), test_content);
+
+    let usages = db.usages.get(&test_path).unwrap();
+
+    // All three usages must be tracked (for go-to-def / find-refs to work)
+    assert_eq!(usages.len(), 3, "Should track all 3 fixture usages");
+
+    // Verify is_parameter flag is set correctly for each kind
+    let db_usage = usages.iter().find(|u| u.name == "db_fixture").unwrap();
+    assert!(
+        !db_usage.is_parameter,
+        "db_fixture via usefixtures should NOT be a parameter usage"
+    );
+
+    let user_usage = usages.iter().find(|u| u.name == "user_fixture").unwrap();
+    assert!(
+        !user_usage.is_parameter,
+        "user_fixture via parametrize indirect should NOT be a parameter usage"
+    );
+
+    let param_usage = usages.iter().find(|u| u.name == "param_fixture").unwrap();
+    assert!(
+        param_usage.is_parameter,
+        "param_fixture as a function parameter SHOULD be a parameter usage"
+    );
+
+    // Simulate the inlay hint provider's filter: only is_parameter usages with a known
+    // return type should produce hints.
+    let available = db.get_available_fixtures(&test_path);
+    let fixture_map: std::collections::HashMap<&str, &str> = available
+        .iter()
+        .filter_map(|def| {
+            def.return_type
+                .as_ref()
+                .map(|rt| (def.name.as_str(), rt.as_str()))
+        })
+        .collect();
+
+    let hint_usages: Vec<_> = usages
+        .iter()
+        .filter(|u| u.is_parameter && fixture_map.contains_key(u.name.as_str()))
+        .collect();
+
+    assert_eq!(
+        hint_usages.len(),
+        1,
+        "Exactly one hint should be produced (param_fixture); got: {:?}",
+        hint_usages.iter().map(|u| &u.name).collect::<Vec<_>>()
+    );
+    assert_eq!(hint_usages[0].name, "param_fixture");
+}
+
 // =============================================================================
 // Call Hierarchy Tests
 // =============================================================================

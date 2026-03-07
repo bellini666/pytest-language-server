@@ -63,7 +63,6 @@ pub struct FixtureDefinition {
     pub autouse: bool,   // Whether this fixture has autouse=True
 }
 
-/// A fixture usage (reference) in a Python file.
 #[derive(Debug, Clone)]
 pub struct FixtureUsage {
     pub name: String,
@@ -71,6 +70,11 @@ pub struct FixtureUsage {
     pub line: usize,
     pub start_char: usize, // Character position where this usage starts (on the line)
     pub end_char: usize,   // Character position where this usage ends (on the line)
+    /// Whether this usage is a function parameter (true) or a string literal
+    /// inside a decorator such as `@pytest.mark.usefixtures("name")` or
+    /// `@pytest.mark.parametrize(..., indirect=["name"])` (false).
+    /// Inlay hints are only meaningful for parameter usages.
+    pub is_parameter: bool,
 }
 
 /// An undeclared fixture used in a function body without being declared as a parameter.

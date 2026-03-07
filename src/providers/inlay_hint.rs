@@ -23,9 +23,8 @@ impl Backend {
         params: InlayHintParams,
     ) -> Result<Option<Vec<InlayHint>>> {
         let uri = params.text_document.uri;
-        let range = params.range;
 
-        info!("inlay_hint request: uri={:?}, range={:?}", uri, range);
+        info!("inlay_hint request: uri={:?}", uri);
 
         let Some(file_path) = self.uri_to_path(&uri) else {
             return Ok(None);
@@ -68,15 +67,25 @@ impl Backend {
             return Ok(Some(Vec::new()));
         }
 
-        // Convert LSP range to internal line numbers (1-based)
-        let start_line = Self::lsp_line_to_internal(range.start.line);
-        let end_line = Self::lsp_line_to_internal(range.end.line);
+        // Note: we intentionally ignore `params.range` and return hints for the entire file.
+        //
+        // The LSP spec allows servers to return hints outside the requested range; editors
+        // will cache and re-use them. Restricting by the viewport range causes flakiness for
+        // multi-line function signatures: when a signature spans the top or bottom edge of the
+        // visible area, parameters outside the viewport are silently dropped, causing hints to
+        // appear/disappear as the user scrolls.
+        //
+        // This handler is invoked for any opened Python file,
+        // but the hint count is naturally bounded: only parameter usages of fixtures that carry
+        // an explicit return-type annotation produce a hint, so the result set stays small even
+        // for large test modules.
 
         let mut hints = Vec::new();
 
         for usage in usages.iter() {
-            // Only process usages within the requested range
-            if usage.line < start_line || usage.line > end_line {
+            // Only show hints for function parameter usages, not string literals
+            // inside decorators like @pytest.mark.usefixtures("name")
+            if !usage.is_parameter {
                 continue;
             }
 

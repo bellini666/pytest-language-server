@@ -1,6 +1,6 @@
 plugins {
     id("org.jetbrains.kotlin.jvm") version "2.3.10"
-    id("org.jetbrains.intellij.platform") version "2.12.0"
+    id("org.jetbrains.intellij.platform") version "2.13.1"
 }
 
 group = "com.github.bellini666"

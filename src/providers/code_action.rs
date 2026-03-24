@@ -426,42 +426,6 @@ fn emit_kind_import_edits(
     }
 }
 
-/// Replace all standalone occurrences of `old_name` with `new_name` in a type
-/// string, respecting identifier boundaries.
-///
-/// A match is "standalone" when it is not preceded or followed by an
-/// alphanumeric character or underscore, preventing partial matches like
-/// `"PathLike"` when searching for `"Path"`.
-fn replace_type_identifier(type_str: &str, old_name: &str, new_name: &str) -> String {
-    let mut result = String::with_capacity(type_str.len() + new_name.len());
-    let bytes = type_str.as_bytes();
-    let old_bytes = old_name.as_bytes();
-    let len = bytes.len();
-    let old_len = old_bytes.len();
-    let mut i = 0;
-
-    while i < len {
-        if i + old_len <= len && &bytes[i..i + old_len] == old_bytes {
-            let left_ok = i == 0
-                || !(bytes[i - 1].is_ascii_alphanumeric()
-                    || bytes[i - 1] == b'_'
-                    || bytes[i - 1] == b'.');
-            let right_ok = i + old_len >= len
-                || !(bytes[i + old_len].is_ascii_alphanumeric() || bytes[i + old_len] == b'_');
-
-            if left_ok && right_ok {
-                result.push_str(new_name);
-                i += old_len;
-                continue;
-            }
-        }
-        result.push(bytes[i] as char);
-        i += 1;
-    }
-
-    result
-}
-
 /// Find a bare-import entry in the consumer's import map for a given module.
 ///
 /// Scans all specs looking for `import <module>` or `import <module> as <alias>`.
@@ -590,6 +554,12 @@ fn adapt_type_for_consumer(
                     return_type, adapted
                 );
             } else {
+                // Full-or-nothing: if any dotted name in the type string cannot
+                // be safely rewritten to a short form (because it is absent from
+                // the consumer's import map or imported from a different module),
+                // keep the bare-import spec as-is rather than producing a
+                // partially-rewritten type string that mixes dotted and short
+                // notation (e.g. `pathlib.Path | PurePath`).
                 remaining.push(spec.clone());
             }
         } else if let Some((module, name_part)) = parse_from_import(&spec.import_statement) {
@@ -607,7 +577,11 @@ fn adapt_type_for_consumer(
                 find_consumer_bare_import(consumer_import_map, module)
             {
                 let dotted = format!("{}.{}", consumer_module_name, original_name);
-                let new_adapted = replace_type_identifier(&adapted, &spec.check_name, &dotted);
+                let new_adapted = crate::fixtures::string_utils::replace_identifier(
+                    &adapted,
+                    &spec.check_name,
+                    &dotted,
+                );
                 if new_adapted != adapted {
                     info!(
                         "Adapted type: '{}' → '{}' (consumer has bare import for '{}')",
@@ -730,6 +704,11 @@ fn build_import_edits(
 
         // Trailing separator when inserting a new stdlib group before an
         // *existing* third-party group.
+        // NOTE: this separator and the stdlib import lines above may share the
+        // same insertion position (e.g. both at line 0 when there are no
+        // existing imports).  The LSP spec guarantees that multiple TextEdits
+        // at the same position are applied in array order, so the separator
+        // always lands after the stdlib lines as intended.
         if will_insert_stdlib && last_stdlib_group.is_none() && first_tp_group.is_some() {
             edits.push(TextEdit {
                 range: Backend::create_point_range(fallback_line, 0),
@@ -748,6 +727,9 @@ fn build_import_edits(
 
         // Leading separator when inserting a new third-party group after
         // an existing or newly-created stdlib group.
+        // Same LSP array-order guarantee applies: the separator is pushed
+        // before the third-party import lines so it appears first at the
+        // shared insertion position.
         if will_insert_tp
             && last_tp_group.is_none()
             && (last_stdlib_group.is_some() || will_insert_stdlib)
@@ -2433,65 +2415,5 @@ mod tests {
         );
     }
 
-    // ── replace_type_identifier tests ────────────────────────────────────
-
-    #[test]
-    fn test_replace_identifier_simple() {
-        assert_eq!(
-            replace_type_identifier("Path", "Path", "pathlib.Path"),
-            "pathlib.Path"
-        );
-    }
-
-    #[test]
-    fn test_replace_identifier_in_generic() {
-        assert_eq!(
-            replace_type_identifier("Optional[Path]", "Path", "pathlib.Path"),
-            "Optional[pathlib.Path]"
-        );
-    }
-
-    #[test]
-    fn test_replace_identifier_no_partial_match() {
-        // `PathLike` should NOT be affected when replacing `Path`.
-        assert_eq!(
-            replace_type_identifier("PathLike", "Path", "pathlib.Path"),
-            "PathLike"
-        );
-    }
-
-    #[test]
-    fn test_replace_identifier_no_prefix_match() {
-        // `MyPath` should NOT be affected when replacing `Path`.
-        assert_eq!(
-            replace_type_identifier("MyPath", "Path", "pathlib.Path"),
-            "MyPath"
-        );
-    }
-
-    #[test]
-    fn test_replace_identifier_multiple_occurrences() {
-        assert_eq!(
-            replace_type_identifier("tuple[Path, Path]", "Path", "pathlib.Path"),
-            "tuple[pathlib.Path, pathlib.Path]"
-        );
-    }
-
-    #[test]
-    fn test_replace_identifier_union_pipe() {
-        assert_eq!(
-            replace_type_identifier("Path | None", "Path", "pathlib.Path"),
-            "pathlib.Path | None"
-        );
-    }
-
-    #[test]
-    fn test_replace_identifier_does_not_touch_dotted() {
-        // If the type already has `pathlib.Path`, replacing standalone `Path`
-        // should not double-qualify it. The `.` before `Path` prevents the match.
-        assert_eq!(
-            replace_type_identifier("pathlib.Path", "Path", "xx.Path"),
-            "pathlib.Path"
-        );
-    }
+    // ── replace_identifier tests live in src/fixtures/string_utils.rs ────
 }

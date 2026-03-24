@@ -5939,3 +5939,432 @@ def test_something():
         edits
     );
 }
+
+// ── Type alias expansion tests ──────────────────────────────────────────
+
+#[test]
+#[timeout(30000)]
+fn test_type_alias_old_style_expanded_in_return_type() {
+    // Old-style type alias: `MyPath = Path` then `-> MyPath`.
+    // The return type should be expanded to `Path` (not kept as `MyPath`),
+    // and the import spec should reference `Path`, not `MyPath`.
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_alias_old/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from pathlib import Path
+
+MyPath = Path
+
+@pytest.fixture
+def work_dir() -> MyPath:
+    return Path("/work")
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("work_dir").expect("fixture not found");
+    let def = &defs[0];
+
+    // Return type should be expanded from `MyPath` to `Path`.
+    assert_eq!(
+        def.return_type.as_deref(),
+        Some("Path"),
+        "Type alias should be expanded"
+    );
+    assert_eq!(
+        def.return_type_imports,
+        vec![TypeImportSpec {
+            check_name: "Path".to_string(),
+            import_statement: "from pathlib import Path".to_string(),
+        }]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_type_alias_old_style_generic_expanded() {
+    // Old-style: `UserMap = Dict[str, List[int]]` then `-> UserMap`.
+    // Should expand to `Dict[str, List[int]]` with proper imports.
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_alias_old_generic/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from typing import Dict, List
+
+UserMap = Dict[str, List[int]]
+
+@pytest.fixture
+def user_data() -> UserMap:
+    return {"scores": [1, 2, 3]}
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("user_data").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(
+        def.return_type.as_deref(),
+        Some("Dict[str, List[int]]"),
+        "Generic type alias should be expanded"
+    );
+
+    // `str` and `int` are builtins — only `Dict` and `List` need imports.
+    let check_names: Vec<&str> = def
+        .return_type_imports
+        .iter()
+        .map(|s| s.check_name.as_str())
+        .collect();
+    assert!(
+        check_names.contains(&"Dict"),
+        "Should import Dict: {:?}",
+        check_names
+    );
+    assert!(
+        check_names.contains(&"List"),
+        "Should import List: {:?}",
+        check_names
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_type_alias_pep613_expanded() {
+    // PEP 613: `MyPath: TypeAlias = Path` then `-> MyPath`.
+    // Should expand to `Path`.
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_alias_pep613/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from pathlib import Path
+from typing import TypeAlias
+
+MyPath: TypeAlias = Path
+
+@pytest.fixture
+def work_dir() -> MyPath:
+    return Path("/work")
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("work_dir").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(
+        def.return_type.as_deref(),
+        Some("Path"),
+        "PEP 613 type alias should be expanded"
+    );
+    assert_eq!(
+        def.return_type_imports,
+        vec![TypeImportSpec {
+            check_name: "Path".to_string(),
+            import_statement: "from pathlib import Path".to_string(),
+        }]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_type_alias_pep613_generic_expanded() {
+    // PEP 613: `ConfigDict: TypeAlias = Dict[str, Any]` then `-> ConfigDict`.
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_alias_pep613_gen/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from typing import Any, Dict, TypeAlias
+
+ConfigDict: TypeAlias = Dict[str, Any]
+
+@pytest.fixture
+def config() -> ConfigDict:
+    return {"debug": True}
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("config").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(
+        def.return_type.as_deref(),
+        Some("Dict[str, Any]"),
+        "PEP 613 generic alias should be expanded"
+    );
+
+    let check_names: Vec<&str> = def
+        .return_type_imports
+        .iter()
+        .map(|s| s.check_name.as_str())
+        .collect();
+    assert!(
+        check_names.contains(&"Dict"),
+        "Should import Dict: {:?}",
+        check_names
+    );
+    assert!(
+        check_names.contains(&"Any"),
+        "Should import Any: {:?}",
+        check_names
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_type_alias_chained_expansion() {
+    // Chained aliases: `A = Path`, `B = Optional[A]`, fixture `-> B`.
+    // Should expand B → Optional[A] → Optional[Path].
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_alias_chain/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from pathlib import Path
+from typing import Optional
+
+MyPath = Path
+MaybePath = Optional[MyPath]
+
+@pytest.fixture
+def maybe_dir() -> MaybePath:
+    return None
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("maybe_dir").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(
+        def.return_type.as_deref(),
+        Some("Optional[Path]"),
+        "Chained type aliases should be fully expanded"
+    );
+
+    let check_names: Vec<&str> = def
+        .return_type_imports
+        .iter()
+        .map(|s| s.check_name.as_str())
+        .collect();
+    assert!(
+        check_names.contains(&"Optional"),
+        "Should import Optional: {:?}",
+        check_names
+    );
+    assert!(
+        check_names.contains(&"Path"),
+        "Should import Path: {:?}",
+        check_names
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_type_alias_union_expanded() {
+    // Union alias: `Result = str | int` then `-> Result`.
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_alias_union/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+
+Result = str | int
+
+@pytest.fixture
+def value() -> Result:
+    return 42
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("value").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(
+        def.return_type.as_deref(),
+        Some("str | int"),
+        "Union type alias should be expanded"
+    );
+    // str and int are builtins — no imports needed.
+    assert!(
+        def.return_type_imports.is_empty(),
+        "Builtin-only union should need no imports: {:?}",
+        def.return_type_imports
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_type_alias_not_applied_to_lowercase_assignment() {
+    // `my_default = Path("/tmp")` should NOT be treated as a type alias
+    // because the name starts with lowercase.
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_alias_no_lower/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from pathlib import Path
+
+default_path = Path("/tmp")
+
+@pytest.fixture
+def work_dir() -> Path:
+    return default_path
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("work_dir").expect("fixture not found");
+    let def = &defs[0];
+
+    // Return type is just `Path` — no alias expansion involved.
+    assert_eq!(def.return_type.as_deref(), Some("Path"));
+}
+
+#[test]
+#[timeout(30000)]
+fn test_type_alias_not_applied_to_function_call_rhs() {
+    // `Config = load_config()` should NOT be treated as a type alias
+    // because the RHS is a function call, not a type expression.
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_alias_no_call/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+
+def make_config():
+    return {"debug": True}
+
+Config = make_config()
+
+@pytest.fixture
+def config() -> Config:
+    return Config
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("config").expect("fixture not found");
+    let def = &defs[0];
+
+    // `Config` is NOT a type alias (RHS is a function call).
+    // The return type stays as `Config` (not expanded).
+    assert_eq!(def.return_type.as_deref(), Some("Config"));
+}
+
+#[test]
+#[timeout(30000)]
+fn test_type_alias_pep613_with_typing_extensions() {
+    // `typing_extensions.TypeAlias` should also be recognized.
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_alias_ext/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from pathlib import Path
+import typing_extensions
+
+MyPath: typing_extensions.TypeAlias = Path
+
+@pytest.fixture
+def work_dir() -> MyPath:
+    return Path("/work")
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("work_dir").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(
+        def.return_type.as_deref(),
+        Some("Path"),
+        "typing_extensions.TypeAlias should be recognized"
+    );
+    assert_eq!(
+        def.return_type_imports,
+        vec![TypeImportSpec {
+            check_name: "Path".to_string(),
+            import_statement: "from pathlib import Path".to_string(),
+        }]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_type_alias_used_inside_generic_return_type() {
+    // Alias used within a larger type: `MyPath = Path`, fixture `-> Optional[MyPath]`.
+    // Should expand to `Optional[Path]`.
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_alias_in_generic/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from pathlib import Path
+from typing import Optional
+
+MyPath = Path
+
+@pytest.fixture
+def maybe_dir() -> Optional[MyPath]:
+    return None
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("maybe_dir").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(
+        def.return_type.as_deref(),
+        Some("Optional[Path]"),
+        "Alias inside generic should be expanded"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_type_alias_attribute_rhs() {
+    // Old-style alias with dotted RHS: `MyPath = pathlib.Path`.
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_alias_attr/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+import pathlib
+
+MyPath = pathlib.Path
+
+@pytest.fixture
+def work_dir() -> MyPath:
+    return pathlib.Path("/work")
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("work_dir").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(
+        def.return_type.as_deref(),
+        Some("pathlib.Path"),
+        "Attribute-style alias should be expanded"
+    );
+}

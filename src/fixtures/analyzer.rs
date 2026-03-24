@@ -104,6 +104,10 @@ impl FixtureDatabase {
             // Used during fixture analysis to resolve return-type annotation imports.
             let import_map = self.build_name_to_import_map(&module.body, &file_path);
 
+            // Collect type aliases so that `-> MyType` can be expanded to the
+            // underlying type before import resolution.
+            let type_aliases = self.collect_type_aliases(&module.body, content);
+
             // Second pass: analyze fixtures and tests
             for stmt in &module.body {
                 self.visit_stmt(
@@ -114,6 +118,7 @@ impl FixtureDatabase {
                     &line_index,
                     &import_map,
                     &module_level_names,
+                    &type_aliases,
                 );
             }
         }
@@ -303,6 +308,7 @@ impl FixtureDatabase {
         line_index: &[usize],
         import_map: &HashMap<String, TypeImportSpec>,
         module_level_names: &HashSet<String>,
+        type_aliases: &HashMap<String, String>,
     ) {
         // First check for assignment-style fixtures: fixture_name = pytest.fixture()(func)
         if let Stmt::Assign(assign) = stmt {
@@ -370,6 +376,7 @@ impl FixtureDatabase {
                     line_index,
                     import_map,
                     module_level_names,
+                    type_aliases,
                 );
             }
             return;
@@ -471,7 +478,21 @@ impl FixtureDatabase {
 
             let line = self.get_line_from_offset(range.start().to_usize(), line_index);
             let docstring = self.extract_docstring(body);
-            let return_type = self.extract_return_type(returns, body, content);
+            let raw_return_type = self.extract_return_type(returns, body, content);
+            let return_type = raw_return_type.map(|rt| {
+                if type_aliases.is_empty() {
+                    rt
+                } else {
+                    let expanded = Self::expand_type_aliases(&rt, type_aliases);
+                    if expanded != rt {
+                        info!(
+                            "Expanded type alias in fixture '{}': {} → {}",
+                            fixture_name, rt, expanded
+                        );
+                    }
+                    expanded
+                }
+            });
             let return_type_imports = match &return_type {
                 Some(rt) => {
                     self.resolve_return_type_imports(rt, import_map, module_level_names, file_path)
@@ -767,6 +788,165 @@ static BUILTINS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
 
 // Second impl block for additional analyzer methods
 impl FixtureDatabase {
+    // ============ Type alias resolution ============
+
+    /// Collect type aliases defined at module level.
+    ///
+    /// Recognises two forms:
+    ///
+    /// 1. **PEP 613** — `MyType: TypeAlias = Dict[str, int]`
+    ///    (`Stmt::AnnAssign` where the annotation mentions `TypeAlias`)
+    /// 2. **Old-style** — `MyType = Dict[str, int]`
+    ///    (`Stmt::Assign` where the target is a single `Expr::Name` whose
+    ///    first character is uppercase and the RHS looks like a type expression)
+    ///
+    /// Returns a mapping from alias name to the expanded type string.
+    pub(crate) fn collect_type_aliases(
+        &self,
+        stmts: &[Stmt],
+        content: &str,
+    ) -> HashMap<String, String> {
+        let mut aliases = HashMap::new();
+
+        for stmt in stmts {
+            match stmt {
+                // PEP 613: `X: TypeAlias = <type_expr>`
+                Stmt::AnnAssign(ann_assign) => {
+                    if !Self::annotation_is_type_alias(&ann_assign.annotation) {
+                        continue;
+                    }
+                    let Expr::Name(name) = ann_assign.target.as_ref() else {
+                        continue;
+                    };
+                    let Some(value) = &ann_assign.value else {
+                        continue;
+                    };
+                    let expanded = self.expr_to_string(value, content);
+                    // Skip aliases that expand to raw `Any`: if the fixture file
+                    // writes `MyType: TypeAlias = Any`, the alias name `MyType` is
+                    // still in `module_level_names`, so `resolve_return_type_imports`
+                    // will correctly generate `from <module> import MyType` for it.
+                    // Expanding to `Any` would instead require adding
+                    // `from typing import Any`, which misrepresents the intent.
+                    if expanded != "Any" {
+                        debug!("Type alias (PEP 613): {} = {}", name.id, expanded);
+                        aliases.insert(name.id.to_string(), expanded);
+                    }
+                }
+
+                // Old-style: `X = <type_expr>` where X starts with uppercase
+                Stmt::Assign(assign) => {
+                    if assign.targets.len() != 1 {
+                        continue;
+                    }
+                    let Expr::Name(name) = &assign.targets[0] else {
+                        continue;
+                    };
+                    // Heuristic: type alias names start with an uppercase letter.
+                    if !name.id.starts_with(|c: char| c.is_ascii_uppercase()) {
+                        continue;
+                    }
+                    if !Self::expr_looks_like_type(&assign.value) {
+                        continue;
+                    }
+                    let expanded = self.expr_to_string(&assign.value, content);
+                    // Same rationale as the PEP 613 branch above: skip `Any`-valued
+                    // aliases so the alias name keeps its locally-defined import path.
+                    if expanded != "Any" {
+                        debug!("Type alias (old-style): {} = {}", name.id, expanded);
+                        aliases.insert(name.id.to_string(), expanded);
+                    }
+                }
+
+                _ => {}
+            }
+        }
+
+        aliases
+    }
+
+    /// Check whether an annotation expression refers to `TypeAlias`.
+    ///
+    /// Matches `TypeAlias`, `typing.TypeAlias`, and `typing_extensions.TypeAlias`.
+    fn annotation_is_type_alias(expr: &Expr) -> bool {
+        match expr {
+            Expr::Name(name) => name.id.as_str() == "TypeAlias",
+            Expr::Attribute(attr) => {
+                attr.attr.as_str() == "TypeAlias"
+                    && matches!(
+                        attr.value.as_ref(),
+                        Expr::Name(n) if n.id.as_str() == "typing" || n.id.as_str() == "typing_extensions"
+                    )
+            }
+            _ => false,
+        }
+    }
+
+    /// Heuristic: does an expression look like a type annotation?
+    ///
+    /// Returns `true` for subscripts (`Dict[str, int]`), union operators
+    /// (`int | str`), names (`Path`), attributes (`pathlib.Path`), `None`,
+    /// and string literals (forward references like `"MyClass"`).
+    fn expr_looks_like_type(expr: &Expr) -> bool {
+        match expr {
+            // Subscript: Dict[str, int], Optional[Path], list[int], etc.
+            Expr::Subscript(_) => true,
+            // Union: int | str
+            Expr::BinOp(binop) => {
+                matches!(binop.op, rustpython_parser::ast::Operator::BitOr)
+                    && Self::expr_looks_like_type(&binop.left)
+                    && Self::expr_looks_like_type(&binop.right)
+            }
+            // Simple name: uppercase (Path, MyClass) or a known builtin (str, int, …)
+            Expr::Name(name) => {
+                name.id.starts_with(|c: char| c.is_ascii_uppercase())
+                    || BUILTINS.contains(name.id.as_str())
+            }
+            // Attribute: pathlib.Path
+            Expr::Attribute(_) => true,
+            // None literal or string literal (forward reference)
+            Expr::Constant(c) => matches!(
+                c.value,
+                rustpython_parser::ast::Constant::None | rustpython_parser::ast::Constant::Str(_)
+            ),
+            _ => false,
+        }
+    }
+
+    /// Expand type aliases in a return-type string.
+    ///
+    /// Performs a single pass of word-boundary-safe substitution. Each
+    /// standalone identifier that matches a key in `type_aliases` is replaced
+    /// with the expanded form.  A match is "standalone" when it is not
+    /// preceded or followed by an alphanumeric character, underscore, or dot
+    /// (preventing partial matches like `MyTypeExtra`).
+    ///
+    /// Expansion is applied at most `MAX_DEPTH` times to handle aliases that
+    /// reference other aliases (e.g. `A = B`, `B = Dict[str, int]`).
+    pub(crate) fn expand_type_aliases(
+        type_str: &str,
+        type_aliases: &HashMap<String, String>,
+    ) -> String {
+        const MAX_DEPTH: usize = 5;
+        let mut result = type_str.to_string();
+
+        for _ in 0..MAX_DEPTH {
+            let mut changed = false;
+            for (alias, expanded) in type_aliases {
+                let new = super::string_utils::replace_identifier(&result, alias, expanded);
+                if new != result {
+                    result = new;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        result
+    }
+
     // ============ Return-type import resolution ============
 
     /// Extract all distinct identifier tokens from a type annotation string.

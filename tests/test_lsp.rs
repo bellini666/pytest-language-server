@@ -5654,7 +5654,9 @@ async fn test_code_action_quickfix_adapts_dotted_to_short() {
 
     let db = Arc::new(FixtureDatabase::new());
 
-    let conftest_path = PathBuf::from("/tmp/test_ca_e2e_dotted/conftest.py");
+    let conftest_path = std::env::temp_dir()
+        .join("test_ca_e2e_dotted")
+        .join("conftest.py");
     db.analyze_file(
         conftest_path.clone(),
         r#"
@@ -5667,7 +5669,9 @@ def work_dir() -> pathlib.Path:
 "#,
     );
 
-    let test_path = PathBuf::from("/tmp/test_ca_e2e_dotted/test_example.py");
+    let test_path = std::env::temp_dir()
+        .join("test_ca_e2e_dotted")
+        .join("test_example.py");
     db.analyze_file(
         test_path.clone(),
         r#"
@@ -5809,7 +5813,9 @@ async fn test_code_action_quickfix_adapts_short_to_dotted() {
 
     let db = Arc::new(FixtureDatabase::new());
 
-    let conftest_path = PathBuf::from("/tmp/test_ca_e2e_short/conftest.py");
+    let conftest_path = std::env::temp_dir()
+        .join("test_ca_e2e_short")
+        .join("conftest.py");
     db.analyze_file(
         conftest_path.clone(),
         r#"
@@ -5822,7 +5828,9 @@ def work_dir() -> Path:
 "#,
     );
 
-    let test_path = PathBuf::from("/tmp/test_ca_e2e_short/test_example.py");
+    let test_path = std::env::temp_dir()
+        .join("test_ca_e2e_short")
+        .join("test_example.py");
     db.analyze_file(
         test_path.clone(),
         r#"

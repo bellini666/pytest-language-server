@@ -12,6 +12,7 @@ pub mod document_symbol;
 pub mod hover;
 pub mod implementation;
 pub mod inlay_hint;
+mod language_server;
 pub mod references;
 pub mod workspace_symbol;
 

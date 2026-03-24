@@ -53,6 +53,7 @@
 
 pub mod config;
 pub mod fixtures;
+pub mod providers;
 
 pub use config::Config;
 pub use fixtures::{
@@ -63,3 +64,6 @@ pub use fixtures::{
 // Expose decorators module for testing
 #[cfg(test)]
 pub use fixtures::decorators;
+
+// Expose Backend for integration testing
+pub use providers::Backend;

@@ -5608,3 +5608,334 @@ def maybe_dir() -> Optional[pathlib.Path]:
         ]
     );
 }
+
+// ── End-to-end code action integration tests ────────────────────────────
+
+/// Helper: create a `Backend` backed by the given `FixtureDatabase`.
+/// Uses `LspService::new` to obtain a valid `Client` handle (same technique
+/// as the inline tests in `completion.rs`).
+fn make_backend_with_db(
+    db: Arc<pytest_language_server::FixtureDatabase>,
+) -> pytest_language_server::Backend {
+    use pytest_language_server::Backend;
+    use tower_lsp_server::LspService;
+
+    let backend_slot: Arc<std::sync::Mutex<Option<Backend>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let slot_clone = backend_slot.clone();
+    let (_svc, _sock) = LspService::new(move |client| {
+        let b = Backend::new(client, db.clone());
+        *slot_clone.lock().unwrap() = Some(Backend {
+            client: b.client.clone(),
+            fixture_db: b.fixture_db.clone(),
+            workspace_root: b.workspace_root.clone(),
+            original_workspace_root: b.original_workspace_root.clone(),
+            scan_task: b.scan_task.clone(),
+            uri_cache: b.uri_cache.clone(),
+            config: b.config.clone(),
+        });
+        b
+    });
+    let result = backend_slot
+        .lock()
+        .unwrap()
+        .take()
+        .expect("Backend should have been created");
+    result
+}
+
+#[tokio::test]
+async fn test_code_action_quickfix_adapts_dotted_to_short() {
+    // End-to-end: fixture uses `import pathlib` → return type `pathlib.Path`.
+    // Consumer already has `from pathlib import Path`.
+    // The quickfix should insert `: Path` (not `: pathlib.Path`) and must NOT
+    // add an `import pathlib` statement.
+    use pytest_language_server::FixtureDatabase;
+
+    let db = Arc::new(FixtureDatabase::new());
+
+    let conftest_path = PathBuf::from("/tmp/test_ca_e2e_dotted/conftest.py");
+    db.analyze_file(
+        conftest_path.clone(),
+        r#"
+import pytest
+import pathlib
+
+@pytest.fixture
+def work_dir() -> pathlib.Path:
+    return pathlib.Path("/work")
+"#,
+    );
+
+    let test_path = PathBuf::from("/tmp/test_ca_e2e_dotted/test_example.py");
+    db.analyze_file(
+        test_path.clone(),
+        r#"
+from pathlib import Path
+
+def test_something():
+    result = work_dir
+"#,
+    );
+
+    // Get undeclared fixture coordinates for the diagnostic.
+    let undeclared = db.get_undeclared_fixtures(&test_path);
+    assert_eq!(undeclared.len(), 1, "Should detect 1 undeclared fixture");
+    let fix = &undeclared[0];
+    assert_eq!(fix.name, "work_dir");
+
+    let backend = make_backend_with_db(db);
+    let uri = Uri::from_file_path(&test_path).unwrap();
+
+    // Internal (1-based) → LSP (0-based).
+    let diag_line_lsp = (fix.line - 1) as u32;
+    let func_line_lsp = (fix.function_line - 1) as u32;
+
+    let diagnostic = Diagnostic {
+        range: Range {
+            start: Position {
+                line: diag_line_lsp,
+                character: fix.start_char as u32,
+            },
+            end: Position {
+                line: diag_line_lsp,
+                character: fix.end_char as u32,
+            },
+        },
+        severity: Some(DiagnosticSeverity::WARNING),
+        code: Some(NumberOrString::String("undeclared-fixture".to_string())),
+        source: Some("pytest-lsp".to_string()),
+        message: format!(
+            "Fixture '{}' is used but not declared as a parameter",
+            fix.name
+        ),
+        code_description: None,
+        related_information: None,
+        tags: None,
+        data: None,
+    };
+
+    let params = CodeActionParams {
+        text_document: TextDocumentIdentifier { uri: uri.clone() },
+        range: Range {
+            start: Position {
+                line: func_line_lsp,
+                character: 0,
+            },
+            end: Position {
+                line: func_line_lsp,
+                character: 0,
+            },
+        },
+        context: CodeActionContext {
+            diagnostics: vec![diagnostic],
+            only: None,
+            trigger_kind: None,
+        },
+        work_done_progress_params: WorkDoneProgressParams {
+            work_done_token: None,
+        },
+        partial_result_params: PartialResultParams {
+            partial_result_token: None,
+        },
+    };
+
+    let response = backend.handle_code_action(params).await.unwrap();
+    let actions = response.expect("Should return code actions");
+
+    // Find the quickfix action.
+    let quickfix = actions
+        .iter()
+        .find_map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca) if ca.kind == Some(CodeActionKind::QUICKFIX) => {
+                Some(ca)
+            }
+            _ => None,
+        })
+        .expect("Should have a quickfix code action");
+
+    // Title should show the adapted short type, not the dotted form.
+    assert!(
+        quickfix.title.contains("(Path)"),
+        "Title should contain '(Path)': {}",
+        quickfix.title
+    );
+    assert!(
+        !quickfix.title.contains("pathlib.Path"),
+        "Title should NOT contain 'pathlib.Path': {}",
+        quickfix.title
+    );
+
+    // Inspect the workspace edits.
+    let ws_edit = quickfix.edit.as_ref().expect("Should have workspace edit");
+    let changes = ws_edit.changes.as_ref().expect("Should have changes");
+    let edits: Vec<&TextEdit> = changes.values().flat_map(|v| v.iter()).collect();
+
+    // The parameter-insertion edit should use `: Path` (short form).
+    let param_edit = edits
+        .iter()
+        .find(|e| e.new_text.contains("work_dir"))
+        .expect("Should have a parameter insertion edit");
+    assert!(
+        param_edit.new_text.contains(": Path"),
+        "Parameter should use short form: {:?}",
+        param_edit.new_text
+    );
+    assert!(
+        !param_edit.new_text.contains("pathlib.Path"),
+        "Parameter should NOT use dotted form: {:?}",
+        param_edit.new_text
+    );
+
+    // No import edit should add `import pathlib` — the consumer's existing
+    // `from pathlib import Path` already covers the type.
+    let has_bare_import = edits
+        .iter()
+        .any(|e| e.new_text.contains("import pathlib") && !e.new_text.contains("from"));
+    assert!(
+        !has_bare_import,
+        "Should NOT add 'import pathlib': {:?}",
+        edits
+    );
+}
+
+#[tokio::test]
+async fn test_code_action_quickfix_adapts_short_to_dotted() {
+    // End-to-end: fixture uses `from pathlib import Path` → short `Path`.
+    // Consumer has `import pathlib` (bare import).
+    // The quickfix should insert `: pathlib.Path` and must NOT add
+    // `from pathlib import Path`.
+    use pytest_language_server::FixtureDatabase;
+
+    let db = Arc::new(FixtureDatabase::new());
+
+    let conftest_path = PathBuf::from("/tmp/test_ca_e2e_short/conftest.py");
+    db.analyze_file(
+        conftest_path.clone(),
+        r#"
+import pytest
+from pathlib import Path
+
+@pytest.fixture
+def work_dir() -> Path:
+    return Path("/work")
+"#,
+    );
+
+    let test_path = PathBuf::from("/tmp/test_ca_e2e_short/test_example.py");
+    db.analyze_file(
+        test_path.clone(),
+        r#"
+import pathlib
+
+def test_something():
+    result = work_dir
+"#,
+    );
+
+    let undeclared = db.get_undeclared_fixtures(&test_path);
+    assert_eq!(undeclared.len(), 1);
+    let fix = &undeclared[0];
+    assert_eq!(fix.name, "work_dir");
+
+    let backend = make_backend_with_db(db);
+    let uri = Uri::from_file_path(&test_path).unwrap();
+
+    let diag_line_lsp = (fix.line - 1) as u32;
+    let func_line_lsp = (fix.function_line - 1) as u32;
+
+    let diagnostic = Diagnostic {
+        range: Range {
+            start: Position {
+                line: diag_line_lsp,
+                character: fix.start_char as u32,
+            },
+            end: Position {
+                line: diag_line_lsp,
+                character: fix.end_char as u32,
+            },
+        },
+        severity: Some(DiagnosticSeverity::WARNING),
+        code: Some(NumberOrString::String("undeclared-fixture".to_string())),
+        source: Some("pytest-lsp".to_string()),
+        message: format!(
+            "Fixture '{}' is used but not declared as a parameter",
+            fix.name
+        ),
+        code_description: None,
+        related_information: None,
+        tags: None,
+        data: None,
+    };
+
+    let params = CodeActionParams {
+        text_document: TextDocumentIdentifier { uri: uri.clone() },
+        range: Range {
+            start: Position {
+                line: func_line_lsp,
+                character: 0,
+            },
+            end: Position {
+                line: func_line_lsp,
+                character: 0,
+            },
+        },
+        context: CodeActionContext {
+            diagnostics: vec![diagnostic],
+            only: None,
+            trigger_kind: None,
+        },
+        work_done_progress_params: WorkDoneProgressParams {
+            work_done_token: None,
+        },
+        partial_result_params: PartialResultParams {
+            partial_result_token: None,
+        },
+    };
+
+    let response = backend.handle_code_action(params).await.unwrap();
+    let actions = response.expect("Should return code actions");
+
+    let quickfix = actions
+        .iter()
+        .find_map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca) if ca.kind == Some(CodeActionKind::QUICKFIX) => {
+                Some(ca)
+            }
+            _ => None,
+        })
+        .expect("Should have a quickfix code action");
+
+    // Title should show the adapted dotted type.
+    assert!(
+        quickfix.title.contains("pathlib.Path"),
+        "Title should contain 'pathlib.Path': {}",
+        quickfix.title
+    );
+
+    let ws_edit = quickfix.edit.as_ref().expect("Should have workspace edit");
+    let changes = ws_edit.changes.as_ref().expect("Should have changes");
+    let edits: Vec<&TextEdit> = changes.values().flat_map(|v| v.iter()).collect();
+
+    // The parameter edit should use `: pathlib.Path`.
+    let param_edit = edits
+        .iter()
+        .find(|e| e.new_text.contains("work_dir"))
+        .expect("Should have a parameter insertion edit");
+    assert!(
+        param_edit.new_text.contains(": pathlib.Path"),
+        "Parameter should use dotted form: {:?}",
+        param_edit.new_text
+    );
+
+    // No `from pathlib import Path` edit should be present — the adaptation
+    // rewrote the type to dotted form, so the from-import spec was dropped.
+    let has_from_import = edits
+        .iter()
+        .any(|e| e.new_text.contains("from pathlib import Path"));
+    assert!(
+        !has_from_import,
+        "Should NOT add 'from pathlib import Path': {:?}",
+        edits
+    );
+}

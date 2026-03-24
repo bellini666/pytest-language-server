@@ -15,7 +15,7 @@ const EXCLUDED_PARAM_NAMES: &[&str] = &["self", "cls"];
 /// Per-request completion options bundling fixture scope, self-exclusion name, and
 /// trigger-character insert prefix. Passed through the completion pipeline to avoid
 /// threading many individual parameters.
-pub(crate) struct CompletionOpts<'a> {
+pub struct CompletionOpts<'a> {
     /// When editing a fixture, its scope constrains which other fixtures are eligible.
     /// `None` for test functions (all scopes allowed).
     fixture_scope: Option<FixtureScope>,

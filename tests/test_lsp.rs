@@ -5469,3 +5469,142 @@ def widget() -> Widget:
         }]
     );
 }
+
+// ── Consumer-side type adaptation integration tests ─────────────────────
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_bare_import_produces_module_check_name() {
+    // When a fixture file uses `import pathlib` and `-> pathlib.Path`, the
+    // TypeImportSpec must have check_name="pathlib" and import_statement=
+    // "import pathlib".  This is the data that `adapt_type_for_consumer`
+    // (in code_action.rs) uses at code-action time to detect that a consumer
+    // file with `from pathlib import Path` can use the short form `Path`.
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_bare_import_adapt/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+import pathlib
+
+@pytest.fixture
+def work_dir() -> pathlib.Path:
+    return pathlib.Path("/work")
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("work_dir").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(def.return_type.as_deref(), Some("pathlib.Path"));
+    assert_eq!(
+        def.return_type_imports,
+        vec![TypeImportSpec {
+            check_name: "pathlib".to_string(),
+            import_statement: "import pathlib".to_string(),
+        }]
+    );
+
+    // Verify: the consumer file's imports set would contain "Path" (not
+    // "pathlib") when it has `from pathlib import Path`.  The check_name
+    // "pathlib" does NOT match "Path", so build_import_edits alone would
+    // incorrectly add `import pathlib`.  The adapt_type_for_consumer function
+    // in code_action.rs handles this by rewriting the type to "Path" and
+    // dropping the spec.
+    let test_path = PathBuf::from("/tmp/test_bare_import_adapt/test_example.py");
+    let test_content = r#"
+from pathlib import Path
+
+def test_uses_work_dir():
+    result = work_dir / "file.txt"
+"#;
+    db.analyze_file(test_path.clone(), test_content);
+
+    let test_imports = db.imports.get(&test_path).expect("test imports not found");
+    assert!(
+        test_imports.contains("Path"),
+        "Test file should have 'Path' in its imports"
+    );
+    assert!(
+        !test_imports.contains("pathlib"),
+        "Test file should NOT have 'pathlib' as a bare name in its imports"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_bare_import_aliased_module() {
+    // `import pathlib as pl` + `-> pl.Path` — the TypeImportSpec should have
+    // check_name="pl" so that adapt_type_for_consumer can find "pl." prefixes
+    // in the type string and rewrite them.
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_bare_alias_adapt/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+import pathlib as pl
+
+@pytest.fixture
+def work_dir() -> pl.Path:
+    return pl.Path("/work")
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("work_dir").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(def.return_type.as_deref(), Some("pl.Path"));
+    assert_eq!(
+        def.return_type_imports,
+        vec![TypeImportSpec {
+            check_name: "pl".to_string(),
+            import_statement: "import pathlib as pl".to_string(),
+        }]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_bare_import_complex_generic() {
+    // `import pathlib` + `from typing import Optional` + `-> Optional[pathlib.Path]`
+    // Should produce two specs: one for Optional (from-import) and one for
+    // pathlib (bare import).  At code-action time, if the consumer has
+    // `from pathlib import Path`, only pathlib.Path is rewritten to Path.
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_bare_generic_adapt/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+import pathlib
+from typing import Optional
+
+@pytest.fixture
+def maybe_dir() -> Optional[pathlib.Path]:
+    return None
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("maybe_dir").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(def.return_type.as_deref(), Some("Optional[pathlib.Path]"));
+    assert_eq!(
+        def.return_type_imports,
+        vec![
+            TypeImportSpec {
+                check_name: "Optional".to_string(),
+                import_statement: "from typing import Optional".to_string(),
+            },
+            TypeImportSpec {
+                check_name: "pathlib".to_string(),
+                import_statement: "import pathlib".to_string(),
+            },
+        ]
+    );
+}

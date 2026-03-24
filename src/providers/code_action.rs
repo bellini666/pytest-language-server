@@ -32,6 +32,7 @@ use super::Backend;
 use crate::fixtures::is_stdlib_module;
 use crate::fixtures::string_utils::parameter_has_annotation;
 use crate::fixtures::types::TypeImportSpec;
+use rustpython_parser::ast::Mod;
 use std::collections::{HashMap, HashSet};
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
@@ -425,6 +426,211 @@ fn emit_kind_import_edits(
     }
 }
 
+/// Replace all standalone occurrences of `old_name` with `new_name` in a type
+/// string, respecting identifier boundaries.
+///
+/// A match is "standalone" when it is not preceded or followed by an
+/// alphanumeric character or underscore, preventing partial matches like
+/// `"PathLike"` when searching for `"Path"`.
+fn replace_type_identifier(type_str: &str, old_name: &str, new_name: &str) -> String {
+    let mut result = String::with_capacity(type_str.len() + new_name.len());
+    let bytes = type_str.as_bytes();
+    let old_bytes = old_name.as_bytes();
+    let len = bytes.len();
+    let old_len = old_bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        if i + old_len <= len && &bytes[i..i + old_len] == old_bytes {
+            let left_ok = i == 0
+                || !(bytes[i - 1].is_ascii_alphanumeric()
+                    || bytes[i - 1] == b'_'
+                    || bytes[i - 1] == b'.');
+            let right_ok = i + old_len >= len
+                || !(bytes[i + old_len].is_ascii_alphanumeric() || bytes[i + old_len] == b'_');
+
+            if left_ok && right_ok {
+                result.push_str(new_name);
+                i += old_len;
+                continue;
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+
+    result
+}
+
+/// Find a bare-import entry in the consumer's import map for a given module.
+///
+/// Scans all specs looking for `import <module>` or `import <module> as <alias>`.
+/// Returns the consumer's `check_name` for that module (which may be an alias).
+fn find_consumer_bare_import<'a>(
+    consumer_import_map: &'a HashMap<String, TypeImportSpec>,
+    module: &str,
+) -> Option<&'a str> {
+    for spec in consumer_import_map.values() {
+        if let Some(rest) = spec.import_statement.strip_prefix("import ") {
+            let module_part = rest.split(" as ").next().unwrap_or("").trim();
+            if module_part == module {
+                return Some(&spec.check_name);
+            }
+        }
+    }
+    None
+}
+
+/// Adapt a fixture's return-type annotation and import specs to the consumer
+/// file's existing import context.
+///
+/// Two adaptations are performed:
+///
+/// 1. **Dotted → short** — when a fixture uses a bare `import` (e.g.
+///    `import pathlib`) producing `pathlib.Path`, and the consumer already has
+///    `from pathlib import Path`, the annotation is shortened to `Path` and the
+///    bare-import spec is dropped.
+///
+/// 2. **Short → dotted** — when a fixture uses `from X import Y` producing the
+///    short name `Y`, and the consumer already has `import X` (bare), the
+///    annotation is lengthened to `X.Y` and the from-import spec is dropped,
+///    respecting the consumer's import style.
+///
+/// Returns `(adapted_type_string, remaining_import_specs)`.
+fn adapt_type_for_consumer(
+    return_type: &str,
+    fixture_imports: &[TypeImportSpec],
+    consumer_import_map: &HashMap<String, TypeImportSpec>,
+) -> (String, Vec<TypeImportSpec>) {
+    let mut adapted = return_type.to_string();
+    let mut remaining = Vec::new();
+
+    for spec in fixture_imports {
+        if spec.import_statement.starts_with("import ") {
+            // ── Case 1: bare-import spec → try dotted-to-short rewrite ───
+            let bare_module = spec
+                .import_statement
+                .strip_prefix("import ")
+                .unwrap()
+                .split(" as ")
+                .next()
+                .unwrap_or("")
+                .trim();
+
+            if bare_module.is_empty() {
+                remaining.push(spec.clone());
+                continue;
+            }
+
+            // Look for `check_name.Name` patterns in the type string.
+            let prefix = format!("{}.", spec.check_name);
+            if !adapted.contains(&prefix) {
+                remaining.push(spec.clone());
+                continue;
+            }
+
+            // Collect every `check_name.Name` occurrence and verify that the
+            // consumer already imports `Name` from the same module.
+            let mut rewrites: Vec<(String, String)> = Vec::new(); // (dotted, short)
+            let mut all_rewritable = true;
+            let mut pos = 0;
+
+            while let Some(hit) = adapted[pos..].find(&prefix) {
+                let abs = pos + hit;
+
+                // Guard against partial matches (e.g. `mypathlib.X` matching `pathlib.`)
+                if abs > 0 {
+                    let prev = adapted.as_bytes()[abs - 1];
+                    if prev.is_ascii_alphanumeric() || prev == b'_' {
+                        pos = abs + prefix.len();
+                        continue;
+                    }
+                }
+
+                let name_start = abs + prefix.len();
+                let rest = &adapted[name_start..];
+                let name_end = rest
+                    .find(|c: char| !c.is_alphanumeric() && c != '_')
+                    .unwrap_or(rest.len());
+                let name = &rest[..name_end];
+
+                if name.is_empty() {
+                    pos = name_start;
+                    continue;
+                }
+
+                // Check the consumer's import map for this name.
+                if let Some(consumer_spec) = consumer_import_map.get(name) {
+                    let expected = format!("from {} import", bare_module);
+                    if consumer_spec.import_statement.starts_with(&expected) {
+                        let dotted = format!("{}.{}", spec.check_name, name);
+                        if !rewrites.iter().any(|(d, _)| d == &dotted) {
+                            rewrites.push((dotted, consumer_spec.check_name.clone()));
+                        }
+                    } else {
+                        // Name imported from a different module — can't safely rewrite.
+                        all_rewritable = false;
+                        break;
+                    }
+                } else {
+                    // Name not in consumer's import map — can't rewrite.
+                    all_rewritable = false;
+                    break;
+                }
+
+                pos = name_start + name_end;
+            }
+
+            if all_rewritable && !rewrites.is_empty() {
+                for (dotted, short) in &rewrites {
+                    adapted = adapted.replace(dotted.as_str(), short.as_str());
+                }
+                info!(
+                    "Adapted type '{}' → '{}' (consumer already imports short names)",
+                    return_type, adapted
+                );
+            } else {
+                remaining.push(spec.clone());
+            }
+        } else if let Some((module, name_part)) = parse_from_import(&spec.import_statement) {
+            // ── Case 2: from-import spec → try short-to-dotted rewrite ───
+            //
+            // The fixture uses `from X import Y` so the type string contains
+            // the short name `Y`.  If the consumer already has `import X`
+            // (bare), we rewrite `Y` → `X.Y` and drop the from-import.
+
+            // Handle `from X import Y as Z` — the original name is `Y`, the
+            // check_name (used in the type string) is `Z`.
+            let original_name = name_part.split(" as ").next().unwrap_or(name_part).trim();
+
+            if let Some(consumer_module_name) =
+                find_consumer_bare_import(consumer_import_map, module)
+            {
+                let dotted = format!("{}.{}", consumer_module_name, original_name);
+                let new_adapted = replace_type_identifier(&adapted, &spec.check_name, &dotted);
+                if new_adapted != adapted {
+                    info!(
+                        "Adapted type: '{}' → '{}' (consumer has bare import for '{}')",
+                        spec.check_name, dotted, module
+                    );
+                    adapted = new_adapted;
+                    // Drop the from-import spec — consumer's bare import covers it.
+                } else {
+                    // The check_name wasn't found as a standalone identifier in
+                    // the type string (word-boundary mismatch).  Keep the spec.
+                    remaining.push(spec.clone());
+                }
+            } else {
+                remaining.push(spec.clone());
+            }
+        } else {
+            remaining.push(spec.clone());
+        }
+    }
+
+    (adapted, remaining)
+}
+
 /// Build `TextEdit`s to add import statements, respecting isort-style grouping.
 ///
 /// Specs whose `check_name` is already in `existing_imports` are skipped.
@@ -606,6 +812,22 @@ impl Backend {
             .map(|entry| entry.value().clone())
             .unwrap_or_default();
 
+        // Build a name→TypeImportSpec map for the consumer (test) file so we
+        // can detect when the file already imports a name that appears in a
+        // dotted form in a fixture's return type (e.g. `pathlib.Path` → `Path`).
+        let consumer_import_map: HashMap<String, TypeImportSpec> =
+            match self.fixture_db.get_parsed_ast(&file_path, &content) {
+                Some(ast) => {
+                    if let Mod::Module(module) = ast.as_ref() {
+                        self.fixture_db
+                            .build_name_to_import_map(&module.body, &file_path)
+                    } else {
+                        HashMap::new()
+                    }
+                }
+                None => HashMap::new(),
+            };
+
         let mut actions: Vec<CodeActionOrCommand> = Vec::new();
 
         // ════════════════════════════════════════════════════════════════════
@@ -653,12 +875,16 @@ impl Backend {
 
                 let (type_suffix, return_type_imports) = match &fixture_def {
                     Some(def) => {
-                        let suffix = def
-                            .return_type
-                            .as_deref()
-                            .map(|t| format!(": {}", t))
-                            .unwrap_or_default();
-                        (suffix, def.return_type_imports.clone())
+                        if let Some(rt) = &def.return_type {
+                            let (adapted, remaining) = adapt_type_for_consumer(
+                                rt,
+                                &def.return_type_imports,
+                                &consumer_import_map,
+                            );
+                            (format!(": {}", adapted), remaining)
+                        } else {
+                            (String::new(), vec![])
+                        }
                     }
                     None => (String::new(), vec![]),
                 };
@@ -726,14 +952,15 @@ impl Backend {
                     change_annotations: None,
                 };
 
-                let title = match &fixture_def {
-                    Some(def) if def.return_type.is_some() => format!(
+                // Use the adapted type in the title (e.g. "Path" not "pathlib.Path").
+                let display_type = type_suffix.strip_prefix(": ").unwrap_or("");
+                let title = if !display_type.is_empty() {
+                    format!(
                         "{}: Add '{}' fixture parameter ({})",
-                        TITLE_PREFIX,
-                        fixture.name,
-                        def.return_type.as_deref().unwrap_or("")
-                    ),
-                    _ => format!("{}: Add '{}' fixture parameter", TITLE_PREFIX, fixture.name),
+                        TITLE_PREFIX, fixture.name, display_type
+                    )
+                } else {
+                    format!("{}: Add '{}' fixture parameter", TITLE_PREFIX, fixture.name)
                 };
 
                 let action = CodeAction {
@@ -801,21 +1028,27 @@ impl Backend {
                                 None => continue,
                             };
 
+                            // Adapt dotted types to consumer's import context.
+                            let (adapted_type, adapted_imports) = adapt_type_for_consumer(
+                                return_type,
+                                &def.return_type_imports,
+                                &consumer_import_map,
+                            );
+
                             info!(
                                 "Cursor-based annotation action for '{}': {}",
-                                usage.name, return_type
+                                usage.name, adapted_type
                             );
 
                             // ── Build TextEdits ──────────────────────────────
-                            let spec_refs: Vec<&TypeImportSpec> =
-                                def.return_type_imports.iter().collect();
+                            let spec_refs: Vec<&TypeImportSpec> = adapted_imports.iter().collect();
                             let mut all_edits =
                                 build_import_edits(&lines, &spec_refs, &existing_imports);
 
                             let lsp_line = Self::internal_line_to_lsp(usage.line);
                             all_edits.push(TextEdit {
                                 range: Self::create_point_range(lsp_line, usage.end_char as u32),
-                                new_text: format!(": {}", return_type),
+                                new_text: format!(": {}", adapted_type),
                             });
 
                             let ws_edit = WorkspaceEdit {
@@ -851,7 +1084,7 @@ impl Backend {
 
                     if want_fix_all {
                         // Collect all import specs and annotation edits.
-                        let mut all_specs: Vec<&TypeImportSpec> = Vec::new();
+                        let mut all_adapted_imports: Vec<TypeImportSpec> = Vec::new();
                         let mut annotation_edits: Vec<TextEdit> = Vec::new();
                         let mut annotated_count: usize = 0;
 
@@ -869,23 +1102,32 @@ impl Backend {
                                 None => continue,
                             };
 
+                            // Adapt dotted types to consumer's import context.
+                            let (adapted_type, adapted_imports) = adapt_type_for_consumer(
+                                return_type,
+                                &def.return_type_imports,
+                                &consumer_import_map,
+                            );
+
                             // Collect import specs (build_import_edits handles
                             // deduplication internally).
-                            all_specs.extend(def.return_type_imports.iter());
+                            all_adapted_imports.extend(adapted_imports);
 
                             // Annotation edit.
                             let lsp_line = Self::internal_line_to_lsp(usage.line);
                             annotation_edits.push(TextEdit {
                                 range: Self::create_point_range(lsp_line, usage.end_char as u32),
-                                new_text: format!(": {}", return_type),
+                                new_text: format!(": {}", adapted_type),
                             });
 
                             annotated_count += 1;
                         }
 
                         if !annotation_edits.is_empty() {
+                            let spec_refs: Vec<&TypeImportSpec> =
+                                all_adapted_imports.iter().collect();
                             let mut all_edits =
-                                build_import_edits(&lines, &all_specs, &existing_imports);
+                                build_import_edits(&lines, &spec_refs, &existing_imports);
                             all_edits.extend(annotation_edits);
 
                             let ws_edit = WorkspaceEdit {
@@ -1809,5 +2051,447 @@ mod tests {
         // `import os` sorts before `import time`.
         let key = import_line_sort_key("import os");
         assert_eq!(find_sorted_insert_position(&lines, &group, &key), 0);
+    }
+
+    // ── adapt_type_for_consumer tests ────────────────────────────────────
+
+    /// Helper: build a TypeImportSpec quickly.
+    fn spec(check_name: &str, import_statement: &str) -> TypeImportSpec {
+        TypeImportSpec {
+            check_name: check_name.to_string(),
+            import_statement: import_statement.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_adapt_dotted_to_short_when_consumer_has_from_import() {
+        // Fixture: `import pathlib` → type `pathlib.Path`
+        // Consumer: `from pathlib import Path`
+        // Expected: type rewritten to `Path`, bare-import spec dropped.
+        let fixture_imports = vec![spec("pathlib", "import pathlib")];
+        let mut consumer_map = HashMap::new();
+        consumer_map.insert("Path".to_string(), spec("Path", "from pathlib import Path"));
+
+        let (adapted, remaining) =
+            adapt_type_for_consumer("pathlib.Path", &fixture_imports, &consumer_map);
+
+        assert_eq!(adapted, "Path");
+        assert!(
+            remaining.is_empty(),
+            "No import should remain: {:?}",
+            remaining
+        );
+    }
+
+    #[test]
+    fn test_adapt_no_rewrite_when_consumer_lacks_from_import() {
+        // Fixture: `import pathlib` → type `pathlib.Path`
+        // Consumer: no pathlib imports at all
+        // Expected: type unchanged, import spec kept.
+        let fixture_imports = vec![spec("pathlib", "import pathlib")];
+        let consumer_map = HashMap::new();
+
+        let (adapted, remaining) =
+            adapt_type_for_consumer("pathlib.Path", &fixture_imports, &consumer_map);
+
+        assert_eq!(adapted, "pathlib.Path");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].import_statement, "import pathlib");
+    }
+
+    #[test]
+    fn test_adapt_no_rewrite_when_consumer_imports_from_different_module() {
+        // Fixture: `import pathlib` → type `pathlib.Path`
+        // Consumer: `from mylib import Path` (different module!)
+        // Expected: type unchanged, import spec kept.
+        let fixture_imports = vec![spec("pathlib", "import pathlib")];
+        let mut consumer_map = HashMap::new();
+        consumer_map.insert("Path".to_string(), spec("Path", "from mylib import Path"));
+
+        let (adapted, remaining) =
+            adapt_type_for_consumer("pathlib.Path", &fixture_imports, &consumer_map);
+
+        assert_eq!(adapted, "pathlib.Path");
+        assert_eq!(remaining.len(), 1);
+    }
+
+    #[test]
+    fn test_adapt_from_import_specs_pass_through_unchanged() {
+        // `from pathlib import Path` specs already use the short name — no rewrite.
+        let fixture_imports = vec![spec("Path", "from pathlib import Path")];
+        let consumer_map = HashMap::new();
+
+        let (adapted, remaining) = adapt_type_for_consumer("Path", &fixture_imports, &consumer_map);
+
+        assert_eq!(adapted, "Path");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].check_name, "Path");
+    }
+
+    #[test]
+    fn test_adapt_complex_generic_with_dotted_and_from() {
+        // Fixture: `import pathlib` + `from typing import Optional`
+        // Type: `Optional[pathlib.Path]`
+        // Consumer: `from pathlib import Path` + `from typing import Optional`
+        // Expected: `Optional[Path]`, only the bare-import spec dropped,
+        //           the `from typing import Optional` spec passes through.
+        let fixture_imports = vec![
+            spec("Optional", "from typing import Optional"),
+            spec("pathlib", "import pathlib"),
+        ];
+        let mut consumer_map = HashMap::new();
+        consumer_map.insert("Path".to_string(), spec("Path", "from pathlib import Path"));
+        consumer_map.insert(
+            "Optional".to_string(),
+            spec("Optional", "from typing import Optional"),
+        );
+
+        let (adapted, remaining) =
+            adapt_type_for_consumer("Optional[pathlib.Path]", &fixture_imports, &consumer_map);
+
+        assert_eq!(adapted, "Optional[Path]");
+        // Only the `from typing import Optional` spec should remain.
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].check_name, "Optional");
+    }
+
+    #[test]
+    fn test_adapt_multiple_dotted_refs_same_module() {
+        // Type: `tuple[pathlib.Path, pathlib.PurePath]`
+        // Consumer has both `from pathlib import Path` and `from pathlib import PurePath`.
+        let fixture_imports = vec![spec("pathlib", "import pathlib")];
+        let mut consumer_map = HashMap::new();
+        consumer_map.insert("Path".to_string(), spec("Path", "from pathlib import Path"));
+        consumer_map.insert(
+            "PurePath".to_string(),
+            spec("PurePath", "from pathlib import PurePath"),
+        );
+
+        let (adapted, remaining) = adapt_type_for_consumer(
+            "tuple[pathlib.Path, pathlib.PurePath]",
+            &fixture_imports,
+            &consumer_map,
+        );
+
+        assert_eq!(adapted, "tuple[Path, PurePath]");
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn test_adapt_partial_match_one_name_missing() {
+        // Type: `tuple[pathlib.Path, pathlib.PurePath]`
+        // Consumer only has `from pathlib import Path` — `PurePath` is missing.
+        // Expected: no rewrite (all-or-nothing for a given import spec).
+        let fixture_imports = vec![spec("pathlib", "import pathlib")];
+        let mut consumer_map = HashMap::new();
+        consumer_map.insert("Path".to_string(), spec("Path", "from pathlib import Path"));
+
+        let (adapted, remaining) = adapt_type_for_consumer(
+            "tuple[pathlib.Path, pathlib.PurePath]",
+            &fixture_imports,
+            &consumer_map,
+        );
+
+        assert_eq!(adapted, "tuple[pathlib.Path, pathlib.PurePath]");
+        assert_eq!(remaining.len(), 1);
+    }
+
+    #[test]
+    fn test_adapt_aliased_bare_import() {
+        // Fixture: `import pathlib as pl` → type `pl.Path`
+        // Consumer: `from pathlib import Path`
+        // Expected: `Path`, spec dropped.
+        let fixture_imports = vec![spec("pl", "import pathlib as pl")];
+        let mut consumer_map = HashMap::new();
+        consumer_map.insert("Path".to_string(), spec("Path", "from pathlib import Path"));
+
+        let (adapted, remaining) =
+            adapt_type_for_consumer("pl.Path", &fixture_imports, &consumer_map);
+
+        assert_eq!(adapted, "Path");
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn test_adapt_no_false_match_on_prefix_substring() {
+        // Type contains `mypathlib.Path` — must NOT match the `pathlib.` prefix.
+        let fixture_imports = vec![spec("pathlib", "import pathlib")];
+        let mut consumer_map = HashMap::new();
+        consumer_map.insert("Path".to_string(), spec("Path", "from pathlib import Path"));
+
+        let (adapted, remaining) =
+            adapt_type_for_consumer("mypathlib.Path", &fixture_imports, &consumer_map);
+
+        // `mypathlib.Path` should NOT be rewritten — `mypathlib` != `pathlib`.
+        assert_eq!(adapted, "mypathlib.Path");
+        assert_eq!(remaining.len(), 1);
+    }
+
+    #[test]
+    fn test_adapt_dotted_module_collections_abc() {
+        // Fixture: `import collections.abc` → type `collections.abc.Iterable[str]`
+        // Consumer: `from collections.abc import Iterable`
+        // check_name for bare `import collections.abc` is `"collections.abc"`.
+        let fixture_imports = vec![spec("collections.abc", "import collections.abc")];
+        let mut consumer_map = HashMap::new();
+        consumer_map.insert(
+            "Iterable".to_string(),
+            spec("Iterable", "from collections.abc import Iterable"),
+        );
+
+        let (adapted, remaining) = adapt_type_for_consumer(
+            "collections.abc.Iterable[str]",
+            &fixture_imports,
+            &consumer_map,
+        );
+
+        assert_eq!(adapted, "Iterable[str]");
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn test_adapt_consumer_has_bare_import_no_rewrite() {
+        // Fixture: `import pathlib` → type `pathlib.Path`
+        // Consumer: `import pathlib` (bare import, NOT from-import)
+        // Expected: no rewrite — the consumer's map has `"pathlib"` (not `"Path"`).
+        let fixture_imports = vec![spec("pathlib", "import pathlib")];
+        let mut consumer_map = HashMap::new();
+        consumer_map.insert("pathlib".to_string(), spec("pathlib", "import pathlib"));
+
+        let (adapted, remaining) =
+            adapt_type_for_consumer("pathlib.Path", &fixture_imports, &consumer_map);
+
+        // `Path` is NOT in consumer_map — only `pathlib` is. No rewrite.
+        assert_eq!(adapted, "pathlib.Path");
+        assert_eq!(remaining.len(), 1);
+    }
+
+    // ── adapt_type_for_consumer: reverse (short → dotted) tests ──────────
+
+    #[test]
+    fn test_adapt_short_to_dotted_when_consumer_has_bare_import() {
+        // Fixture: `from pathlib import Path` → type `Path`
+        // Consumer: `import pathlib`
+        // Expected: type rewritten to `pathlib.Path`, from-import spec dropped.
+        let fixture_imports = vec![spec("Path", "from pathlib import Path")];
+        let mut consumer_map = HashMap::new();
+        consumer_map.insert("pathlib".to_string(), spec("pathlib", "import pathlib"));
+
+        let (adapted, remaining) = adapt_type_for_consumer("Path", &fixture_imports, &consumer_map);
+
+        assert_eq!(adapted, "pathlib.Path");
+        assert!(
+            remaining.is_empty(),
+            "No import should remain: {:?}",
+            remaining
+        );
+    }
+
+    #[test]
+    fn test_adapt_short_to_dotted_consumer_has_aliased_bare_import() {
+        // Fixture: `from pathlib import Path` → type `Path`
+        // Consumer: `import pathlib as pl`
+        // Expected: type rewritten to `pl.Path`, from-import spec dropped.
+        let fixture_imports = vec![spec("Path", "from pathlib import Path")];
+        let mut consumer_map = HashMap::new();
+        consumer_map.insert("pl".to_string(), spec("pl", "import pathlib as pl"));
+
+        let (adapted, remaining) = adapt_type_for_consumer("Path", &fixture_imports, &consumer_map);
+
+        assert_eq!(adapted, "pl.Path");
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn test_adapt_short_no_rewrite_when_consumer_lacks_bare_import() {
+        // Fixture: `from pathlib import Path` → type `Path`
+        // Consumer: no pathlib imports at all
+        // Expected: type unchanged, from-import spec kept.
+        let fixture_imports = vec![spec("Path", "from pathlib import Path")];
+        let consumer_map = HashMap::new();
+
+        let (adapted, remaining) = adapt_type_for_consumer("Path", &fixture_imports, &consumer_map);
+
+        assert_eq!(adapted, "Path");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].check_name, "Path");
+    }
+
+    #[test]
+    fn test_adapt_short_to_dotted_generic_type() {
+        // Fixture: `from pathlib import Path` + `from typing import Optional`
+        // Type: `Optional[Path]`
+        // Consumer: `import pathlib` (but NOT `from typing import Optional`)
+        // Expected: `Optional[pathlib.Path]`, Path spec dropped, Optional kept.
+        let fixture_imports = vec![
+            spec("Optional", "from typing import Optional"),
+            spec("Path", "from pathlib import Path"),
+        ];
+        let mut consumer_map = HashMap::new();
+        consumer_map.insert("pathlib".to_string(), spec("pathlib", "import pathlib"));
+
+        let (adapted, remaining) =
+            adapt_type_for_consumer("Optional[Path]", &fixture_imports, &consumer_map);
+
+        assert_eq!(adapted, "Optional[pathlib.Path]");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].check_name, "Optional");
+    }
+
+    #[test]
+    fn test_adapt_short_to_dotted_word_boundary_safety() {
+        // Type contains `PathLike` — replacing `Path` must not produce `pathlib.PathLike`.
+        let fixture_imports = vec![spec("Path", "from pathlib import Path")];
+        let mut consumer_map = HashMap::new();
+        consumer_map.insert("pathlib".to_string(), spec("pathlib", "import pathlib"));
+
+        let (adapted, remaining) =
+            adapt_type_for_consumer("PathLike", &fixture_imports, &consumer_map);
+
+        // `PathLike` is NOT the same identifier as `Path` — no rewrite.
+        // The spec is kept because the replacement had no effect.
+        assert_eq!(adapted, "PathLike");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].check_name, "Path");
+    }
+
+    #[test]
+    fn test_adapt_short_to_dotted_multiple_occurrences() {
+        // Type: `tuple[Path, Path]` — `Path` appears twice.
+        // Consumer: `import pathlib`
+        // Expected: both replaced to `pathlib.Path`.
+        let fixture_imports = vec![spec("Path", "from pathlib import Path")];
+        let mut consumer_map = HashMap::new();
+        consumer_map.insert("pathlib".to_string(), spec("pathlib", "import pathlib"));
+
+        let (adapted, remaining) =
+            adapt_type_for_consumer("tuple[Path, Path]", &fixture_imports, &consumer_map);
+
+        assert_eq!(adapted, "tuple[pathlib.Path, pathlib.Path]");
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn test_adapt_short_to_dotted_aliased_from_import() {
+        // Fixture: `from pathlib import Path as P` → type uses `P`
+        // Consumer: `import pathlib`
+        // Expected: `P` → `pathlib.Path` (uses the original name, not the alias).
+        let fixture_imports = vec![spec("P", "from pathlib import Path as P")];
+        let mut consumer_map = HashMap::new();
+        consumer_map.insert("pathlib".to_string(), spec("pathlib", "import pathlib"));
+
+        let (adapted, remaining) = adapt_type_for_consumer("P", &fixture_imports, &consumer_map);
+
+        assert_eq!(adapted, "pathlib.Path");
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn test_adapt_short_to_dotted_collections_abc() {
+        // Fixture: `from collections.abc import Iterable` → type `Iterable[str]`
+        // Consumer: `import collections.abc`
+        // Expected: `collections.abc.Iterable[str]`, from-import spec dropped.
+        let fixture_imports = vec![spec("Iterable", "from collections.abc import Iterable")];
+        let mut consumer_map = HashMap::new();
+        consumer_map.insert(
+            "collections.abc".to_string(),
+            spec("collections.abc", "import collections.abc"),
+        );
+
+        let (adapted, remaining) =
+            adapt_type_for_consumer("Iterable[str]", &fixture_imports, &consumer_map);
+
+        assert_eq!(adapted, "collections.abc.Iterable[str]");
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn test_adapt_both_directions_in_one_call() {
+        // Mix of Case 1 and Case 2 in a single type:
+        // Fixture: `import pathlib` + `from typing import Sequence`
+        // Type: `Sequence[pathlib.Path]`
+        // Consumer: `from pathlib import Path` + `import typing`
+        // Expected: `typing.Sequence[Path]`
+        //   - pathlib.Path → Path (Case 1: consumer has from-import)
+        //   - Sequence → typing.Sequence (Case 2: consumer has bare import)
+        let fixture_imports = vec![
+            spec("Sequence", "from typing import Sequence"),
+            spec("pathlib", "import pathlib"),
+        ];
+        let mut consumer_map = HashMap::new();
+        consumer_map.insert("Path".to_string(), spec("Path", "from pathlib import Path"));
+        consumer_map.insert("typing".to_string(), spec("typing", "import typing"));
+
+        let (adapted, remaining) =
+            adapt_type_for_consumer("Sequence[pathlib.Path]", &fixture_imports, &consumer_map);
+
+        assert_eq!(adapted, "typing.Sequence[Path]");
+        assert!(
+            remaining.is_empty(),
+            "Both specs should be dropped: {:?}",
+            remaining
+        );
+    }
+
+    // ── replace_type_identifier tests ────────────────────────────────────
+
+    #[test]
+    fn test_replace_identifier_simple() {
+        assert_eq!(
+            replace_type_identifier("Path", "Path", "pathlib.Path"),
+            "pathlib.Path"
+        );
+    }
+
+    #[test]
+    fn test_replace_identifier_in_generic() {
+        assert_eq!(
+            replace_type_identifier("Optional[Path]", "Path", "pathlib.Path"),
+            "Optional[pathlib.Path]"
+        );
+    }
+
+    #[test]
+    fn test_replace_identifier_no_partial_match() {
+        // `PathLike` should NOT be affected when replacing `Path`.
+        assert_eq!(
+            replace_type_identifier("PathLike", "Path", "pathlib.Path"),
+            "PathLike"
+        );
+    }
+
+    #[test]
+    fn test_replace_identifier_no_prefix_match() {
+        // `MyPath` should NOT be affected when replacing `Path`.
+        assert_eq!(
+            replace_type_identifier("MyPath", "Path", "pathlib.Path"),
+            "MyPath"
+        );
+    }
+
+    #[test]
+    fn test_replace_identifier_multiple_occurrences() {
+        assert_eq!(
+            replace_type_identifier("tuple[Path, Path]", "Path", "pathlib.Path"),
+            "tuple[pathlib.Path, pathlib.Path]"
+        );
+    }
+
+    #[test]
+    fn test_replace_identifier_union_pipe() {
+        assert_eq!(
+            replace_type_identifier("Path | None", "Path", "pathlib.Path"),
+            "pathlib.Path | None"
+        );
+    }
+
+    #[test]
+    fn test_replace_identifier_does_not_touch_dotted() {
+        // If the type already has `pathlib.Path`, replacing standalone `Path`
+        // should not double-qualify it. The `.` before `Path` prevents the match.
+        assert_eq!(
+            replace_type_identifier("pathlib.Path", "Path", "xx.Path"),
+            "pathlib.Path"
+        );
     }
 }

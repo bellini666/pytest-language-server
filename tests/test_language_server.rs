@@ -41,8 +41,23 @@ fn make_backend() -> Backend {
     make_backend_with_db(Arc::new(FixtureDatabase::new()))
 }
 
-fn uri(path: &str) -> Uri {
-    Uri::from_file_path(path).unwrap_or_else(|| panic!("invalid path for URI: {path}"))
+/// Return a platform-appropriate absolute `PathBuf` under the system temp
+/// directory.  Using `std::env::temp_dir()` (rather than a hardcoded
+/// `/tmp/…` string) ensures the path is truly absolute on Windows too
+/// (Windows paths require a drive letter prefix for `is_absolute()` to
+/// return `true`, which `Uri::from_file_path` requires).
+fn tfile(subdir: &str, filename: &str) -> PathBuf {
+    std::env::temp_dir().join(subdir).join(filename)
+}
+
+/// Build a `Uri` from a path under the system temp directory.
+///
+/// Panics if the path cannot be converted to a URI, which should never
+/// happen for a path returned by `std::env::temp_dir().join(…)`.
+fn turi(subdir: &str, filename: &str) -> Uri {
+    let path = tfile(subdir, filename);
+    Uri::from_file_path(&path)
+        .unwrap_or_else(|| panic!("Uri::from_file_path failed for {:?}", path))
 }
 
 fn pos(line: u32, character: u32) -> Position {
@@ -293,7 +308,7 @@ async fn test_did_open_registers_fixture_in_db() {
     let db = Arc::new(FixtureDatabase::new());
     let backend = make_backend_with_db(Arc::clone(&db));
 
-    let file_uri = uri("/tmp/test_ls_open/conftest.py");
+    let file_uri = turi("test_ls_open", "conftest.py");
     backend
         .did_open(DidOpenTextDocumentParams {
             text_document: TextDocumentItem {
@@ -318,7 +333,7 @@ async fn test_did_open_populates_uri_cache() {
     let db = Arc::new(FixtureDatabase::new());
     let backend = make_backend_with_db(Arc::clone(&db));
 
-    let file_uri = uri("/tmp/test_ls_open_cache/conftest.py");
+    let file_uri = turi("test_ls_open_cache", "conftest.py");
     backend
         .did_open(DidOpenTextDocumentParams {
             text_document: TextDocumentItem {
@@ -343,7 +358,7 @@ async fn test_did_open_with_diagnostics() {
     let backend = make_backend_with_db(Arc::clone(&db));
 
     // A test that uses an undeclared fixture – should trigger diagnostic publishing
-    let file_uri = uri("/tmp/test_ls_open_diag/test_example.py");
+    let file_uri = turi("test_ls_open_diag", "test_example.py");
     backend
         .did_open(DidOpenTextDocumentParams {
             text_document: TextDocumentItem {
@@ -365,7 +380,7 @@ async fn test_did_change_updates_fixture_db() {
     let db = Arc::new(FixtureDatabase::new());
     let backend = make_backend_with_db(Arc::clone(&db));
 
-    let file_uri = uri("/tmp/test_ls_change/conftest.py");
+    let file_uri = turi("test_ls_change", "conftest.py");
 
     // Open with first fixture
     backend
@@ -407,7 +422,7 @@ async fn test_did_change_updates_fixture_db() {
 #[timeout(30000)]
 async fn test_did_change_with_empty_content_changes_is_noop() {
     let backend = make_backend();
-    let file_uri = uri("/tmp/test_ls_change_empty/conftest.py");
+    let file_uri = turi("test_ls_change_empty", "conftest.py");
 
     // Should not panic with no content changes
     backend
@@ -427,7 +442,7 @@ async fn test_did_change_triggers_inlay_hint_refresh() {
     let db = Arc::new(FixtureDatabase::new());
     let backend = make_backend_with_db(Arc::clone(&db));
 
-    let file_uri = uri("/tmp/test_ls_change_hint/conftest.py");
+    let file_uri = turi("test_ls_change_hint", "conftest.py");
 
     // Open first
     backend
@@ -468,15 +483,16 @@ async fn test_did_change_watched_files_created_init_py_triggers_reanalysis() {
     let db = Arc::new(FixtureDatabase::new());
     let backend = make_backend_with_db(Arc::clone(&db));
 
-    // Put a fixture file under the directory where __init__.py will be created
-    let fixture_path = PathBuf::from("/tmp/test_ls_wf_created/conftest.py");
+    // Put a fixture file under the directory where __init__.py will be created.
+    // Both paths are built from the same temp subdir so starts_with() works.
+    let fixture_path = tfile("test_ls_wf_created", "conftest.py");
     db.analyze_file(
         fixture_path.clone(),
         "import pytest\n\n@pytest.fixture\ndef wf_fixture():\n    return 42\n",
     );
     assert!(db.definitions.contains_key("wf_fixture"));
 
-    let init_uri = uri("/tmp/test_ls_wf_created/__init__.py");
+    let init_uri = turi("test_ls_wf_created", "__init__.py");
     backend
         .did_change_watched_files(DidChangeWatchedFilesParams {
             changes: vec![FileEvent {
@@ -494,13 +510,13 @@ async fn test_did_change_watched_files_deleted_init_py_triggers_reanalysis() {
     let db = Arc::new(FixtureDatabase::new());
     let backend = make_backend_with_db(Arc::clone(&db));
 
-    let fixture_path = PathBuf::from("/tmp/test_ls_wf_deleted/conftest.py");
+    let fixture_path = tfile("test_ls_wf_deleted", "conftest.py");
     db.analyze_file(
         fixture_path,
         "import pytest\n\n@pytest.fixture\ndef del_fixture():\n    return 1\n",
     );
 
-    let init_uri = uri("/tmp/test_ls_wf_deleted/__init__.py");
+    let init_uri = turi("test_ls_wf_deleted", "__init__.py");
     backend
         .did_change_watched_files(DidChangeWatchedFilesParams {
             changes: vec![FileEvent {
@@ -517,7 +533,7 @@ async fn test_did_change_watched_files_skips_changed_events() {
     let backend = make_backend();
 
     // FileChangeType::CHANGED should be skipped – no re-analysis
-    let init_uri = uri("/tmp/test_ls_wf_changed/__init__.py");
+    let init_uri = turi("test_ls_wf_changed", "__init__.py");
     backend
         .did_change_watched_files(DidChangeWatchedFilesParams {
             changes: vec![FileEvent {
@@ -545,18 +561,19 @@ async fn test_did_change_watched_files_republishes_diagnostics_for_cached_uri() 
     let db = Arc::new(FixtureDatabase::new());
     let backend = make_backend_with_db(Arc::clone(&db));
 
-    // Analyse a fixture file
-    let fixture_path = PathBuf::from("/tmp/test_ls_wf_diag/conftest.py");
+    // Analyse a fixture file using a temp-dir path so the directory structure
+    // is consistent across platforms.
+    let fixture_path = tfile("test_ls_wf_diag", "conftest.py");
     db.analyze_file(
         fixture_path.clone(),
         "import pytest\n\n@pytest.fixture\ndef diag_fixture():\n    return 99\n",
     );
 
-    // Pre-populate URI cache so the diagnostic re-publish branch is exercised
-    let fixture_uri = uri("/tmp/test_ls_wf_diag/conftest.py");
+    // Pre-populate URI cache so the diagnostic re-publish branch is exercised.
+    let fixture_uri = turi("test_ls_wf_diag", "conftest.py");
     backend.uri_cache.insert(fixture_path, fixture_uri);
 
-    let init_uri = uri("/tmp/test_ls_wf_diag/__init__.py");
+    let init_uri = turi("test_ls_wf_diag", "__init__.py");
     backend
         .did_change_watched_files(DidChangeWatchedFilesParams {
             changes: vec![FileEvent {
@@ -573,9 +590,10 @@ async fn test_did_change_watched_files_multiple_events() {
     let db = Arc::new(FixtureDatabase::new());
     let backend = make_backend_with_db(Arc::clone(&db));
 
-    // Two directories, each with a fixture file
-    let path_a = PathBuf::from("/tmp/test_ls_wf_multi/pkg_a/conftest.py");
-    let path_b = PathBuf::from("/tmp/test_ls_wf_multi/pkg_b/conftest.py");
+    // Two independent subdirectories, each with a fixture file and a
+    // corresponding __init__.py event.
+    let path_a = tfile("test_ls_wf_multi_a", "conftest.py");
+    let path_b = tfile("test_ls_wf_multi_b", "conftest.py");
     db.analyze_file(
         path_a,
         "import pytest\n\n@pytest.fixture\ndef fixture_a():\n    pass\n",
@@ -588,11 +606,11 @@ async fn test_did_change_watched_files_multiple_events() {
     let params = DidChangeWatchedFilesParams {
         changes: vec![
             FileEvent {
-                uri: uri("/tmp/test_ls_wf_multi/pkg_a/__init__.py"),
+                uri: turi("test_ls_wf_multi_a", "__init__.py"),
                 typ: FileChangeType::CREATED,
             },
             FileEvent {
-                uri: uri("/tmp/test_ls_wf_multi/pkg_b/__init__.py"),
+                uri: turi("test_ls_wf_multi_b", "__init__.py"),
                 typ: FileChangeType::DELETED,
             },
         ],
@@ -608,7 +626,7 @@ async fn test_did_close_clears_uri_cache() {
     let db = Arc::new(FixtureDatabase::new());
     let backend = make_backend_with_db(Arc::clone(&db));
 
-    let file_uri = uri("/tmp/test_ls_close/conftest.py");
+    let file_uri = turi("test_ls_close", "conftest.py");
 
     // Open to populate caches
     backend
@@ -647,7 +665,7 @@ async fn test_did_close_unknown_file_does_not_panic() {
     backend
         .did_close(DidCloseTextDocumentParams {
             text_document: TextDocumentIdentifier {
-                uri: uri("/tmp/test_ls_close_unknown/never_opened.py"),
+                uri: turi("test_ls_close_unknown", "never_opened.py"),
             },
         })
         .await;
@@ -661,7 +679,7 @@ async fn test_goto_definition_returns_ok_on_empty_db() {
     let backend = make_backend();
     let result = backend
         .goto_definition(GotoDefinitionParams {
-            text_document_position_params: tdp(uri("/tmp/test_ls_gotodef/test_file.py"), 0, 0),
+            text_document_position_params: tdp(turi("test_ls_gotodef", "test_file.py"), 0, 0),
             work_done_progress_params: wdp(),
             partial_result_params: prp(),
         })
@@ -676,25 +694,25 @@ async fn test_goto_definition_resolves_fixture() {
     let db = Arc::new(FixtureDatabase::new());
     let backend = make_backend_with_db(Arc::clone(&db));
 
-    let conftest_path = PathBuf::from("/tmp/test_ls_gotodef2/conftest.py");
+    let conftest_path = tfile("test_ls_gotodef2", "conftest.py");
     db.analyze_file(
         conftest_path.clone(),
         "import pytest\n\n@pytest.fixture\ndef my_fixture():\n    return 1\n",
     );
 
-    let test_path = PathBuf::from("/tmp/test_ls_gotodef2/test_example.py");
+    let test_path = tfile("test_ls_gotodef2", "test_example.py");
     db.analyze_file(
         test_path.clone(),
         "def test_it(my_fixture):\n    assert my_fixture == 1\n",
     );
     // Pre-register URI cache so path_to_uri works
-    let conftest_uri = uri("/tmp/test_ls_gotodef2/conftest.py");
+    let conftest_uri = turi("test_ls_gotodef2", "conftest.py");
     backend.uri_cache.insert(conftest_path, conftest_uri);
 
     let result = backend
         .goto_definition(GotoDefinitionParams {
             text_document_position_params: tdp(
-                uri("/tmp/test_ls_gotodef2/test_example.py"),
+                turi("test_ls_gotodef2", "test_example.py"),
                 0,  // line 0 (LSP) = line 1 (1-indexed): "def test_it(my_fixture):"
                 12, // character inside "my_fixture"
             ),
@@ -713,7 +731,7 @@ async fn test_goto_implementation_returns_ok_on_empty_db() {
     let backend = make_backend();
     let result = backend
         .goto_implementation(GotoImplementationParams {
-            text_document_position_params: tdp(uri("/tmp/test_ls_impl/test_file.py"), 0, 0),
+            text_document_position_params: tdp(turi("test_ls_impl", "test_file.py"), 0, 0),
             work_done_progress_params: wdp(),
             partial_result_params: prp(),
         })
@@ -730,7 +748,7 @@ async fn test_hover_returns_none_on_empty_file() {
     let backend = make_backend();
     let result = backend
         .hover(HoverParams {
-            text_document_position_params: tdp(uri("/tmp/test_ls_hover/test.py"), 0, 0),
+            text_document_position_params: tdp(turi("test_ls_hover", "test.py"), 0, 0),
             work_done_progress_params: wdp(),
         })
         .await;
@@ -744,22 +762,22 @@ async fn test_hover_returns_content_for_known_fixture() {
     let db = Arc::new(FixtureDatabase::new());
     let backend = make_backend_with_db(Arc::clone(&db));
 
-    let conftest_path = PathBuf::from("/tmp/test_ls_hover2/conftest.py");
+    let conftest_path = tfile("test_ls_hover2", "conftest.py");
     db.analyze_file(
         conftest_path.clone(),
         "import pytest\n\n@pytest.fixture\ndef hover_fixture():\n    \"\"\"Hover docstring.\"\"\"\n    return 1\n",
     );
-    let conftest_uri = uri("/tmp/test_ls_hover2/conftest.py");
+    let conftest_uri = turi("test_ls_hover2", "conftest.py");
     backend
         .uri_cache
         .insert(conftest_path.clone(), conftest_uri.clone());
 
-    let test_path = PathBuf::from("/tmp/test_ls_hover2/test_example.py");
+    let test_path = tfile("test_ls_hover2", "test_example.py");
     db.analyze_file(test_path, "def test_it(hover_fixture):\n    pass\n");
 
     let result = backend
         .hover(HoverParams {
-            text_document_position_params: tdp(uri("/tmp/test_ls_hover2/test_example.py"), 0, 12),
+            text_document_position_params: tdp(turi("test_ls_hover2", "test_example.py"), 0, 12),
             work_done_progress_params: wdp(),
         })
         .await;
@@ -774,7 +792,7 @@ async fn test_references_returns_ok_on_empty_db() {
     let backend = make_backend();
     let result = backend
         .references(ReferenceParams {
-            text_document_position: tdp(uri("/tmp/test_ls_refs/test.py"), 0, 0),
+            text_document_position: tdp(turi("test_ls_refs", "test.py"), 0, 0),
             context: ReferenceContext {
                 include_declaration: true,
             },
@@ -793,7 +811,7 @@ async fn test_completion_returns_ok() {
     let backend = make_backend();
     let result = backend
         .completion(CompletionParams {
-            text_document_position: tdp(uri("/tmp/test_ls_compl/test.py"), 0, 0),
+            text_document_position: tdp(turi("test_ls_compl", "test.py"), 0, 0),
             work_done_progress_params: wdp(),
             partial_result_params: prp(),
             context: None,
@@ -811,7 +829,7 @@ async fn test_code_action_returns_ok_no_diagnostics() {
     let result = backend
         .code_action(CodeActionParams {
             text_document: TextDocumentIdentifier {
-                uri: uri("/tmp/test_ls_ca/test.py"),
+                uri: turi("test_ls_ca", "test.py"),
             },
             range: rng(0, 0, 0, 0),
             context: CodeActionContext {
@@ -835,7 +853,7 @@ async fn test_document_symbol_returns_ok_for_unknown_file() {
     let result = backend
         .document_symbol(DocumentSymbolParams {
             text_document: TextDocumentIdentifier {
-                uri: uri("/tmp/test_ls_docsym/test.py"),
+                uri: turi("test_ls_docsym", "test.py"),
             },
             work_done_progress_params: wdp(),
             partial_result_params: prp(),
@@ -850,7 +868,7 @@ async fn test_document_symbol_returns_symbols_for_known_file() {
     let db = Arc::new(FixtureDatabase::new());
     let backend = make_backend_with_db(Arc::clone(&db));
 
-    let file_path = PathBuf::from("/tmp/test_ls_docsym2/conftest.py");
+    let file_path = tfile("test_ls_docsym2", "conftest.py");
     db.analyze_file(
         file_path,
         "import pytest\n\n@pytest.fixture\ndef doc_fixture():\n    return 1\n",
@@ -859,7 +877,7 @@ async fn test_document_symbol_returns_symbols_for_known_file() {
     let result = backend
         .document_symbol(DocumentSymbolParams {
             text_document: TextDocumentIdentifier {
-                uri: uri("/tmp/test_ls_docsym2/conftest.py"),
+                uri: turi("test_ls_docsym2", "conftest.py"),
             },
             work_done_progress_params: wdp(),
             partial_result_params: prp(),
@@ -874,7 +892,7 @@ async fn test_document_symbol_returns_symbols_for_known_file() {
 #[timeout(30000)]
 async fn test_symbol_wraps_result_in_flat_response() {
     let db = Arc::new(FixtureDatabase::new());
-    let fixture_path = PathBuf::from("/tmp/test_ls_wssym/conftest.py");
+    let fixture_path = tfile("test_ls_wssym", "conftest.py");
     db.analyze_file(
         fixture_path,
         "import pytest\n\n@pytest.fixture\ndef ws_sym_fixture():\n    return 1\n",
@@ -919,7 +937,7 @@ async fn test_code_lens_returns_ok() {
     let result = backend
         .code_lens(CodeLensParams {
             text_document: TextDocumentIdentifier {
-                uri: uri("/tmp/test_ls_lens/conftest.py"),
+                uri: turi("test_ls_lens", "conftest.py"),
             },
             work_done_progress_params: wdp(),
             partial_result_params: prp(),
@@ -937,7 +955,7 @@ async fn test_inlay_hint_returns_ok() {
     let result = backend
         .inlay_hint(InlayHintParams {
             text_document: TextDocumentIdentifier {
-                uri: uri("/tmp/test_ls_inlay/test.py"),
+                uri: turi("test_ls_inlay", "test.py"),
             },
             range: rng(0, 0, 100, 0),
             work_done_progress_params: wdp(),
@@ -954,7 +972,7 @@ async fn test_prepare_call_hierarchy_returns_none_on_unknown_position() {
     let backend = make_backend();
     let result = backend
         .prepare_call_hierarchy(CallHierarchyPrepareParams {
-            text_document_position_params: tdp(uri("/tmp/test_ls_callh/conftest.py"), 0, 0),
+            text_document_position_params: tdp(turi("test_ls_callh", "conftest.py"), 0, 0),
             work_done_progress_params: wdp(),
         })
         .await;
@@ -968,7 +986,7 @@ async fn test_prepare_call_hierarchy_returns_none_on_unknown_position() {
 #[timeout(30000)]
 async fn test_incoming_calls_returns_none_for_unknown_fixture() {
     let backend = make_backend();
-    let dummy_uri = uri("/tmp/test_ls_inc/conftest.py");
+    let dummy_uri = turi("test_ls_inc", "conftest.py");
     let result = backend
         .incoming_calls(CallHierarchyIncomingCallsParams {
             item: CallHierarchyItem {
@@ -994,7 +1012,7 @@ async fn test_incoming_calls_returns_none_for_unknown_fixture() {
 #[timeout(30000)]
 async fn test_outgoing_calls_returns_none_for_unknown_fixture() {
     let backend = make_backend();
-    let dummy_uri = uri("/tmp/test_ls_out/conftest.py");
+    let dummy_uri = turi("test_ls_out", "conftest.py");
     let result = backend
         .outgoing_calls(CallHierarchyOutgoingCallsParams {
             item: CallHierarchyItem {
@@ -1074,7 +1092,7 @@ async fn test_full_file_lifecycle_open_change_close() {
     let db = Arc::new(FixtureDatabase::new());
     let backend = make_backend_with_db(Arc::clone(&db));
 
-    let file_uri = uri("/tmp/test_ls_lifecycle/conftest.py");
+    let file_uri = turi("test_ls_lifecycle", "conftest.py");
 
     // 1. Open
     backend

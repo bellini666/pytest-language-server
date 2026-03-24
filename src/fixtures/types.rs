@@ -2,6 +2,28 @@
 
 use std::path::PathBuf;
 
+/// Specifies how to import a type referenced in a fixture's return annotation.
+///
+/// Resolved at analysis time from the fixture file's own imports, this struct
+/// encodes everything needed to add the correct import statement to a consumer
+/// file (e.g. a test file that declares the fixture as a parameter).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeImportSpec {
+    /// The name to look for in the target file's module-level names set.
+    ///
+    /// Matches exactly how `collect_module_level_names` stores names:
+    /// - `import pathlib`                  → `"pathlib"`
+    /// - `from pathlib import Path`        → `"Path"`
+    /// - `from pathlib import Path as P`   → `"P"`
+    pub check_name: String,
+    /// Complete import statement to insert (no trailing newline).
+    /// Always in absolute form — relative imports are resolved at analysis time.
+    ///
+    /// Examples: `"from pathlib import Path"`, `"import pathlib"`,
+    ///           `"from pathlib import Path as P"`
+    pub import_statement: String,
+}
+
 /// Pytest fixture scope, ordered from narrowest to broadest.
 /// A fixture with a broader scope cannot depend on a fixture with a narrower scope.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -55,6 +77,7 @@ pub struct FixtureDefinition {
     pub end_char: usize, // Character position where the fixture name ends (on the line)
     pub docstring: Option<String>,
     pub return_type: Option<String>, // The return type annotation (for generators, the yielded type)
+    pub return_type_imports: Vec<TypeImportSpec>, // Import specs needed to use the return type in another file
     pub is_third_party: bool, // Whether this fixture is from a third-party package (site-packages)
     pub is_plugin: bool, // Whether this fixture was discovered via a pytest11 entry point plugin
     pub dependencies: Vec<String>, // Names of fixtures this fixture depends on (via parameters)

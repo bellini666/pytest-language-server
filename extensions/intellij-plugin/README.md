@@ -23,7 +23,7 @@ A blazingly fast Language Server Protocol implementation for pytest fixtures, wr
 - **Code Lens**: See fixture usage counts directly above definitions
 - **Inlay Hints**: See fixture return types inline next to parameters
 - **Diagnostics**: Warnings for undeclared fixtures, scope mismatches, and circular dependencies
-- **Code Actions**: Quick fixes to add missing fixture parameters
+- **Code Actions**: Quick fixes to add missing fixture parameters with type annotations, cursor-based and file-wide type annotation insertion, and isort-aware import management
 - **Fixture Priority**: Correctly handles pytest's fixture shadowing rules
 
 ## Architecture

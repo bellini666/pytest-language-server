@@ -21,6 +21,7 @@ fn test_hover_content_with_leading_newline() {
         end_char: 14,
         docstring: Some("This is a test fixture.\n\nIt does something useful.".to_string()),
         return_type: None,
+        return_type_imports: vec![],
         is_third_party: false,
         is_plugin: false,
         dependencies: vec![],
@@ -90,6 +91,7 @@ fn test_hover_content_structure_without_docstring() {
         end_char: 18,
         docstring: None,
         return_type: None,
+        return_type_imports: vec![],
         is_third_party: false,
         is_plugin: false,
         dependencies: vec![],
@@ -3861,4 +3863,1609 @@ def conditional_resource(request):
     assert!(def.yield_line.is_some());
     // First yield is on line 7
     assert_eq!(def.yield_line, Some(7));
+}
+
+// ============================================================================
+// TYPE-ANNOTATION CODE ACTION TESTS
+// ============================================================================
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_from_import_style() {
+    // Fixture uses `from pathlib import Path` and returns `-> Path`.
+    // The resolved TypeImportSpec should produce a `from pathlib import Path` statement.
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_type_from/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from pathlib import Path
+
+@pytest.fixture
+def tmp_dir() -> Path:
+    return Path("/tmp")
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("tmp_dir").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(def.return_type.as_deref(), Some("Path"));
+    assert_eq!(
+        def.return_type_imports,
+        vec![TypeImportSpec {
+            check_name: "Path".to_string(),
+            import_statement: "from pathlib import Path".to_string(),
+        }]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_direct_import_style() {
+    // Fixture uses `import pathlib` and returns `-> pathlib.Path`.
+    // The resolved TypeImportSpec should produce an `import pathlib` statement,
+    // and the check_name should be `"pathlib"` (the top-level name).
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_type_direct/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+import pathlib
+
+@pytest.fixture
+def tmp_dir() -> pathlib.Path:
+    return pathlib.Path("/tmp")
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("tmp_dir").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(def.return_type.as_deref(), Some("pathlib.Path"));
+    assert_eq!(
+        def.return_type_imports,
+        vec![TypeImportSpec {
+            check_name: "pathlib".to_string(),
+            import_statement: "import pathlib".to_string(),
+        }]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_aliased_import() {
+    // Fixture uses `from pathlib import Path as P` and returns `-> P`.
+    // The TypeImportSpec must preserve the alias in both check_name and import_statement.
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_type_alias/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from pathlib import Path as P
+
+@pytest.fixture
+def tmp_dir() -> P:
+    return P("/tmp")
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("tmp_dir").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(def.return_type.as_deref(), Some("P"));
+    assert_eq!(
+        def.return_type_imports,
+        vec![TypeImportSpec {
+            check_name: "P".to_string(),
+            import_statement: "from pathlib import Path as P".to_string(),
+        }]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_aliased_module_import() {
+    // Fixture uses `import pathlib as pl` and returns `-> pl.Path`.
+    // The check_name should be `"pl"` and import_statement should preserve the alias.
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_type_alias_mod/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+import pathlib as pl
+
+@pytest.fixture
+def tmp_dir() -> pl.Path:
+    return pl.Path("/tmp")
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("tmp_dir").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(def.return_type.as_deref(), Some("pl.Path"));
+    assert_eq!(
+        def.return_type_imports,
+        vec![TypeImportSpec {
+            check_name: "pl".to_string(),
+            import_statement: "import pathlib as pl".to_string(),
+        }]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_builtin_type() {
+    // Fixtures returning builtin types (int, str, bool, …) require no import.
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_type_builtin/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def answer() -> int:
+    return 42
+
+@pytest.fixture
+def greeting() -> str:
+    return "hello"
+
+@pytest.fixture
+def flag() -> bool:
+    return True
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    for name in &["answer", "greeting", "flag"] {
+        let defs = db.definitions.get(*name).expect("fixture not found");
+        let def = &defs[0];
+        assert!(
+            def.return_type.is_some(),
+            "return_type should be set for {}",
+            name
+        );
+        assert!(
+            def.return_type_imports.is_empty(),
+            "return_type_imports should be empty for builtin type fixture '{}'",
+            name
+        );
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_no_annotation() {
+    // A fixture without a return annotation should have empty return_type_imports
+    // and return_type = None.
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_type_none/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture():
+    return 42
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("my_fixture").expect("fixture not found");
+    let def = &defs[0];
+
+    assert!(def.return_type.is_none());
+    assert!(def.return_type_imports.is_empty());
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_complex_generic_type() {
+    // Complex/generic return types (containing `[`) resolve all identifiers.
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_type_generic/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from typing import Optional
+from myapp.db import Database
+
+@pytest.fixture
+def db_fixture() -> Optional[Database]:
+    return Database()
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("db_fixture").expect("fixture not found");
+    let def = &defs[0];
+
+    // Annotation is captured as-is.
+    assert_eq!(def.return_type.as_deref(), Some("Optional[Database]"));
+    // Both `Optional` and `Database` need imports from different modules.
+    assert_eq!(
+        def.return_type_imports,
+        vec![
+            TypeImportSpec {
+                check_name: "Optional".to_string(),
+                import_statement: "from typing import Optional".to_string(),
+            },
+            TypeImportSpec {
+                check_name: "Database".to_string(),
+                import_statement: "from myapp.db import Database".to_string(),
+            },
+        ]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_union_type() {
+    // Union types with `|` resolve the non-builtin identifiers.
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_type_union/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from myapp.db import Database
+
+@pytest.fixture
+def maybe_db() -> Database | None:
+    return None
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("maybe_db").expect("fixture not found");
+    let def = &defs[0];
+
+    // `None` is a builtin, only `Database` needs an import.
+    assert_eq!(
+        def.return_type_imports,
+        vec![TypeImportSpec {
+            check_name: "Database".to_string(),
+            import_statement: "from myapp.db import Database".to_string(),
+        }]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_dict_str_any() {
+    // `dict[str, Any]` — `dict` and `str` are builtins, only `Any` needs an import.
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_type_dict_any/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from typing import Any
+
+@pytest.fixture
+def rig_config() -> dict[str, Any]:
+    return {"key": "value"}
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("rig_config").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(def.return_type.as_deref(), Some("dict[str, Any]"));
+    assert_eq!(
+        def.return_type_imports,
+        vec![TypeImportSpec {
+            check_name: "Any".to_string(),
+            import_statement: "from typing import Any".to_string(),
+        }]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_tuple_path_int() {
+    // `tuple[Path, int]` — `tuple` and `int` are builtins, only `Path` needs an import.
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_type_tuple_path/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from pathlib import Path
+
+@pytest.fixture
+def path_pair() -> tuple[Path, int]:
+    return (Path("/tmp"), 42)
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("path_pair").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(def.return_type.as_deref(), Some("tuple[Path, int]"));
+    assert_eq!(
+        def.return_type_imports,
+        vec![TypeImportSpec {
+            check_name: "Path".to_string(),
+            import_statement: "from pathlib import Path".to_string(),
+        }]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_nested_generics() {
+    // `list[dict[str, Any]]` — nested generics, only `Any` needs an import.
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_type_nested/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from typing import Any
+
+@pytest.fixture
+def configs() -> list[dict[str, Any]]:
+    return [{"key": "value"}]
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("configs").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(def.return_type.as_deref(), Some("list[dict[str, Any]]"));
+    assert_eq!(
+        def.return_type_imports,
+        vec![TypeImportSpec {
+            check_name: "Any".to_string(),
+            import_statement: "from typing import Any".to_string(),
+        }]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_duplicate_names_deduplicated() {
+    // `tuple[Path, Path]` — `Path` appears twice but should produce only one import.
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_type_dedup/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from pathlib import Path
+
+@pytest.fixture
+def two_paths() -> tuple[Path, Path]:
+    return (Path("/a"), Path("/b"))
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("two_paths").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(def.return_type.as_deref(), Some("tuple[Path, Path]"));
+    assert_eq!(
+        def.return_type_imports,
+        vec![TypeImportSpec {
+            check_name: "Path".to_string(),
+            import_statement: "from pathlib import Path".to_string(),
+        }]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_multi_module() {
+    // `dict[str, Path]` — `dict` and `str` are builtins, `Path` from pathlib.
+    // `Sequence[tuple[Database, Path]]` — `Sequence` from collections.abc,
+    // `Database` from myapp.db, `Path` from pathlib.
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_type_multi_mod/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from collections.abc import Sequence
+from myapp.db import Database
+from pathlib import Path
+
+@pytest.fixture
+def records() -> Sequence[tuple[Database, Path]]:
+    return []
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("records").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(
+        def.return_type.as_deref(),
+        Some("Sequence[tuple[Database, Path]]")
+    );
+    assert_eq!(
+        def.return_type_imports,
+        vec![
+            TypeImportSpec {
+                check_name: "Sequence".to_string(),
+                import_statement: "from collections.abc import Sequence".to_string(),
+            },
+            TypeImportSpec {
+                check_name: "Database".to_string(),
+                import_statement: "from myapp.db import Database".to_string(),
+            },
+            TypeImportSpec {
+                check_name: "Path".to_string(),
+                import_statement: "from pathlib import Path".to_string(),
+            },
+        ]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_locally_defined_type() {
+    // A class defined directly in conftest.py (not imported from anywhere).
+    // The import spec should reference the conftest module itself.
+    // With /tmp paths (no __init__.py), the module resolves to just "conftest".
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_type_local/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+
+class Database:
+    def query(self):
+        return []
+
+@pytest.fixture
+def db() -> Database:
+    return Database()
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("db").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(def.return_type.as_deref(), Some("Database"));
+    assert_eq!(def.return_type_imports.len(), 1);
+    let spec = &def.return_type_imports[0];
+    assert_eq!(spec.check_name, "Database");
+    // Without __init__.py the module path is just the file stem.
+    assert_eq!(spec.import_statement, "from conftest import Database");
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_yield_fixture_resolved_type() {
+    // Generator fixtures have their yielded type extracted.
+    // The import should reference that extracted type, not the full Generator annotation.
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_type_yield/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from typing import Generator
+from pathlib import Path
+
+@pytest.fixture
+def tmp_path_fixture() -> Generator[Path, None, None]:
+    p = Path("/tmp/test")
+    p.mkdir(exist_ok=True)
+    yield p
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db
+        .definitions
+        .get("tmp_path_fixture")
+        .expect("fixture not found");
+    let def = &defs[0];
+
+    // extract_return_type unwraps Generator[Path, …] to just "Path"
+    assert_eq!(def.return_type.as_deref(), Some("Path"));
+    assert_eq!(
+        def.return_type_imports,
+        vec![TypeImportSpec {
+            check_name: "Path".to_string(),
+            import_statement: "from pathlib import Path".to_string(),
+        }]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_code_action_import_already_present_in_test_file() {
+    // When the test file already imports `Path`, no duplicate import spec should
+    // be added.  We test this by inspecting the imports DashMap directly.
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_ca_dedup/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_ca_dedup/test_example.py");
+
+    let conftest_content = r#"
+import pytest
+from pathlib import Path
+
+@pytest.fixture
+def tmp_dir() -> Path:
+    return Path("/tmp")
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // Test file already has `from pathlib import Path` — the name "Path" is in imports.
+    let test_content = r#"
+from pathlib import Path
+
+def test_uses_tmp_dir():
+    result = tmp_dir / "file.txt"
+    assert result.parent == tmp_dir
+"#;
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Confirm the fixture definition has the import spec.
+    let defs = db.definitions.get("tmp_dir").expect("fixture not found");
+    let def = &defs[0];
+    assert_eq!(def.return_type_imports.len(), 1);
+    assert_eq!(def.return_type_imports[0].check_name, "Path");
+
+    // Confirm the test file's imports map already contains "Path".
+    let test_imports = db
+        .imports
+        .get(&test_path)
+        .expect("test file imports not found");
+    assert!(
+        test_imports.contains("Path"),
+        "Test file should already have 'Path' in its imports"
+    );
+    // So the code action would skip adding the import (checked by caller).
+}
+
+#[test]
+#[timeout(30000)]
+fn test_code_action_import_not_yet_present_in_test_file() {
+    // When the test file does NOT import the type, the TypeImportSpec should be
+    // returned and the check_name should NOT appear in the test file's imports.
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_ca_missing/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_ca_missing/test_example.py");
+
+    let conftest_content = r#"
+import pytest
+from pathlib import Path
+
+@pytest.fixture
+def tmp_dir() -> Path:
+    return Path("/tmp")
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // Test file has NO pathlib import.
+    let test_content = r#"
+import pytest
+
+def test_uses_tmp_dir():
+    result = tmp_dir / "file.txt"
+    assert result.parent == tmp_dir
+"#;
+    db.analyze_file(test_path.clone(), test_content);
+
+    let defs = db.definitions.get("tmp_dir").expect("fixture not found");
+    let def = &defs[0];
+    assert_eq!(def.return_type_imports.len(), 1);
+    let spec = &def.return_type_imports[0];
+    assert_eq!(spec.check_name, "Path");
+    assert_eq!(spec.import_statement, "from pathlib import Path");
+
+    // Confirm "Path" is absent from the test file's imports.
+    let test_imports = db
+        .imports
+        .get(&test_path)
+        .expect("test file imports not found");
+    assert!(
+        !test_imports.contains("Path"),
+        "Test file should NOT yet have 'Path' in its imports"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_code_action_annotation_in_param_text() {
+    // Integration test: after analysis, the fixture definition carries enough
+    // information for the code action to build `"my_fixture: Path"` as the
+    // parameter text.  We verify the data, not the full LSP handler.
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_ca_param_text/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_ca_param_text/test_example.py");
+
+    let conftest_content = r#"
+import pytest
+from pathlib import Path
+
+@pytest.fixture
+def work_dir() -> Path:
+    return Path("/work")
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let test_content = r#"
+import pytest
+
+def test_something():
+    result = work_dir / "out.txt"
+"#;
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Resolve the fixture definition as the code action would.
+    let fixture_def = db.resolve_fixture_for_file(&test_path, "work_dir");
+    assert!(fixture_def.is_some(), "Should resolve fixture definition");
+    let fixture_def = fixture_def.unwrap();
+
+    // Simulate code action param-text construction.
+    let type_suffix = fixture_def
+        .return_type
+        .as_deref()
+        .map(|t| format!(": {}", t))
+        .unwrap_or_default();
+
+    // When adding as the first parameter (no existing params).
+    let param_text_no_comma = format!("work_dir{}", type_suffix);
+    assert_eq!(param_text_no_comma, "work_dir: Path");
+
+    // When appending after existing parameters.
+    let param_text_with_comma = format!(", work_dir{}", type_suffix);
+    assert_eq!(param_text_with_comma, ", work_dir: Path");
+
+    // Import spec is correct.
+    assert_eq!(fixture_def.return_type_imports.len(), 1);
+    assert_eq!(fixture_def.return_type_imports[0].check_name, "Path");
+    assert_eq!(
+        fixture_def.return_type_imports[0].import_statement,
+        "from pathlib import Path"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_code_action_no_annotation_when_no_return_type() {
+    // Fixtures without a return annotation keep the old bare-name behaviour:
+    // type_suffix is empty and return_type_imports is empty.
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_ca_no_type/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_ca_no_type/test_example.py");
+
+    let conftest_content = r#"
+import pytest
+
+@pytest.fixture
+def plain_fixture():
+    return 42
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let test_content = r#"
+def test_uses_plain():
+    result = plain_fixture + 1
+"#;
+    db.analyze_file(test_path.clone(), test_content);
+
+    let fixture_def = db.resolve_fixture_for_file(&test_path, "plain_fixture");
+    assert!(fixture_def.is_some());
+    let fixture_def = fixture_def.unwrap();
+
+    assert!(fixture_def.return_type.is_none());
+    assert!(fixture_def.return_type_imports.is_empty());
+
+    let type_suffix = fixture_def
+        .return_type
+        .as_deref()
+        .map(|t| format!(": {}", t))
+        .unwrap_or_default();
+    assert_eq!(type_suffix, "", "No type suffix when no return annotation");
+
+    let param_text = format!("plain_fixture{}", type_suffix);
+    assert_eq!(param_text, "plain_fixture");
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_relative_import_resolved() {
+    // A conftest.py using `from .models import Database` (relative import).
+    // With /tmp paths (no __init__.py), the relative import resolves to just
+    // `"models"` as the module, producing `"from models import Database"`.
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+    // Use a path that simulates a relative import scenario.
+    let conftest_path = PathBuf::from("/tmp/test_relative_import/conftest.py");
+
+    // NOTE: The relative import `.models` won't resolve to a real file in /tmp,
+    // but `resolve_relative_module_to_string` still computes the path mathematically
+    // and `file_path_to_module_path` returns "models" (no __init__.py found).
+    let conftest_content = r#"
+import pytest
+from .models import Database
+
+@pytest.fixture
+def db_fixture() -> Database:
+    return Database()
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("db_fixture").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(def.return_type.as_deref(), Some("Database"));
+    assert_eq!(def.return_type_imports.len(), 1);
+    let spec = &def.return_type_imports[0];
+    assert_eq!(spec.check_name, "Database");
+    // With no __init__.py, the resolved module is "models".
+    assert_eq!(spec.import_statement, "from models import Database");
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_multiple_fixtures_different_types() {
+    // Multiple fixtures in one conftest with different return types all get
+    // independent, correct TypeImportSpec values.
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_multi_types/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from pathlib import Path
+import os
+
+@pytest.fixture
+def work_dir() -> Path:
+    return Path("/work")
+
+@pytest.fixture
+def env_path() -> os.PathLike:
+    return Path("/env")
+
+@pytest.fixture
+def count() -> int:
+    return 0
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    // `work_dir` → Path, from-import style.
+    let work_dir_def = &db.definitions.get("work_dir").unwrap()[0];
+    assert_eq!(
+        work_dir_def.return_type_imports,
+        vec![TypeImportSpec {
+            check_name: "Path".to_string(),
+            import_statement: "from pathlib import Path".to_string(),
+        }]
+    );
+
+    // `env_path` → os.PathLike, top-level name is "os", direct-import style.
+    let env_path_def = &db.definitions.get("env_path").unwrap()[0];
+    assert_eq!(
+        env_path_def.return_type_imports,
+        vec![TypeImportSpec {
+            check_name: "os".to_string(),
+            import_statement: "import os".to_string(),
+        }]
+    );
+
+    // `count` → int, builtin, no imports.
+    let count_def = &db.definitions.get("count").unwrap()[0];
+    assert!(count_def.return_type_imports.is_empty());
+}
+
+// ── Edge-case tests for type identifier extraction (item 4) ─────────────
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_literal_string_values_ignored() {
+    // `Literal["x", "y"]` — `Literal` needs a typing import, but the string
+    // contents `x` and `y` are tokenised as identifiers and must be harmlessly
+    // skipped (they won't appear in the import map or module-level names).
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_type_literal/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from typing import Literal
+
+@pytest.fixture
+def mode() -> Literal["read", "write"]:
+    return "read"
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("mode").expect("fixture not found");
+    let def = &defs[0];
+
+    // The AST stringifies string constants via Debug as `Str("...")`.
+    assert_eq!(
+        def.return_type.as_deref(),
+        Some(r#"Literal[Str("read"), Str("write")]"#)
+    );
+    // Only `Literal` should produce an import — `Str`, `read` and `write` are
+    // not in the import map or module-level names so they are silently skipped.
+    assert_eq!(
+        def.return_type_imports,
+        vec![TypeImportSpec {
+            check_name: "Literal".to_string(),
+            import_statement: "from typing import Literal".to_string(),
+        }]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_annotated_with_string_metadata() {
+    // `Annotated[User, "metadata"]` — `Annotated` and `User` need imports,
+    // the string content `metadata` should be harmlessly ignored.
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_type_annotated/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from typing import Annotated
+from myapp.models import User
+
+@pytest.fixture
+def admin_user() -> Annotated[User, "metadata"]:
+    return User(admin=True)
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("admin_user").expect("fixture not found");
+    let def = &defs[0];
+
+    // The AST stringifies string constants via Debug as `Str("...")`.
+    assert_eq!(
+        def.return_type.as_deref(),
+        Some(r#"Annotated[User, Str("metadata")]"#)
+    );
+    // `Str` and `metadata` are bare identifiers from the constant — they should
+    // not appear in the result because they're not in the import map or module-level names.
+    assert_eq!(
+        def.return_type_imports,
+        vec![
+            TypeImportSpec {
+                check_name: "Annotated".to_string(),
+                import_statement: "from typing import Annotated".to_string(),
+            },
+            TypeImportSpec {
+                check_name: "User".to_string(),
+                import_statement: "from myapp.models import User".to_string(),
+            },
+        ]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_callable_nested_brackets() {
+    // `Callable[[int, str], bool]` — `Callable` needs an import from typing,
+    // `int`, `str`, `bool` are all builtins. The double-bracket `[[` should
+    // not trip up the tokeniser.
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_type_callable/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from typing import Callable
+
+@pytest.fixture
+def handler() -> Callable[[int, str], bool]:
+    return lambda x, y: True
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("handler").expect("fixture not found");
+    let def = &defs[0];
+
+    // The AST represents the inner `[int, str]` as a List node, which
+    // `expr_to_string` maps to `"Any"` (unknown node type fallback).
+    assert_eq!(def.return_type.as_deref(), Some("Callable[Any, bool]"));
+    // `Callable` is in the import map; `Any` is NOT imported so it is skipped;
+    // `bool` is a builtin.
+    assert_eq!(
+        def.return_type_imports,
+        vec![TypeImportSpec {
+            check_name: "Callable".to_string(),
+            import_statement: "from typing import Callable".to_string(),
+        }]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_callable_with_custom_types() {
+    // `Callable[[Request], Response]` — the inner `[Request]` is a List node
+    // which `expr_to_string` maps to `"Any"`, so `Request` is lost in the
+    // return type string.  Only `Callable` and `Response` survive.
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_type_callable_custom/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from typing import Callable
+from myapp.http import Request, Response
+
+@pytest.fixture
+def endpoint() -> Callable[[Request], Response]:
+    return lambda req: Response()
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("endpoint").expect("fixture not found");
+    let def = &defs[0];
+
+    // The inner list `[Request]` becomes `Any`, so the return type is
+    // `Callable[Any, Response]`.  `Request` is not present in the string.
+    assert_eq!(def.return_type.as_deref(), Some("Callable[Any, Response]"));
+    assert_eq!(
+        def.return_type_imports,
+        vec![
+            TypeImportSpec {
+                check_name: "Callable".to_string(),
+                import_statement: "from typing import Callable".to_string(),
+            },
+            TypeImportSpec {
+                check_name: "Response".to_string(),
+                import_statement: "from myapp.http import Response".to_string(),
+            },
+        ]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_dotted_collections_abc() {
+    // `collections.abc.Iterable[str]` with `import collections.abc` — the
+    // import map stores the key as `"collections.abc"` (the full dotted name),
+    // but the tokeniser splits the return type string into individual
+    // identifiers `collections`, `abc`, `Iterable`, `str`.  None of those
+    // match the full dotted key, so no import spec is produced.
+    //
+    // This is a known limitation: `import X.Y` followed by `X.Y.Z` in an
+    // annotation is not resolved.  Use `from collections.abc import Iterable`
+    // instead for proper resolution.
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_type_dotted_abc/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+import collections.abc
+
+@pytest.fixture
+def items() -> collections.abc.Iterable[str]:
+    return ["a", "b"]
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("items").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(
+        def.return_type.as_deref(),
+        Some("collections.abc.Iterable[str]")
+    );
+    // No import specs produced — the dotted import key doesn't match any
+    // individual identifier token.  This documents the current limitation.
+    assert!(
+        def.return_type_imports.is_empty(),
+        "Expected no imports for dotted bare import (known limitation), got: {:?}",
+        def.return_type_imports
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_from_collections_abc_iterable() {
+    // `Iterable[str]` with `from collections.abc import Iterable` — the
+    // from-import puts `Iterable` directly in the import map.
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_type_from_abc/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from collections.abc import Iterable
+
+@pytest.fixture
+def items() -> Iterable[str]:
+    return ["a", "b"]
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("items").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(def.return_type.as_deref(), Some("Iterable[str]"));
+    assert_eq!(
+        def.return_type_imports,
+        vec![TypeImportSpec {
+            check_name: "Iterable".to_string(),
+            import_statement: "from collections.abc import Iterable".to_string(),
+        }]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_forward_ref_quoted() {
+    // `list["User"]` — forward reference with quotes.  The AST stringifies
+    // the string constant as `Str("User")`, so the return type string is
+    // `list[Str("User")]`.  The tokeniser extracts `list`, `Str`, `User`.
+    // `list` is builtin, `Str` is not in the import map, and `User` IS a
+    // module-level class definition so it falls back to module-path import.
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_type_forward_ref/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+
+class User:
+    pass
+
+@pytest.fixture
+def users() -> list["User"]:
+    return [User()]
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("users").expect("fixture not found");
+    let def = &defs[0];
+
+    // The AST Debug-formats string constants as `Str("...")`.
+    assert_eq!(def.return_type.as_deref(), Some(r#"list[Str("User")]"#));
+    // `User` is locally defined → import generated from module path.
+    assert_eq!(def.return_type_imports.len(), 1);
+    assert_eq!(def.return_type_imports[0].check_name, "User");
+    assert_eq!(
+        def.return_type_imports[0].import_statement,
+        "from conftest import User"
+    );
+}
+
+// ── Typing symbol tests (item 5) ───────────────────────────────────────
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_typing_any_needs_import() {
+    // `Any` is a typing symbol, NOT a builtin — it must produce an import.
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_type_any/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from typing import Any
+
+@pytest.fixture
+def anything() -> Any:
+    return 42
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("anything").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(def.return_type.as_deref(), Some("Any"));
+    assert_eq!(
+        def.return_type_imports,
+        vec![TypeImportSpec {
+            check_name: "Any".to_string(),
+            import_statement: "from typing import Any".to_string(),
+        }]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_typing_optional_needs_import() {
+    // `Optional[str]` — `Optional` is a typing symbol (not builtin), `str` is builtin.
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_type_optional/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from typing import Optional
+
+@pytest.fixture
+def maybe_name() -> Optional[str]:
+    return None
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("maybe_name").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(def.return_type.as_deref(), Some("Optional[str]"));
+    assert_eq!(
+        def.return_type_imports,
+        vec![TypeImportSpec {
+            check_name: "Optional".to_string(),
+            import_statement: "from typing import Optional".to_string(),
+        }]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_typing_union_needs_import() {
+    // `Union[str, int]` — `Union` is a typing symbol, `str` and `int` are builtins.
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_type_union_sym/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from typing import Union
+
+@pytest.fixture
+def flexible() -> Union[str, int]:
+    return "hello"
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("flexible").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(def.return_type.as_deref(), Some("Union[str, int]"));
+    assert_eq!(
+        def.return_type_imports,
+        vec![TypeImportSpec {
+            check_name: "Union".to_string(),
+            import_statement: "from typing import Union".to_string(),
+        }]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_typing_literal_needs_import() {
+    // `Literal[1, 2, 3]` — `Literal` from typing needs an import.
+    // The AST Debug-formats integer constants as `Int(N)`.
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_type_literal_int/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from typing import Literal
+
+@pytest.fixture
+def priority() -> Literal[1, 2, 3]:
+    return 1
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("priority").expect("fixture not found");
+    let def = &defs[0];
+
+    // Integer constants are Debug-formatted as `Int(N)`.
+    assert_eq!(
+        def.return_type.as_deref(),
+        Some("Literal[Int(1), Int(2), Int(3)]")
+    );
+    // `Int` is not in the import map or builtins, so only `Literal` produces
+    // an import spec.
+    assert_eq!(
+        def.return_type_imports,
+        vec![TypeImportSpec {
+            check_name: "Literal".to_string(),
+            import_statement: "from typing import Literal".to_string(),
+        }]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_typing_annotated_needs_import() {
+    // `Annotated[int, "positive"]` — `Annotated` from typing needs an import,
+    // `int` is builtin, the string constant is Debug-formatted as `Str("positive")`.
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_type_annotated_int/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from typing import Annotated
+
+@pytest.fixture
+def positive_int() -> Annotated[int, "positive"]:
+    return 42
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db
+        .definitions
+        .get("positive_int")
+        .expect("fixture not found");
+    let def = &defs[0];
+
+    // String constants are Debug-formatted as `Str("...")`.
+    assert_eq!(
+        def.return_type.as_deref(),
+        Some(r#"Annotated[int, Str("positive")]"#)
+    );
+    // Only `Annotated` should produce an import; `int` is builtin, `Str` and
+    // `positive` are not in the import map or module-level names.
+    assert_eq!(
+        def.return_type_imports,
+        vec![TypeImportSpec {
+            check_name: "Annotated".to_string(),
+            import_statement: "from typing import Annotated".to_string(),
+        }]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_all_builtins_skipped() {
+    // Verify a broad set of builtin type names produce no import specs.
+    // This covers the BUILTINS static set in analyzer.rs.
+    use pytest_language_server::FixtureDatabase;
+
+    let builtin_types = [
+        ("f_int", "int"),
+        ("f_str", "str"),
+        ("f_bool", "bool"),
+        ("f_float", "float"),
+        ("f_bytes", "bytes"),
+        ("f_bytearray", "bytearray"),
+        ("f_complex", "complex"),
+        ("f_list", "list"),
+        ("f_dict", "dict"),
+        ("f_tuple", "tuple"),
+        ("f_set", "set"),
+        ("f_frozenset", "frozenset"),
+        ("f_type", "type"),
+        ("f_object", "object"),
+        ("f_none", "None"),
+        ("f_range", "range"),
+        ("f_slice", "slice"),
+        ("f_memoryview", "memoryview"),
+    ];
+
+    // Build a conftest with one fixture per builtin type
+    let mut conftest_content = String::from("import pytest\n\n");
+    for (name, ret_type) in &builtin_types {
+        conftest_content.push_str(&format!(
+            "@pytest.fixture\ndef {}() -> {}:\n    pass\n\n",
+            name, ret_type
+        ));
+    }
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_all_builtins/conftest.py");
+    db.analyze_file(conftest_path.clone(), &conftest_content);
+
+    for (name, ret_type) in &builtin_types {
+        let defs = db
+            .definitions
+            .get(*name)
+            .unwrap_or_else(|| panic!("fixture '{}' not found", name));
+        let def = &defs[0];
+        assert_eq!(def.return_type.as_deref(), Some(*ret_type));
+        assert!(
+            def.return_type_imports.is_empty(),
+            "Builtin type '{}' should not produce any import specs, but got: {:?}",
+            ret_type,
+            def.return_type_imports
+        );
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_exception_builtins_skipped() {
+    // Exception types listed in the BUILTINS set should be skipped.
+    use pytest_language_server::FixtureDatabase;
+
+    let exception_types = [
+        ("f_exc", "Exception"),
+        ("f_base", "BaseException"),
+        ("f_val", "ValueError"),
+        ("f_type", "TypeError"),
+        ("f_runtime", "RuntimeError"),
+        ("f_attr", "AttributeError"),
+        ("f_key", "KeyError"),
+        ("f_idx", "IndexError"),
+    ];
+
+    let mut conftest_content = String::from("import pytest\n\n");
+    for (name, ret_type) in &exception_types {
+        conftest_content.push_str(&format!(
+            "@pytest.fixture\ndef {}() -> {}:\n    raise {}()\n\n",
+            name, ret_type, ret_type
+        ));
+    }
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_exception_builtins/conftest.py");
+    db.analyze_file(conftest_path.clone(), &conftest_content);
+
+    for (name, ret_type) in &exception_types {
+        let defs = db
+            .definitions
+            .get(*name)
+            .unwrap_or_else(|| panic!("fixture '{}' not found", name));
+        let def = &defs[0];
+        assert!(
+            def.return_type_imports.is_empty(),
+            "Exception builtin '{}' should not produce any import specs, but got: {:?}",
+            ret_type,
+            def.return_type_imports
+        );
+    }
+}
+
+// ── Relative import tests (item 8) ─────────────────────────────────────
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_relative_import_level_1() {
+    // `from .models import Database` (level=1) — resolved relative to the
+    // fixture file's directory.  Without __init__.py, the resolved module
+    // path is just "models".
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_rel_l1/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from .models import Database
+
+@pytest.fixture
+def db() -> Database:
+    return Database()
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("db").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(def.return_type.as_deref(), Some("Database"));
+    assert_eq!(def.return_type_imports.len(), 1);
+    assert_eq!(def.return_type_imports[0].check_name, "Database");
+    // level=1 from /tmp/test_rel_l1/conftest.py → base is /tmp/test_rel_l1/
+    // target file is /tmp/test_rel_l1/models.py → module path "models"
+    assert_eq!(
+        def.return_type_imports[0].import_statement,
+        "from models import Database"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_relative_import_level_2() {
+    // `from ..shared import Config` (level=2) — navigates up two directories
+    // from the fixture file's parent.
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+    // Fixture lives in /tmp/test_rel_l2/sub/conftest.py
+    let conftest_path = PathBuf::from("/tmp/test_rel_l2/sub/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from ..shared import Config
+
+@pytest.fixture
+def config() -> Config:
+    return Config()
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("config").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(def.return_type.as_deref(), Some("Config"));
+    assert_eq!(def.return_type_imports.len(), 1);
+    assert_eq!(def.return_type_imports[0].check_name, "Config");
+    // level=2 from /tmp/test_rel_l2/sub/conftest.py:
+    //   base starts at parent (/tmp/test_rel_l2/sub/), then goes up 1 more → /tmp/test_rel_l2/
+    //   target file is /tmp/test_rel_l2/shared.py → module path "shared"
+    assert_eq!(
+        def.return_type_imports[0].import_statement,
+        "from shared import Config"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_relative_import_bare_dot() {
+    // `from . import helpers` (level=1, empty module name) — target is
+    // __init__.py in the fixture file's directory.
+    use std::fs;
+
+    // Create a temp directory with __init__.py so file_path_to_module_path resolves the package.
+    let dir = std::env::temp_dir().join("test_rel_bare_dot");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("__init__.py"), "").unwrap();
+
+    let conftest_path = dir.join("conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from . import helpers
+
+@pytest.fixture
+def helper() -> helpers.Helper:
+    return helpers.Helper()
+"#;
+    db_analyze_and_check_bare_dot(&conftest_path, conftest_content, &dir);
+
+    // Clean up
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Helper for test_return_type_imports_relative_import_bare_dot — separated
+/// to ensure tempdir cleanup runs even on assertion failure.
+fn db_analyze_and_check_bare_dot(
+    conftest_path: &std::path::Path,
+    content: &str,
+    dir: &std::path::Path,
+) {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+    db.analyze_file(conftest_path.to_path_buf(), content);
+
+    let defs = db.definitions.get("helper").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(def.return_type.as_deref(), Some("helpers.Helper"));
+    // `from . import helpers` makes the check_name "helpers".
+    // The import map resolves `from . import helpers` to the package's __init__
+    // path.  `helpers` should appear in the import map.
+    // `Helper` alone won't be in the import map (it's `helpers.Helper`).
+    let helpers_specs: Vec<_> = def
+        .return_type_imports
+        .iter()
+        .filter(|s| s.check_name == "helpers")
+        .collect();
+    assert!(
+        !helpers_specs.is_empty(),
+        "Expected an import spec for 'helpers', got: {:?}",
+        def.return_type_imports
+    );
+    // The dir name is the package name since __init__.py exists.
+    let dir_name = dir.file_name().unwrap().to_str().unwrap();
+    let expected_import = format!("from {} import helpers", dir_name);
+    assert_eq!(helpers_specs[0].import_statement, expected_import);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_relative_import_level_1_with_package() {
+    // Verify that relative imports inside a real package (with __init__.py)
+    // produce fully qualified absolute import statements.
+    use pytest_language_server::FixtureDatabase;
+    use std::fs;
+
+    let dir = std::env::temp_dir().join("test_rel_pkg_l1");
+    let _ = fs::remove_dir_all(&dir);
+    let pkg = dir.join("mypkg");
+    fs::create_dir_all(&pkg).unwrap();
+    fs::write(pkg.join("__init__.py"), "").unwrap();
+
+    let conftest_path = pkg.join("conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from .models import User
+
+@pytest.fixture
+def user() -> User:
+    return User()
+"#;
+
+    let db = FixtureDatabase::new();
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("user").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(def.return_type.as_deref(), Some("User"));
+    assert_eq!(def.return_type_imports.len(), 1);
+    assert_eq!(def.return_type_imports[0].check_name, "User");
+    // level=1 from mypkg/conftest.py: base is mypkg/, target is mypkg/models.py
+    // With __init__.py in mypkg/, module path is "mypkg.models"
+    assert_eq!(
+        def.return_type_imports[0].import_statement,
+        "from mypkg.models import User"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_relative_import_above_root_resolved_mathematically() {
+    // `from ...too_high import Widget` (level=3) from `/tmp/shallow/conftest.py`.
+    // The resolution is purely mathematical (no filesystem check on the target):
+    //   parent = /tmp/shallow/ → up 2 more → / → target = /too_high.py
+    //   file_path_to_module_path("/too_high.py") = Some("too_high")
+    // So the import resolves to `from too_high import Widget`.
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/shallow/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+from ...too_high import Widget
+
+@pytest.fixture
+def widget() -> Widget:
+    return Widget()
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("widget").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(def.return_type.as_deref(), Some("Widget"));
+    // The relative import is resolved mathematically even though /too_high.py
+    // doesn't exist on disk.  The resolved module path is "too_high".
+    assert_eq!(
+        def.return_type_imports,
+        vec![TypeImportSpec {
+            check_name: "Widget".to_string(),
+            import_statement: "from too_high import Widget".to_string(),
+        }]
+    );
 }

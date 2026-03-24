@@ -5,6 +5,7 @@ mod providers;
 use clap::{Parser, Subcommand};
 use fixtures::FixtureDatabase;
 use providers::Backend;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use tower_lsp_server::jsonrpc::Result;
@@ -117,7 +118,11 @@ impl LanguageServer for Backend {
                 )),
                 code_action_provider: Some(CodeActionProviderCapability::Options(
                     CodeActionOptions {
-                        code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
+                        code_action_kinds: Some(vec![
+                            CodeActionKind::QUICKFIX,
+                            CodeActionKind::new("source.pytest-lsp"),
+                            CodeActionKind::new("source.fixAll.pytest-lsp"),
+                        ]),
                         work_done_progress_options: WorkDoneProgressOptions {
                             work_done_progress: None,
                         },
@@ -155,6 +160,33 @@ impl LanguageServer for Backend {
         self.client
             .log_message(MessageType::INFO, "pytest-language-server initialized")
             .await;
+
+        // Register a file watcher for __init__.py create/delete events.
+        // When package markers change, `file_path_to_module_path()` results
+        // (captured in `FixtureDefinition::return_type_imports`) become stale,
+        // so we re-analyze affected fixture files to refresh them.
+        let watch_init_py = Registration {
+            id: "watch-init-py".to_string(),
+            method: "workspace/didChangeWatchedFiles".to_string(),
+            register_options: Some(
+                serde_json::to_value(DidChangeWatchedFilesRegistrationOptions {
+                    watchers: vec![FileSystemWatcher {
+                        glob_pattern: GlobPattern::String("**/__init__.py".to_string()),
+                        kind: Some(WatchKind::Create | WatchKind::Delete),
+                    }],
+                })
+                .unwrap(),
+            ),
+        };
+
+        if let Err(e) = self.client.register_capability(vec![watch_init_py]).await {
+            // Not fatal — file watching is best-effort.  The user can still
+            // manually re-open fixture files to trigger re-analysis.
+            info!(
+                "Failed to register __init__.py file watcher (client may not support it): {}",
+                e
+            );
+        }
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
@@ -195,6 +227,70 @@ impl LanguageServer for Backend {
                         e
                     );
                 }
+            }
+        }
+    }
+
+    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        // Re-analyze fixture files whose `return_type_imports` may have become
+        // stale because an `__init__.py` was created or deleted, changing the
+        // result of `file_path_to_module_path()`.
+        for event in &params.changes {
+            if event.typ != FileChangeType::CREATED && event.typ != FileChangeType::DELETED {
+                continue;
+            }
+
+            let Some(init_path) = event.uri.to_file_path() else {
+                continue;
+            };
+
+            // The __init__.py change affects the directory it lives in and
+            // every directory below it.  Any fixture file at or under that
+            // directory may produce a different module path now.
+            let affected_dir = match init_path.parent() {
+                Some(dir) => dir.to_path_buf(),
+                None => continue,
+            };
+
+            let kind = if event.typ == FileChangeType::CREATED {
+                "created"
+            } else {
+                "deleted"
+            };
+            info!(
+                "__init__.py {} in {:?} — re-analyzing affected fixture files",
+                kind, affected_dir
+            );
+
+            // Collect fixture files that live at or below the affected directory.
+            let files_to_reanalyze: Vec<PathBuf> = self
+                .fixture_db
+                .file_definitions
+                .iter()
+                .filter(|entry| entry.key().starts_with(&affected_dir))
+                .map(|entry| entry.key().clone())
+                .collect();
+
+            for file_path in files_to_reanalyze {
+                if let Some(content) = self.fixture_db.get_file_content(&file_path) {
+                    info!("Re-analyzing {:?} after __init__.py change", file_path);
+                    self.fixture_db.analyze_file(file_path.clone(), &content);
+
+                    // Re-publish diagnostics for the file if we have a cached URI.
+                    if let Some(uri) = self.uri_cache.get(&file_path) {
+                        self.publish_diagnostics_for_file(&uri, &file_path).await;
+                    }
+                }
+            }
+        }
+
+        // Refresh inlay hints in case return types changed.
+        if !params.changes.is_empty() {
+            if let Err(e) = self.client.inlay_hint_refresh().await {
+                info!(
+                    "Inlay hint refresh after __init__.py change failed (client may not support it): {}",
+                    e
+                );
             }
         }
     }

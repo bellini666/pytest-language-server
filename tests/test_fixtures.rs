@@ -13088,6 +13088,7 @@ fn test_completion_third_party_fixture_has_flag() {
             end_char: 14,
             docstring: Some("A third-party fixture".to_string()),
             return_type: None,
+            return_type_imports: vec![],
             is_third_party: true,
             is_plugin: false,
             dependencies: vec![],

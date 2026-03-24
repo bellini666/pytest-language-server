@@ -410,6 +410,7 @@ mod tests {
             end_char: 10,
             docstring: None,
             return_type: None,
+            return_type_imports: vec![],
             is_third_party: false,
             is_plugin: false,
             dependencies: vec![],

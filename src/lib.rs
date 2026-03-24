@@ -57,7 +57,7 @@ pub mod fixtures;
 pub use config::Config;
 pub use fixtures::{
     CompletionContext, FixtureCycle, FixtureDatabase, FixtureDefinition, FixtureScope,
-    FixtureUsage, ParamInsertionInfo, ScopeMismatch, UndeclaredFixture,
+    FixtureUsage, ParamInsertionInfo, ScopeMismatch, TypeImportSpec, UndeclaredFixture,
 };
 
 // Expose decorators module for testing

@@ -5,11 +5,12 @@
 //! and undeclared fixture scanning is in `undeclared.rs`.
 
 use super::decorators;
-use super::types::{FixtureDefinition, FixtureUsage};
+use super::types::{FixtureDefinition, FixtureUsage, TypeImportSpec};
 use super::FixtureDatabase;
+use once_cell::sync::Lazy;
 use rustpython_parser::ast::{ArgWithDefault, Arguments, Expr, Stmt};
 use rustpython_parser::{parse, Mode};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
 
@@ -91,11 +92,29 @@ impl FixtureDatabase {
             for stmt in &module.body {
                 self.collect_module_level_names(stmt, &mut module_level_names);
             }
-            self.imports.insert(file_path.clone(), module_level_names);
+            // Insert into DashMap *before* the second pass: undeclared-fixture
+            // scanning (`scan_function_body_for_undeclared_fixtures`) reads
+            // `self.imports` during `visit_stmt`, so the data must be available.
+            // The clone is unavoidable because `resolve_return_type_imports`
+            // also needs a local reference to the set.
+            self.imports
+                .insert(file_path.clone(), module_level_names.clone());
+
+            // Build a name→TypeImportSpec map from every import statement in the file.
+            // Used during fixture analysis to resolve return-type annotation imports.
+            let import_map = self.build_name_to_import_map(&module.body, &file_path);
 
             // Second pass: analyze fixtures and tests
             for stmt in &module.body {
-                self.visit_stmt(stmt, &file_path, is_conftest, content, &line_index);
+                self.visit_stmt(
+                    stmt,
+                    &file_path,
+                    is_conftest,
+                    content,
+                    &line_index,
+                    &import_map,
+                    &module_level_names,
+                );
             }
         }
 
@@ -274,6 +293,7 @@ impl FixtureDatabase {
     }
 
     /// Visit a statement and extract fixture definitions and usages
+    #[allow(clippy::too_many_arguments)]
     fn visit_stmt(
         &self,
         stmt: &Stmt,
@@ -281,6 +301,8 @@ impl FixtureDatabase {
         _is_conftest: bool,
         content: &str,
         line_index: &[usize],
+        import_map: &HashMap<String, TypeImportSpec>,
+        module_level_names: &HashSet<String>,
     ) {
         // First check for assignment-style fixtures: fixture_name = pytest.fixture()(func)
         if let Stmt::Assign(assign) = stmt {
@@ -340,7 +362,15 @@ impl FixtureDatabase {
             }
 
             for class_stmt in &class_def.body {
-                self.visit_stmt(class_stmt, file_path, _is_conftest, content, line_index);
+                self.visit_stmt(
+                    class_stmt,
+                    file_path,
+                    _is_conftest,
+                    content,
+                    line_index,
+                    import_map,
+                    module_level_names,
+                );
             }
             return;
         }
@@ -442,6 +472,12 @@ impl FixtureDatabase {
             let line = self.get_line_from_offset(range.start().to_usize(), line_index);
             let docstring = self.extract_docstring(body);
             let return_type = self.extract_return_type(returns, body, content);
+            let return_type_imports = match &return_type {
+                Some(rt) => {
+                    self.resolve_return_type_imports(rt, import_map, module_level_names, file_path)
+                }
+                None => vec![],
+            };
 
             info!(
                 "Found fixture definition: {} (function: {}, scope: {:?}) at {:?}:{}",
@@ -482,6 +518,7 @@ impl FixtureDatabase {
                 end_char,
                 docstring,
                 return_type,
+                return_type_imports,
                 is_third_party,
                 is_plugin,
                 dependencies: dependencies.clone(),
@@ -628,6 +665,7 @@ impl FixtureDatabase {
                                 end_char,
                                 docstring: None,
                                 return_type: None,
+                                return_type_imports: vec![],
                                 is_third_party,
                                 is_plugin,
                                 dependencies: Vec::new(), // Assignment-style fixtures don't have explicit dependencies
@@ -685,8 +723,155 @@ impl FixtureDatabase {
     }
 }
 
+/// Python builtin types that never require an import statement.
+/// Uses O(1) `HashSet` lookup, consistent with `is_standard_library_module()`.
+static BUILTINS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
+    [
+        "int",
+        "str",
+        "bool",
+        "float",
+        "bytes",
+        "bytearray",
+        "complex",
+        "list",
+        "dict",
+        "tuple",
+        "set",
+        "frozenset",
+        "type",
+        "object",
+        "None",
+        "range",
+        "slice",
+        "memoryview",
+        "property",
+        "classmethod",
+        "staticmethod",
+        "super",
+        "Exception",
+        "BaseException",
+        "ValueError",
+        "TypeError",
+        "RuntimeError",
+        "NotImplementedError",
+        "AttributeError",
+        "KeyError",
+        "IndexError",
+        "StopIteration",
+        "GeneratorExit",
+    ]
+    .into_iter()
+    .collect()
+});
+
 // Second impl block for additional analyzer methods
 impl FixtureDatabase {
+    // ============ Return-type import resolution ============
+
+    /// Extract all distinct identifier tokens from a type annotation string.
+    ///
+    /// Walks the string collecting runs of `[a-zA-Z_][a-zA-Z0-9_]*` characters.
+    /// Dotted names like `pathlib.Path` produce two separate tokens (`pathlib`,
+    /// `Path`) — each is looked up independently in the import map, which is
+    /// correct because:
+    /// - `import pathlib` → `import_map["pathlib"]` matches `pathlib`
+    /// - `from pathlib import Path` → `import_map["Path"]` matches `Path`
+    ///
+    /// # Examples
+    /// - `"dict[str, Any]"` → `["dict", "str", "Any"]`
+    /// - `"Optional[Path]"` → `["Optional", "Path"]`
+    /// - `"pathlib.Path"` → `["pathlib", "Path"]`
+    /// - `"Path | None"` → `["Path", "None"]`
+    /// - `"list[dict[str, Any]]"` → `["list", "dict", "str", "Any"]`
+    fn extract_type_identifiers(type_str: &str) -> Vec<&str> {
+        let mut identifiers = Vec::new();
+        let mut seen = HashSet::new();
+        let bytes = type_str.as_bytes();
+        let len = bytes.len();
+        let mut i = 0;
+
+        while i < len {
+            let b = bytes[i];
+            // Start of an identifier: [a-zA-Z_]
+            if b.is_ascii_alphabetic() || b == b'_' {
+                let start = i;
+                i += 1;
+                while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                let ident = &type_str[start..i];
+                if seen.insert(ident) {
+                    identifiers.push(ident);
+                }
+            } else {
+                i += 1;
+            }
+        }
+
+        identifiers
+    }
+
+    /// Resolve the import spec(s) needed to use a fixture's return type
+    /// annotation in a consumer file (e.g. a test file).
+    ///
+    /// Handles simple types (`Path`), dotted names (`pathlib.Path`), generics
+    /// (`Optional[Path]`, `dict[str, Any]`), unions (`Path | None`), and any
+    /// nesting thereof.  Every identifier token in the type string is resolved
+    /// independently.
+    ///
+    /// Resolution order **per identifier**:
+    /// 1. Builtin types (`int`, `str`, …) — skip, no import needed.
+    /// 2. Look up in `import_map` (built from the fixture file's imports).
+    /// 3. If the name is locally defined in the fixture file (class,
+    ///    assignment, …) but not imported, build an import from
+    ///    `fixture_file`'s module path.
+    /// 4. Otherwise skip.
+    ///
+    /// Results are deduplicated by `check_name`.
+    fn resolve_return_type_imports(
+        &self,
+        return_type: &str,
+        import_map: &HashMap<String, TypeImportSpec>,
+        module_level_names: &HashSet<String>,
+        fixture_file: &Path,
+    ) -> Vec<TypeImportSpec> {
+        let identifiers = Self::extract_type_identifiers(return_type);
+        let mut specs: Vec<TypeImportSpec> = Vec::new();
+        let mut seen: HashSet<&str> = HashSet::new();
+
+        for ident in identifiers {
+            // Skip builtins — they never need an import.
+            if BUILTINS.contains(ident) {
+                continue;
+            }
+
+            // Avoid duplicates (e.g. `tuple[Path, Path]`).
+            if !seen.insert(ident) {
+                continue;
+            }
+
+            // Check the import map (covers `import X` and `from X import Y`).
+            if let Some(spec) = import_map.get(ident) {
+                specs.push(spec.clone());
+                continue;
+            }
+
+            // If the name is defined locally in the fixture file (e.g. a class
+            // in conftest.py), build an import from that file's module path.
+            if module_level_names.contains(ident) {
+                if let Some(module_path) = Self::file_path_to_module_path(fixture_file) {
+                    specs.push(TypeImportSpec {
+                        check_name: ident.to_string(),
+                        import_statement: format!("from {} import {}", module_path, ident),
+                    });
+                }
+            }
+        }
+
+        specs
+    }
+
     // ============ Module-level name collection ============
 
     /// Collect all module-level names (imports, assignments, function/class defs)

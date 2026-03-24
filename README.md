@@ -26,7 +26,7 @@ documentation, diagnostics, and more!
   - [Document Symbols](#-document-symbols)
   - [Workspace Symbols](#-workspace-symbols)
   - [Code Lens](#-code-lens)
-  - [Code Actions (Quick Fixes)](#-code-actions-quick-fixes)
+  - [Code Actions](#-code-actions)
   - [Diagnostics & Quick Fixes](#️-diagnostics--quick-fixes)
   - [Performance](#️-performance)
 - [Installation](#installation)
@@ -157,12 +157,43 @@ def test_example(database):  # Shows ": Database" after "database"
     pass
 ```
 
-### 💡 Code Actions (Quick Fixes)
-One-click fixes for common pytest issues:
-- **Add missing fixture parameters**: Automatically add undeclared fixtures to function signatures
-- **Smart insertion**: Handles both empty and existing parameter lists
-- **Editor integration**: Works with any LSP-compatible editor's quick fix menu
-- **LSP compliant**: Full support for `CodeActionKind::QUICKFIX`
+### 💡 Code Actions
+Intelligent code actions for pytest fixtures, covering quick fixes, type annotations, and bulk operations:
+
+**Quick Fix — Add Missing Fixture Parameter** (`quickfix`):
+- Triggered from `undeclared-fixture` diagnostics
+- Adds the fixture as a typed parameter (e.g., `db: Database` instead of just `db`) when the fixture has a return type annotation
+- Automatically inserts any `import` statements needed for the return type
+- Smart insertion handles both empty and existing parameter lists
+
+**Add Type Annotation** (`source.pytest-lsp`):
+- Cursor-based: place your cursor on an existing fixture parameter that lacks a type annotation
+- Inserts `: ReturnType` matching the inlay-hint text (e.g., `database` → `database: Database`)
+- Automatically adds any required import statements
+
+**Add All Fixture Type Annotations** (`source.fixAll.pytest-lsp`):
+- File-wide: annotates **every** unannotated fixture parameter in the file in a single action
+- Collects and deduplicates all required imports across all fixtures
+- Great for bringing an entire test file up to date in one click
+
+**isort/ruff-Aware Import Insertion** (best-effort):
+- Attempts to place new imports into the correct **isort group** (stdlib vs third-party) with proper blank-line separators
+- When the file already has `from X import Y` for the same module, attempts to **merge** the new name into the existing line (sorted alphabetically) instead of adding a duplicate
+- Handles `__future__` imports, comments between groups, and mixed import styles on a best-effort basis
+- **Note**: Placement follows common isort conventions but does not read your project's `pyproject.toml` or `.isort.cfg`. Run `ruff check --fix` or `isort` after applying these actions to bring imports into full conformance with your project's configuration
+
+Example — adding a type annotation:
+```python
+# Before (cursor on "database"):
+def test_example(database):
+    pass
+
+# After triggering "Add type annotation for fixture 'database'":
+from myapp.db import Database  # ← import added automatically
+
+def test_example(database: Database):
+    pass
+```
 
 ### ⚠️ Diagnostics & Quick Fixes
 Detect and fix common pytest fixture issues with intelligent code actions:
@@ -198,15 +229,16 @@ def temp_dir(tmp_path):
 - Excludes built-in names (`self`, `request`) and actual local variables
 
 **One-Click Quick Fixes:**
-- **Code actions** to automatically add missing fixture parameters
+- **Code actions** to automatically add missing fixture parameters with type annotations
 - Intelligent parameter insertion (handles both empty and existing parameter lists)
 - Works with both single-line and multi-line function signatures
+- Automatically adds required `import` statements for return types
 - Triggered directly from diagnostic warnings
 
 Example:
 ```python
 @pytest.fixture
-def user_db():
+def user_db() -> Database:
     return Database()
 
 def test_user(user_db):  # ✅ user_db properly declared
@@ -214,15 +246,14 @@ def test_user(user_db):  # ✅ user_db properly declared
     assert user.name == "Alice"
 
 def test_broken():  # ⚠️ Warning: 'user_db' used but not declared
-    user = user_db.get_user(1)  # 💡 Quick fix: Add 'user_db' fixture parameter
+    user = user_db.get_user(1)  # 💡 Quick fix: Add 'user_db: Database' parameter + import
     assert user.name == "Alice"
 ```
 
-**How to use quick fixes:**
-1. Place cursor on the warning squiggle
-2. Trigger code actions menu (usually Cmd+. or Ctrl+. in most editors)
-3. Select "Add 'fixture_name' fixture parameter"
-4. The parameter is automatically added to your function signature
+**How to use code actions:**
+1. **Quick fix** (undeclared fixture): Place cursor on the warning squiggle → trigger code actions (Cmd+. / Ctrl+.) → select "pytest-lsp: Add 'fixture_name' fixture parameter (Type)"
+2. **Add type annotation** (single fixture): Place cursor on an unannotated fixture parameter → trigger code actions → select "pytest-lsp: Add type annotation for fixture 'name'"
+3. **Add all type annotations** (file-wide): Trigger code actions anywhere in the file → select "pytest-lsp: Add all fixture type annotations (N fixtures)"
 
 ### ⚡️ Performance
 Built with Rust for maximum performance:
@@ -437,14 +468,35 @@ The server automatically detects your Python virtual environment:
 2. Falls back to `$VIRTUAL_ENV` environment variable
 3. Scans third-party pytest plugins for fixtures
 
-### Code Actions / Quick Fixes
+### Code Actions
 
-Code actions are automatically available on diagnostic warnings. If code actions don't appear in your editor:
+Code actions are available in three forms:
+
+| Kind | Trigger | What it does |
+|------|---------|-------------|
+| `quickfix` | Diagnostic warning | Adds missing fixture parameter (with type + import) |
+| `source.pytest-lsp` | Cursor on unannotated param | Adds `: ReturnType` + import for one fixture |
+| `source.fixAll.pytest-lsp` | Anywhere in file | Adds all missing type annotations + imports |
+
+> **Import ordering is best-effort.** Generated imports attempt to follow common isort conventions (stdlib before third-party, alphabetical within groups, merging into existing `from X import` lines) but the server does not read your project's `pyproject.toml` or `.isort.cfg`. After applying code actions, run `ruff check --fix` or `isort` to bring imports into full conformance with your project's configuration.
+
+**Return-type resolution precedence** — when a fixture has a return type annotation (e.g. `-> Path`), the server resolves the import needed for that type using the following priority:
+
+1. **Builtin types** (`int`, `str`, `bool`, `dict`, `list`, `None`, …) — skipped, no import needed
+2. **Import map lookup** — if the fixture file imports the name (e.g. `from pathlib import Path`), the same import statement is reused (relative imports are resolved to absolute form)
+3. **Locally defined names** — if the name is defined in the fixture file itself (e.g. a class in `conftest.py`) but not imported from elsewhere, an import is generated from the file's module path (e.g. `from tests.conftest import MyClass`)
+4. **Unknown names** — skipped; no import is generated
+
+> **Note:** Module path resolution for locally defined names depends on `__init__.py` files on disk. The server automatically watches for `__init__.py` create/delete events and re-analyzes affected fixture files, so module paths stay up to date without manual intervention.
+
+If code actions don't appear in your editor:
 
 1. **Check LSP capabilities**: Ensure your editor supports code actions (most modern editors do)
-2. **Enable debug logging**: Use `RUST_LOG=info` to see if actions are being created
-3. **Verify diagnostics**: Code actions only appear where there are warnings
-4. **Trigger manually**: Use your editor's code action keybinding (Cmd+. / Ctrl+.)
+2. **Check code action kinds**: Some editors filter by kind — ensure `source.*` actions are enabled alongside `quickfix`
+3. **Enable debug logging**: Use `RUST_LOG=info` to see if actions are being created
+4. **Verify diagnostics**: Quick-fix actions only appear where there are `undeclared-fixture` warnings
+5. **Verify fixtures have return types**: Type annotation actions only appear for fixtures with explicit return type annotations
+6. **Trigger manually**: Use your editor's code action keybinding (Cmd+. / Ctrl+.)
 
 ## CLI Commands
 

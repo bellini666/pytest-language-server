@@ -23,19 +23,44 @@ src/
 ├── config/mod.rs       # Config from pyproject.toml [tool.pytest-language-server]
 ├── fixtures/           # Core analysis engine
 │   ├── mod.rs          # FixtureDatabase struct (DashMap-based concurrent storage)
-│   ├── types.rs        # FixtureDefinition, FixtureUsage, etc.
-│   ├── analyzer.rs     # Python AST parsing, fixture extraction
+│   ├── types.rs        # FixtureDefinition, FixtureUsage, TypeImportSpec, etc.
+│   ├── analyzer.rs     # Python AST parsing, fixture extraction, return-type import resolution
+│   ├── imports.rs      # Import handling, is_stdlib_module(), build_name_to_import_map(), file_path_to_module_path()
 │   ├── resolver.rs     # Fixture resolution with pytest priority rules
 │   ├── scanner.rs      # Workspace + venv scanning
 │   └── cli.rs          # CLI commands (fixtures list/unused)
 └── providers/          # LSP handlers (one file per feature)
     ├── mod.rs          # Backend struct, URI/path helpers
+    ├── code_action.rs  # Code actions: quickfix, source.pytest-lsp, source.fixAll.pytest-lsp + isort-aware import insertion
     ├── definition.rs, references.rs, hover.rs, completion.rs, ...
 ```
 
 **Key pattern**: `FixtureDatabase` in `src/fixtures/` handles all data; `Backend` in `src/providers/` delegates LSP requests to it.
 
 ## Critical Knowledge
+
+### Code Action Kinds
+The code action provider (`src/providers/code_action.rs`) emits three kinds:
+
+| Kind | Trigger | Behaviour |
+|------|---------|-----------|
+| `quickfix` | `undeclared-fixture` diagnostic | Adds missing fixture param with type annotation + import |
+| `source.pytest-lsp` | Cursor on unannotated fixture param | Adds `: ReturnType` + import for that fixture |
+| `source.fixAll.pytest-lsp` | Anywhere in file | Adds all missing type annotations + imports in one edit |
+
+**Import insertion** is isort/ruff-aware:
+- `parse_import_groups()` classifies existing import blocks as stdlib vs third-party
+- `emit_kind_import_edits()` inserts into the correct group with proper blank-line separators
+- `find_matching_from_import_line()` merges names into existing `from X import Y` lines
+- `build_import_edits()` orchestrates deduplication, skip-if-already-imported, and group routing
+
+### TypeImportSpec & Return-Type Import Resolution
+`TypeImportSpec` (in `types.rs`) captures `check_name` + `import_statement` for each type used in a fixture's return annotation. Resolved at analysis time:
+1. `build_name_to_import_map()` (in `imports.rs`) builds a name→spec map from all imports in the fixture file (including stdlib/typing)
+2. `resolve_return_type_imports()` (in `analyzer.rs`) tokenises the return type string, skips builtins, looks up each identifier in the import map, and falls back to locally-defined names via `file_path_to_module_path()`
+3. Results are stored in `FixtureDefinition::return_type_imports` for use by code actions
+
+`is_stdlib_module()` is exposed as a free function in `imports.rs` (re-exported from `mod.rs`) so both `FixtureDatabase` methods and the code-action provider can classify imports without coupling.
 
 ### Pytest Fixture Resolution Priority
 1. Same file (highest)
@@ -77,6 +102,14 @@ db.analyze_file(...);  // Safe
 5. Wire up in `main.rs` LanguageServer trait impl
 6. Add tests in `tests/test_lsp.rs`
 
+### Adding a New Code Action Kind
+1. Register the kind in `main.rs` `initialize()` → `code_action_kinds`
+2. Add a `const` for the kind in `src/providers/code_action.rs`
+3. Gate the new logic behind `kind_requested(&context.only, &YOUR_KIND)`
+4. Build `TextEdit`s for the action; use `build_import_edits()` if imports are needed
+5. Add unit tests in the `mod tests` block inside `code_action.rs`
+6. Add integration tests in `tests/test_lsp.rs`
+
 ### Version Bumping
 **Always use the script** (updates Cargo.toml, pyproject.toml, extensions):
 ```bash
@@ -116,7 +149,20 @@ Performance optimizations:
 ## Tests
 
 Run `cargo test`. Test files:
+
+**Integration tests** (`tests/`):
 - `tests/test_fixtures.rs` - FixtureDatabase unit tests
-- `tests/test_lsp.rs` - LSP protocol tests
+- `tests/test_lsp.rs` - LSP protocol tests (includes code action, hover, TypeImportSpec tests)
+- `tests/test_lsp_performance.rs` - LSP performance/stress tests
 - `tests/test_e2e.rs` - End-to-end CLI tests
+- `tests/test_config.rs` - Configuration loading tests
+- `tests/test_decorators.rs` - Decorator recognition tests
 - `tests/test_project/` - Sample pytest project for testing
+
+**Inline unit tests** (`#[cfg(test)] mod tests`):
+- `src/providers/code_action.rs` - Import grouping, merging, sorting, and edit generation
+- `src/providers/completion.rs` - Completion context detection
+- `src/fixtures/imports.rs` - `file_path_to_module_path`, import extraction
+- `src/fixtures/scanner.rs` - Workspace/venv scanning
+- `src/fixtures/string_utils.rs` - Parameter annotation parsing
+- `src/config/mod.rs` - Config parsing from pyproject.toml

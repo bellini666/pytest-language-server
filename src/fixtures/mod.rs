@@ -17,10 +17,22 @@ pub(crate) mod string_utils; // pub(crate) for inlay_hint provider access
 pub mod types;
 mod undeclared;
 
+// Re-export `is_stdlib_module` so that callers outside this module (e.g.
+// `src/providers/code_action.rs`) can use it via `crate::fixtures::is_stdlib_module`
+// without reaching into the private `imports` sub-module.  Within this module,
+// `is_standard_library_module()` also delegates to this free function.
+//
+// The library crate has no callers of this re-export (providers are compiled
+// only in the binary crate via `mod providers` in `main.rs`), so rustc warns
+// "unused import".  We suppress rather than making the function `pub`, which
+// would expose an internal helper in the crate's public API.
+#[allow(unused_imports)]
+pub(crate) use imports::is_stdlib_module;
+
 #[allow(unused_imports)] // ParamInsertionInfo re-exported for public API via lib.rs
 pub use types::{
     CompletionContext, FixtureCycle, FixtureDefinition, FixtureScope, FixtureUsage,
-    ParamInsertionInfo, ScopeMismatch, UndeclaredFixture,
+    ParamInsertionInfo, ScopeMismatch, TypeImportSpec, UndeclaredFixture,
 };
 
 use dashmap::DashMap;

@@ -219,8 +219,11 @@ pub(crate) fn replace_identifier(text: &str, old: &str, new: &str) -> String {
                 continue;
             }
         }
-        result.push(bytes[i] as char);
-        i += 1;
+        // Advance by the full UTF-8 character to avoid splitting multi-byte
+        // sequences (e.g. non-ASCII identifiers or string-literal content).
+        let ch_len = text[i..].chars().next().map_or(1, |c| c.len_utf8());
+        result.push_str(&text[i..i + ch_len]);
+        i += ch_len;
     }
 
     result

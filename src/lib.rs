@@ -53,7 +53,7 @@
 
 pub mod config;
 pub mod fixtures;
-pub mod providers;
+mod providers;
 
 pub use config::Config;
 pub use fixtures::{

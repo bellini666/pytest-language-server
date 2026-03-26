@@ -399,8 +399,11 @@ impl LanguageServer for Backend {
         info!("Shutdown complete");
 
         // tower-lsp doesn't always exit cleanly after the exit notification
-        // (serve() may block on stdin/stdout), so we spawn a task to force exit
-        // after a brief delay to allow the shutdown response to be sent
+        // (serve() may block on stdin/stdout), so in binary builds we spawn a
+        // task to force exit after a brief delay to allow the shutdown response
+        // to be sent. Gated behind the `lsp_force_exit` feature to avoid
+        // terminating embedding processes or test runners from library code.
+        #[cfg(feature = "lsp_force_exit")]
         tokio::spawn(async {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             info!("Forcing process exit");

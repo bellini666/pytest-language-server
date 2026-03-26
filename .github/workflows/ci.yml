@@ -42,7 +42,10 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Build
-        run: cargo build --release --verbose
+        run: cargo build --release --features lsp_force_exit --verbose
+
+      - name: Build binary for tests
+        run: cargo build --features lsp_force_exit
 
       - name: Run tests
         run: cargo test --verbose

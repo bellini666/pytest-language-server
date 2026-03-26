@@ -241,7 +241,7 @@ impl LanguageServer for Backend {
                 continue;
             }
 
-            let Some(init_path) = event.uri.to_file_path() else {
+            let Some(init_path) = self.uri_to_path(&event.uri) else {
                 continue;
             };
 

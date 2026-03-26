@@ -75,6 +75,13 @@ impl Backend {
         let mut hints = Vec::new();
 
         for usage in usages.iter() {
+            // Skip string-based usages from @pytest.mark.usefixtures(...),
+            // pytestmark assignments, and @pytest.mark.parametrize(..., indirect=...).
+            // These are not function parameters and cannot receive type annotations.
+            if !usage.is_parameter {
+                continue;
+            }
+
             // Only process usages within the requested range
             if usage.line < start_line || usage.line > end_line {
                 continue;

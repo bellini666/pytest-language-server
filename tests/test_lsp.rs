@@ -6376,3 +6376,623 @@ def work_dir() -> MyPath:
         "Attribute-style alias should be expanded"
     );
 }
+
+// =============================================================================
+// usefixtures / pytestmark — inlay hints and code actions must be suppressed
+// =============================================================================
+
+#[test]
+#[timeout(30000)]
+fn test_inlay_hints_not_shown_for_usefixtures_on_function() {
+    // Inlay hints must only be shown for actual function parameters.
+    // A fixture referenced as a string in @pytest.mark.usefixtures must not
+    // receive a type-annotation hint.
+    use pytest_language_server::FixtureDatabase;
+    use std::path::PathBuf;
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_ih_uf/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_ih_uf/test_example.py");
+
+    db.analyze_file(
+        conftest_path.clone(),
+        r#"
+import pytest
+
+@pytest.fixture
+def my_db() -> str:
+    return "db"
+"#,
+    );
+
+    db.analyze_file(
+        test_path.clone(),
+        r#"
+import pytest
+
+@pytest.mark.usefixtures("my_db")
+def test_with_usefixtures():
+    pass
+"#,
+    );
+
+    let usages = db.usages.get(&test_path).unwrap();
+
+    // Exactly one usage should be recorded (the usefixtures string).
+    assert_eq!(usages.len(), 1, "Should have exactly 1 usage");
+
+    // That usage must NOT be a parameter — inlay hints and code actions
+    // check this flag before emitting anything.
+    let usage = usages.iter().find(|u| u.name == "my_db").unwrap();
+    assert!(
+        !usage.is_parameter,
+        "usefixtures string usage must not be a parameter"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_inlay_hints_not_shown_for_usefixtures_on_class() {
+    use pytest_language_server::FixtureDatabase;
+    use std::path::PathBuf;
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_ih_uf_cls/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_ih_uf_cls/test_example.py");
+
+    db.analyze_file(
+        conftest_path.clone(),
+        r#"
+import pytest
+
+@pytest.fixture
+def my_db() -> str:
+    return "db"
+"#,
+    );
+
+    db.analyze_file(
+        test_path.clone(),
+        r#"
+import pytest
+
+@pytest.mark.usefixtures("my_db")
+class TestSomething:
+    def test_method(self):
+        pass
+"#,
+    );
+
+    let usages = db.usages.get(&test_path).unwrap();
+    let usage = usages
+        .iter()
+        .find(|u| u.name == "my_db")
+        .expect("my_db usage should be detected");
+
+    assert!(
+        !usage.is_parameter,
+        "usefixtures string usage on class must not be a parameter"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_inlay_hints_not_shown_for_pytestmark_usefixtures() {
+    use pytest_language_server::FixtureDatabase;
+    use std::path::PathBuf;
+
+    let db = FixtureDatabase::new();
+    let test_path = PathBuf::from("/tmp/test_ih_pm/test_example.py");
+
+    db.analyze_file(
+        test_path.clone(),
+        r#"
+import pytest
+
+pytestmark = pytest.mark.usefixtures("my_db")
+
+@pytest.fixture
+def my_db() -> str:
+    return "db"
+
+def test_something():
+    pass
+"#,
+    );
+
+    let usages = db.usages.get(&test_path).unwrap();
+    let usage = usages
+        .iter()
+        .find(|u| u.name == "my_db")
+        .expect("my_db usage from pytestmark should be detected");
+
+    assert!(
+        !usage.is_parameter,
+        "pytestmark usefixtures string usage must not be a parameter"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_inlay_hints_not_shown_for_pytestmark_usefixtures_list() {
+    use pytest_language_server::FixtureDatabase;
+    use std::path::PathBuf;
+
+    let db = FixtureDatabase::new();
+    let test_path = PathBuf::from("/tmp/test_ih_pm_list/test_example.py");
+
+    db.analyze_file(
+        test_path.clone(),
+        r#"
+import pytest
+
+pytestmark = [pytest.mark.usefixtures("fix_a", "fix_b")]
+
+@pytest.fixture
+def fix_a() -> int:
+    return 1
+
+@pytest.fixture
+def fix_b() -> str:
+    return "b"
+
+def test_something():
+    pass
+"#,
+    );
+
+    let usages = db.usages.get(&test_path).unwrap();
+
+    for name in &["fix_a", "fix_b"] {
+        let usage = usages
+            .iter()
+            .find(|u| u.name == *name)
+            .unwrap_or_else(|| panic!("{name} usage should be detected"));
+        assert!(
+            !usage.is_parameter,
+            "{name} from pytestmark list must not be a parameter"
+        );
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_inlay_hints_shown_for_param_but_not_marker_in_same_file() {
+    // When the same fixture appears both as a usefixtures string and as a real
+    // function parameter in the same file, only the parameter usage should be
+    // eligible for an inlay hint / code action annotation.
+    use pytest_language_server::FixtureDatabase;
+    use std::path::PathBuf;
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_ih_mixed/conftest.py");
+    let test_path = PathBuf::from("/tmp/test_ih_mixed/test_example.py");
+
+    db.analyze_file(
+        conftest_path.clone(),
+        r#"
+import pytest
+
+@pytest.fixture
+def my_db() -> str:
+    return "db"
+"#,
+    );
+
+    db.analyze_file(
+        test_path.clone(),
+        r#"
+import pytest
+
+@pytest.mark.usefixtures("my_db")
+def test_marker_only():
+    pass
+
+def test_param(my_db):
+    pass
+"#,
+    );
+
+    let usages = db.usages.get(&test_path).unwrap();
+
+    // Expect two usages: one marker (is_parameter=false) and one param (is_parameter=true).
+    let marker_usages: Vec<_> = usages
+        .iter()
+        .filter(|u| u.name == "my_db" && !u.is_parameter)
+        .collect();
+    let param_usages: Vec<_> = usages
+        .iter()
+        .filter(|u| u.name == "my_db" && u.is_parameter)
+        .collect();
+
+    assert_eq!(
+        marker_usages.len(),
+        1,
+        "Should have exactly one marker (non-parameter) usage"
+    );
+    assert_eq!(
+        param_usages.len(),
+        1,
+        "Should have exactly one parameter usage"
+    );
+}
+
+#[tokio::test]
+async fn test_code_action_source_pytest_lsp_skips_usefixtures_cursor() {
+    // When the cursor is positioned on a fixture name inside a usefixtures
+    // decorator, the source.pytest-lsp code action (single annotation) must
+    // NOT be generated — that position is a string literal, not a parameter.
+    use pytest_language_server::FixtureDatabase;
+
+    let db = Arc::new(FixtureDatabase::new());
+
+    let conftest_path = std::env::temp_dir()
+        .join("test_ca_uf_source")
+        .join("conftest.py");
+    db.analyze_file(
+        conftest_path.clone(),
+        r#"
+import pytest
+
+@pytest.fixture
+def my_db() -> str:
+    return "db"
+"#,
+    );
+
+    let test_path = std::env::temp_dir()
+        .join("test_ca_uf_source")
+        .join("test_example.py");
+    db.analyze_file(
+        test_path.clone(),
+        r#"
+import pytest
+
+@pytest.mark.usefixtures("my_db")
+def test_with_usefixtures():
+    pass
+"#,
+    );
+
+    let backend = make_backend_with_db(db);
+    let uri = Uri::from_file_path(&test_path).unwrap();
+
+    // Position the cursor on "my_db" inside the usefixtures string (line 4,
+    // i.e., LSP line 3, somewhere inside the string literal).
+    let params = CodeActionParams {
+        text_document: TextDocumentIdentifier { uri: uri.clone() },
+        range: Range {
+            start: Position {
+                line: 3,
+                character: 26,
+            },
+            end: Position {
+                line: 3,
+                character: 26,
+            },
+        },
+        context: CodeActionContext {
+            diagnostics: vec![],
+            only: Some(vec![CodeActionKind::from("source.pytest-lsp")]),
+            trigger_kind: None,
+        },
+        work_done_progress_params: WorkDoneProgressParams {
+            work_done_token: None,
+        },
+        partial_result_params: PartialResultParams {
+            partial_result_token: None,
+        },
+    };
+
+    let response = backend.handle_code_action(params).await.unwrap();
+
+    // No source.pytest-lsp action should be generated for a usefixtures string.
+    match response {
+        None => {} // Expected: nothing to annotate
+        Some(actions) => {
+            let source_actions: Vec<_> = actions
+                .iter()
+                .filter_map(|a| match a {
+                    CodeActionOrCommand::CodeAction(ca)
+                        if ca.kind == Some(CodeActionKind::from("source.pytest-lsp")) =>
+                    {
+                        Some(ca)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                source_actions.is_empty(),
+                "source.pytest-lsp must not annotate usefixtures strings: {:?}",
+                source_actions.iter().map(|a| &a.title).collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_code_action_fix_all_skips_usefixtures() {
+    // source.fixAll.pytest-lsp must not include usefixtures string usages
+    // in the set of positions it annotates.
+    use pytest_language_server::FixtureDatabase;
+
+    let db = Arc::new(FixtureDatabase::new());
+
+    let conftest_path = std::env::temp_dir()
+        .join("test_ca_uf_fixall")
+        .join("conftest.py");
+    db.analyze_file(
+        conftest_path.clone(),
+        r#"
+import pytest
+
+@pytest.fixture
+def my_db() -> str:
+    return "db"
+"#,
+    );
+
+    // The test file has my_db as a usefixtures string only — no real parameter.
+    // fix-all should produce zero annotation edits.
+    let test_path = std::env::temp_dir()
+        .join("test_ca_uf_fixall")
+        .join("test_example.py");
+    db.analyze_file(
+        test_path.clone(),
+        r#"
+import pytest
+
+@pytest.mark.usefixtures("my_db")
+def test_marker_only():
+    pass
+"#,
+    );
+
+    let backend = make_backend_with_db(db);
+    let uri = Uri::from_file_path(&test_path).unwrap();
+
+    let params = CodeActionParams {
+        text_document: TextDocumentIdentifier { uri: uri.clone() },
+        range: Range {
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 5,
+                character: 0,
+            },
+        },
+        context: CodeActionContext {
+            diagnostics: vec![],
+            only: Some(vec![CodeActionKind::from("source.fixAll.pytest-lsp")]),
+            trigger_kind: None,
+        },
+        work_done_progress_params: WorkDoneProgressParams {
+            work_done_token: None,
+        },
+        partial_result_params: PartialResultParams {
+            partial_result_token: None,
+        },
+    };
+
+    let response = backend.handle_code_action(params).await.unwrap();
+
+    match response {
+        None => {} // Expected: no annotations to add
+        Some(actions) => {
+            let fix_all_actions: Vec<_> = actions
+                .iter()
+                .filter_map(|a| match a {
+                    CodeActionOrCommand::CodeAction(ca)
+                        if ca.kind == Some(CodeActionKind::from("source.fixAll.pytest-lsp")) =>
+                    {
+                        Some(ca)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                fix_all_actions.is_empty(),
+                "source.fixAll.pytest-lsp must not annotate usefixtures strings: {:?}",
+                fix_all_actions.iter().map(|a| &a.title).collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_code_action_fix_all_annotates_params_but_not_markers() {
+    // When a file has the same fixture referenced both as a usefixtures string
+    // AND as a real function parameter, fix-all must annotate only the parameter.
+    use pytest_language_server::FixtureDatabase;
+
+    let db = Arc::new(FixtureDatabase::new());
+
+    let conftest_path = std::env::temp_dir()
+        .join("test_ca_uf_mixed_fixall")
+        .join("conftest.py");
+    db.analyze_file(
+        conftest_path.clone(),
+        r#"
+import pytest
+
+@pytest.fixture
+def my_db() -> str:
+    return "db"
+"#,
+    );
+
+    let test_path = std::env::temp_dir()
+        .join("test_ca_uf_mixed_fixall")
+        .join("test_example.py");
+    let test_content = r#"
+import pytest
+
+@pytest.mark.usefixtures("my_db")
+def test_marker_only():
+    pass
+
+def test_param(my_db):
+    pass
+"#;
+    db.analyze_file(test_path.clone(), test_content);
+
+    let backend = make_backend_with_db(db);
+    let uri = Uri::from_file_path(&test_path).unwrap();
+
+    let params = CodeActionParams {
+        text_document: TextDocumentIdentifier { uri: uri.clone() },
+        range: Range {
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 9,
+                character: 0,
+            },
+        },
+        context: CodeActionContext {
+            diagnostics: vec![],
+            only: Some(vec![CodeActionKind::from("source.fixAll.pytest-lsp")]),
+            trigger_kind: None,
+        },
+        work_done_progress_params: WorkDoneProgressParams {
+            work_done_token: None,
+        },
+        partial_result_params: PartialResultParams {
+            partial_result_token: None,
+        },
+    };
+
+    let response = backend.handle_code_action(params).await.unwrap();
+    let actions = response.expect("Should have a fix-all action for the parameter");
+
+    let fix_all = actions
+        .iter()
+        .find_map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca)
+                if ca.kind == Some(CodeActionKind::from("source.fixAll.pytest-lsp")) =>
+            {
+                Some(ca)
+            }
+            _ => None,
+        })
+        .expect("Should have a source.fixAll.pytest-lsp action");
+
+    // The title should mention exactly 1 fixture (the parameter), not 2.
+    assert!(
+        fix_all.title.contains("1 fixture"),
+        "fix-all title should say '1 fixture' (only the parameter), got: {}",
+        fix_all.title
+    );
+
+    // Verify that the annotation edit targets line 8 (test_param, 0-indexed = 7)
+    // and NOT line 4 (the usefixtures decorator line, 0-indexed = 3).
+    let ws_edit = fix_all.edit.as_ref().expect("Should have workspace edit");
+    let changes = ws_edit.changes.as_ref().expect("Should have changes");
+    let edits: Vec<&TextEdit> = changes.values().flat_map(|v| v.iter()).collect();
+
+    // All annotation edits (those inserting ": str") must be on the parameter line.
+    for edit in &edits {
+        if edit.new_text.contains(": str") {
+            assert_eq!(
+                edit.range.start.line, 7,
+                "Annotation edit must target the parameter line (line 8, 0-indexed 7), \
+                 not the usefixtures decorator. Edit: {:?}",
+                edit
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_code_action_fix_all_skips_pytestmark_usefixtures() {
+    // pytestmark = pytest.mark.usefixtures(...) at module level must also be
+    // excluded from fix-all annotations.
+    use pytest_language_server::FixtureDatabase;
+
+    let db = Arc::new(FixtureDatabase::new());
+
+    let conftest_path = std::env::temp_dir()
+        .join("test_ca_pm_fixall")
+        .join("conftest.py");
+    db.analyze_file(
+        conftest_path.clone(),
+        r#"
+import pytest
+
+@pytest.fixture
+def my_db() -> str:
+    return "db"
+"#,
+    );
+
+    let test_path = std::env::temp_dir()
+        .join("test_ca_pm_fixall")
+        .join("test_example.py");
+    db.analyze_file(
+        test_path.clone(),
+        r#"
+import pytest
+
+pytestmark = pytest.mark.usefixtures("my_db")
+
+def test_something():
+    pass
+"#,
+    );
+
+    let backend = make_backend_with_db(db);
+    let uri = Uri::from_file_path(&test_path).unwrap();
+
+    let params = CodeActionParams {
+        text_document: TextDocumentIdentifier { uri: uri.clone() },
+        range: Range {
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 6,
+                character: 0,
+            },
+        },
+        context: CodeActionContext {
+            diagnostics: vec![],
+            only: Some(vec![CodeActionKind::from("source.fixAll.pytest-lsp")]),
+            trigger_kind: None,
+        },
+        work_done_progress_params: WorkDoneProgressParams {
+            work_done_token: None,
+        },
+        partial_result_params: PartialResultParams {
+            partial_result_token: None,
+        },
+    };
+
+    let response = backend.handle_code_action(params).await.unwrap();
+
+    match response {
+        None => {} // Expected: nothing to annotate
+        Some(actions) => {
+            let fix_all_actions: Vec<_> = actions
+                .iter()
+                .filter_map(|a| match a {
+                    CodeActionOrCommand::CodeAction(ca)
+                        if ca.kind == Some(CodeActionKind::from("source.fixAll.pytest-lsp")) =>
+                    {
+                        Some(ca)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                fix_all_actions.is_empty(),
+                "source.fixAll.pytest-lsp must not annotate pytestmark usefixtures strings: {:?}",
+                fix_all_actions.iter().map(|a| &a.title).collect::<Vec<_>>()
+            );
+        }
+    }
+}

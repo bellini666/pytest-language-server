@@ -252,6 +252,7 @@ impl FixtureDatabase {
         line: usize,
         start_char: usize,
         end_char: usize,
+        is_parameter: bool,
     ) {
         let file_path_buf = file_path.to_path_buf();
         let usage = FixtureUsage {
@@ -260,6 +261,7 @@ impl FixtureDatabase {
             line,
             start_char,
             end_char,
+            is_parameter,
         };
 
         // Add to per-file usages map
@@ -363,6 +365,7 @@ impl FixtureDatabase {
                         usage_line,
                         start_char + 1,
                         end_char - 1,
+                        false, // usefixtures string — not a function parameter
                     );
                 }
             }
@@ -426,6 +429,7 @@ impl FixtureDatabase {
                     usage_line,
                     start_char + 1,
                     end_char - 1,
+                    false, // usefixtures string — not a function parameter
                 );
             }
         }
@@ -451,6 +455,7 @@ impl FixtureDatabase {
                     usage_line,
                     start_char + 1,
                     end_char - 1,
+                    false, // parametrize indirect string — not a function parameter
                 );
             }
         }
@@ -575,6 +580,7 @@ impl FixtureDatabase {
                         arg_line,
                         start_char,
                         end_char,
+                        true, // actual function parameter — can receive a type annotation
                     );
                 }
             }
@@ -626,6 +632,7 @@ impl FixtureDatabase {
                         arg_line,
                         start_char,
                         end_char,
+                        true, // actual function parameter — can receive a type annotation
                     );
                 }
             }
@@ -739,6 +746,7 @@ impl FixtureDatabase {
                 usage_line,
                 start_char.saturating_add(1),
                 end_char.saturating_sub(1),
+                false, // pytestmark usefixtures string — not a function parameter
             );
         }
     }

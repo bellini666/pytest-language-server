@@ -94,6 +94,10 @@ pub struct FixtureUsage {
     pub line: usize,
     pub start_char: usize, // Character position where this usage starts (on the line)
     pub end_char: usize,   // Character position where this usage ends (on the line)
+    /// `true` when this usage is a function parameter that can receive a type annotation.
+    /// `false` for string-based usages inside `@pytest.mark.usefixtures(...)`,
+    /// `pytestmark = pytest.mark.usefixtures(...)`, or `@pytest.mark.parametrize(..., indirect=...)`.
+    pub is_parameter: bool,
 }
 
 /// An undeclared fixture used in a function body without being declared as a parameter.

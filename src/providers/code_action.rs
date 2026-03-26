@@ -988,6 +988,13 @@ impl Backend {
                         let cursor_line_internal = Self::lsp_line_to_internal(range.start.line);
 
                         for usage in usages.iter() {
+                            // Skip string-based usages from @pytest.mark.usefixtures(...),
+                            // pytestmark assignments, and parametrize indirect — these are
+                            // not function parameters and cannot receive type annotations.
+                            if !usage.is_parameter {
+                                continue;
+                            }
+
                             if usage.line != cursor_line_internal {
                                 continue;
                             }
@@ -1071,6 +1078,13 @@ impl Backend {
                         let mut annotated_count: usize = 0;
 
                         for usage in usages.iter() {
+                            // Skip string-based usages from @pytest.mark.usefixtures(...),
+                            // pytestmark assignments, and parametrize indirect — these are
+                            // not function parameters and cannot receive type annotations.
+                            if !usage.is_parameter {
+                                continue;
+                            }
+
                             if parameter_has_annotation(&lines, usage.line, usage.end_char) {
                                 continue;
                             }

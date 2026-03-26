@@ -15,7 +15,7 @@ const EXCLUDED_PARAM_NAMES: &[&str] = &["self", "cls"];
 /// Per-request completion options bundling fixture scope, self-exclusion name, and
 /// trigger-character insert prefix. Passed through the completion pipeline to avoid
 /// threading many individual parameters.
-pub struct CompletionOpts<'a> {
+pub(crate) struct CompletionOpts<'a> {
     /// When editing a fixture, its scope constrains which other fixtures are eligible.
     /// `None` for test functions (all scopes allowed).
     fixture_scope: Option<FixtureScope>,
@@ -257,7 +257,7 @@ impl Backend {
 
     /// Create completion items for fixtures (for function signature context)
     /// Filters out already-declared parameters and scope-incompatible fixtures
-    pub fn create_fixture_completions(
+    pub(crate) fn create_fixture_completions(
         &self,
         file_path: &std::path::Path,
         declared_params: &[String],
@@ -294,7 +294,7 @@ impl Backend {
 
     /// Create completion items for fixtures with auto-add to function parameters.
     /// When a completion is confirmed, it also inserts the fixture as a parameter.
-    pub fn create_fixture_completions_with_auto_add(
+    pub(crate) fn create_fixture_completions_with_auto_add(
         &self,
         file_path: &std::path::Path,
         declared_params: &[String],
@@ -353,7 +353,7 @@ impl Backend {
     /// Create completion items for fixture names as strings (for decorators)
     /// Used in @pytest.mark.usefixtures("...") and @pytest.mark.parametrize(..., indirect=["..."])
     /// No scope filtering applied here (decision #3).
-    pub fn create_string_fixture_completions(
+    pub(crate) fn create_string_fixture_completions(
         &self,
         file_path: &std::path::Path,
         workspace_root: Option<&PathBuf>,

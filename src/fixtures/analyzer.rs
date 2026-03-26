@@ -279,7 +279,7 @@ impl FixtureDatabase {
 
     /// Helper to record a fixture definition in the database.
     /// Also maintains the file_definitions reverse index for efficient cleanup.
-    fn record_fixture_definition(&self, definition: FixtureDefinition) {
+    pub(crate) fn record_fixture_definition(&self, definition: FixtureDefinition) {
         let file_path = definition.file_path.clone();
         let fixture_name = definition.name.clone();
 
@@ -559,7 +559,10 @@ impl FixtureDatabase {
             for arg in Self::all_args(args) {
                 let arg_name = arg.def.arg.as_str();
 
-                if arg_name != "self" && arg_name != "request" {
+                // `request` is excluded from *dependencies* (it is a special pytest
+                // injection, not a regular fixture), but we DO record it as a usage
+                // so that inlay hints and type-annotation code actions work on it.
+                if arg_name != "self" {
                     let arg_line =
                         self.get_line_from_offset(arg.def.range.start().to_usize(), line_index);
                     let start_char = self.get_char_position_from_offset(

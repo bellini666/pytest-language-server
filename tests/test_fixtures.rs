@@ -3615,6 +3615,315 @@ class TestWithFixture:
     );
 }
 
+// =============================================================================
+// request builtin fixture tests
+// =============================================================================
+
+#[test]
+#[timeout(30000)]
+fn test_request_fixture_definition_registered_after_venv_scan() {
+    // After scanning a fake _pytest directory (simulating a venv), the
+    // synthetic `request` definition must be present with the correct type.
+    use tempfile::tempdir;
+
+    let temp = tempdir().unwrap();
+    // scan_venv_fixtures looks for .venv/lib/python*/site-packages/
+    let venv = temp.path().join(".venv");
+    let site_packages = venv.join("lib").join("python3.11").join("site-packages");
+    let pytest_internal = site_packages.join("_pytest");
+    std::fs::create_dir_all(&pytest_internal).unwrap();
+
+    // Write a minimal fixtures.py so the scanner has a real path to point at.
+    std::fs::write(
+        pytest_internal.join("fixtures.py"),
+        b"# pytest internal fixtures\n",
+    )
+    .unwrap();
+
+    let db = FixtureDatabase::new();
+    db.scan_workspace(temp.path());
+
+    let defs = db.definitions.get("request");
+    assert!(
+        defs.is_some(),
+        "'request' fixture definition must be registered after venv scan"
+    );
+
+    let def = &defs.unwrap()[0];
+    assert_eq!(def.name, "request");
+    assert_eq!(
+        def.return_type.as_deref(),
+        Some("FixtureRequest"),
+        "request fixture must have return_type = FixtureRequest"
+    );
+    assert!(
+        def.is_third_party,
+        "request fixture must be marked as third-party"
+    );
+    assert!(def.is_plugin, "request fixture must be marked as plugin");
+}
+
+#[test]
+#[timeout(30000)]
+fn test_request_fixture_return_type_import_spec() {
+    // The return_type_imports for `request` must tell code actions to insert
+    // `from pytest import FixtureRequest`.
+    use tempfile::tempdir;
+
+    let temp = tempdir().unwrap();
+    let venv = temp.path().join(".venv");
+    let site_packages = venv.join("lib").join("python3.11").join("site-packages");
+    let pytest_internal = site_packages.join("_pytest");
+    std::fs::create_dir_all(&pytest_internal).unwrap();
+    std::fs::write(pytest_internal.join("fixtures.py"), b"").unwrap();
+
+    let db = FixtureDatabase::new();
+    db.scan_workspace(temp.path());
+
+    let defs = db
+        .definitions
+        .get("request")
+        .expect("request must be registered");
+    let def = &defs[0];
+
+    assert_eq!(def.return_type_imports.len(), 1);
+    let spec = &def.return_type_imports[0];
+    assert_eq!(spec.check_name, "FixtureRequest");
+    assert_eq!(spec.import_statement, "from pytest import FixtureRequest");
+}
+
+#[test]
+#[timeout(30000)]
+fn test_request_fixture_has_docstring() {
+    use tempfile::tempdir;
+
+    let temp = tempdir().unwrap();
+    let venv = temp.path().join(".venv");
+    let site_packages = venv.join("lib").join("python3.11").join("site-packages");
+    let pytest_internal = site_packages.join("_pytest");
+    std::fs::create_dir_all(&pytest_internal).unwrap();
+    std::fs::write(pytest_internal.join("fixtures.py"), b"").unwrap();
+
+    let db = FixtureDatabase::new();
+    db.scan_workspace(temp.path());
+
+    let defs = db
+        .definitions
+        .get("request")
+        .expect("request must be registered");
+    let def = &defs[0];
+
+    let doc = def.docstring.as_deref().unwrap_or("");
+    assert!(
+        doc.contains("FixtureRequest") || doc.contains("requesting test context"),
+        "request docstring should describe its purpose, got: {:?}",
+        doc
+    );
+    assert!(
+        doc.contains("param") || doc.contains("addfinalizer") || doc.contains("docs.pytest.org"),
+        "request docstring should mention key attributes or docs URL, got: {:?}",
+        doc
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_request_not_flagged_as_undeclared_in_test_function() {
+    // `request` must never appear in the undeclared-fixtures list, even when
+    // used in a test body without being declared as a parameter.
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+def test_uses_request_in_body():
+    val = request.param
+    assert val is not None
+"#;
+    let path = PathBuf::from("/tmp/test_req_undecl/test_req.py");
+    db.analyze_file(path.clone(), content);
+
+    let undeclared = db.get_undeclared_fixtures(&path);
+    assert!(
+        !undeclared.iter().any(|u| u.name == "request"),
+        "request must never be reported as undeclared"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_request_not_flagged_as_undeclared_in_fixture() {
+    // `request` as a fixture parameter must not be flagged as undeclared.
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture(request):
+    return request.param
+"#;
+    let path = PathBuf::from("/tmp/test_req_fixt_undecl/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    let undeclared = db.get_undeclared_fixtures(&path);
+    assert!(
+        !undeclared.iter().any(|u| u.name == "request"),
+        "request in a fixture parameter must not be flagged as undeclared"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_request_recorded_as_usage_in_test_function() {
+    // `request` used as a test function parameter must be tracked so inlay
+    // hints can show its type.
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+def test_uses_request(request):
+    assert request.node is not None
+"#;
+    let path = PathBuf::from("/tmp/test_req_usage_test/test_req.py");
+    db.analyze_file(path.clone(), content);
+
+    let usages = db.usages.get(&path).expect("usages should be tracked");
+    let request_usage = usages.iter().find(|u| u.name == "request");
+    assert!(
+        request_usage.is_some(),
+        "request parameter in a test function must be tracked as a usage"
+    );
+    assert!(
+        request_usage.unwrap().is_parameter,
+        "request in a test function parameter must have is_parameter = true"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_request_recorded_as_usage_in_fixture_function() {
+    // `request` used as a fixture parameter must also be tracked so inlay
+    // hints can show `: FixtureRequest` on it.
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def parametrized_fixture(request):
+    return request.param * 2
+"#;
+    let path = PathBuf::from("/tmp/test_req_usage_fix/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    let usages = db.usages.get(&path).expect("usages should be tracked");
+    let request_usage = usages.iter().find(|u| u.name == "request");
+    assert!(
+        request_usage.is_some(),
+        "request parameter in a fixture function must be tracked as a usage"
+    );
+    assert!(
+        request_usage.unwrap().is_parameter,
+        "request in a fixture function parameter must have is_parameter = true"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_request_not_added_as_fixture_dependency() {
+    // Even though `request` is now tracked as a usage, it must NOT appear in
+    // the fixture's dependency list — it is a special pytest injection, not a
+    // regular fixture dependency.
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture(request, tmp_path):
+    return request.param
+"#;
+    let path = PathBuf::from("/tmp/test_req_dep/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    let defs = db
+        .definitions
+        .get("my_fixture")
+        .expect("fixture must be detected");
+    let def = &defs[0];
+
+    assert!(
+        !def.dependencies.contains(&"request".to_string()),
+        "request must not appear in fixture dependencies, got: {:?}",
+        def.dependencies
+    );
+    // tmp_path should still be a dependency
+    assert!(
+        def.dependencies.contains(&"tmp_path".to_string()),
+        "tmp_path should be listed as a dependency"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_request_completion_available() {
+    // `request` must appear in the list of available fixtures for a test file
+    // once the venv has been scanned (simulated here by direct registration).
+    use tempfile::tempdir;
+
+    let temp = tempdir().unwrap();
+    let venv = temp.path().join(".venv");
+    let site_packages = venv.join("lib").join("python3.11").join("site-packages");
+    let pytest_internal = site_packages.join("_pytest");
+    std::fs::create_dir_all(&pytest_internal).unwrap();
+    std::fs::write(pytest_internal.join("fixtures.py"), b"").unwrap();
+
+    // Write a minimal test file so there's a file path to query against.
+    let test_dir = temp.path().join("tests");
+    std::fs::create_dir_all(&test_dir).unwrap();
+    let test_path = test_dir.join("test_req.py");
+    std::fs::write(&test_path, b"def test_something(request): pass").unwrap();
+
+    let db = FixtureDatabase::new();
+    db.scan_workspace(temp.path());
+
+    let available = db.get_available_fixtures(&test_path);
+    let request_def = available.iter().find(|f| f.name == "request");
+    assert!(
+        request_def.is_some(),
+        "request must appear in available fixtures after venv scan"
+    );
+    assert_eq!(
+        request_def.unwrap().return_type.as_deref(),
+        Some("FixtureRequest")
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_request_not_in_cycle_detection() {
+    // `request` must not participate in cycle detection (it has no dependencies).
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def a(request):
+    return request.param
+
+@pytest.fixture
+def b(a):
+    return a + 1
+"#;
+    let path = PathBuf::from("/tmp/test_req_cycle/conftest.py");
+    db.analyze_file(path.clone(), content);
+
+    let cycles = db.detect_fixture_cycles();
+    assert!(
+        cycles.is_empty(),
+        "There should be no cycles; request must not cause false cycle detection"
+    );
+}
+
 #[test]
 #[timeout(30000)]
 fn test_pytest_django_builtin_fixtures() {

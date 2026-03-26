@@ -1,6 +1,7 @@
 //! Workspace and virtual environment scanning for fixture definitions.
 
 use super::imports::try_init_stdlib_from_python;
+use super::types::{FixtureDefinition, FixtureScope, TypeImportSpec};
 use super::FixtureDatabase;
 use glob::Pattern;
 use rayon::prelude::*;
@@ -749,6 +750,81 @@ impl FixtureDatabase {
             pytest_internal
         );
         self.scan_plugin_directory(&pytest_internal);
+
+        // `request` is not defined via @pytest.fixture anywhere in _pytest/ —
+        // pytest injects it programmatically via FixtureManager.  Register a
+        // synthetic definition so that hover, inlay hints, completion and code
+        // actions all know its type.
+        self.register_request_builtin_fixture(&pytest_internal);
+    }
+
+    /// Inject a hard-coded `FixtureDefinition` for the `request` fixture.
+    ///
+    /// pytest's built-in `request` fixture is registered programmatically by
+    /// `FixtureManager` and therefore never appears as a `@pytest.fixture`-
+    /// decorated function that the AST scanner could pick up.  We synthesise
+    /// the definition here so every LSP feature (hover, inlay hints,
+    /// completions, go-to-definition, code actions) can work with it.
+    ///
+    /// The `file_path` is set to `_pytest/fixtures.py` when that file exists,
+    /// which gives a useful go-to-definition target.  A sentinel path is used
+    /// as a fallback so the entry never gets accidentally cleared by a
+    /// subsequent `analyze_file` call on a real source file.
+    fn register_request_builtin_fixture(&self, pytest_internal: &Path) {
+        // Prefer the real _pytest/fixtures.py for go-to-definition.
+        let fixtures_py = pytest_internal.join("fixtures.py");
+        let file_path = if fixtures_py.exists() {
+            fixtures_py
+                .canonicalize()
+                .unwrap_or_else(|_| fixtures_py.clone())
+        } else {
+            // Sentinel path – will never be passed to analyze_file.
+            pytest_internal.join("_pytest_request_builtin.py")
+        };
+
+        // Guard: skip registration if an identical synthetic definition
+        // (same file_path) is already present.  This prevents duplicate
+        // entries when scan_venv_fixtures / scan_pytest_internal_fixtures
+        // is called more than once (e.g. on workspace reload).
+        if let Some(existing) = self.definitions.get("request") {
+            if existing.iter().any(|d| d.file_path == file_path) {
+                debug!(
+                    "Synthetic 'request' fixture already registered for {:?}, skipping",
+                    file_path
+                );
+                return;
+            }
+        }
+
+        let docstring = concat!(
+            "Special fixture providing information about the requesting test context.\n",
+            "\n",
+            "See https://docs.pytest.org/en/stable/reference/reference.html#request"
+        );
+
+        let definition = FixtureDefinition {
+            name: "request".to_string(),
+            file_path,
+            line: 1,
+            end_line: 1,
+            start_char: 0,
+            end_char: "request".len(),
+            docstring: Some(docstring.to_string()),
+            return_type: Some("FixtureRequest".to_string()),
+            return_type_imports: vec![TypeImportSpec {
+                check_name: "FixtureRequest".to_string(),
+                import_statement: "from pytest import FixtureRequest".to_string(),
+            }],
+            is_third_party: true,
+            is_plugin: true,
+            dependencies: vec![],
+            scope: FixtureScope::Function,
+            yield_line: None,
+            autouse: false,
+        };
+
+        info!("Registering synthetic 'request' fixture definition");
+        self.record_fixture_definition(definition);
     }
 
     /// Extract the raw and normalized package name from a `.dist-info` directory name.

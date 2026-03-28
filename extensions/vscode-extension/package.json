@@ -97,8 +97,8 @@
     "@types/vscode": "^1.110.0",
     "eslint": "^10.1.0",
     "ts-loader": "^9.4.0",
-    "typescript": "^5.0.0",
-    "typescript-eslint": "^8.57.1",
+    "typescript": "^6.0.2",
+    "typescript-eslint": "^8.57.2",
     "webpack": "^5.105.4",
     "webpack-cli": "^7.0.2"
   },

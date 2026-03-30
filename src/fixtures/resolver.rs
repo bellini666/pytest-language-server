@@ -9,7 +9,7 @@ use super::types::{
     UndeclaredFixture,
 };
 use super::FixtureDatabase;
-use rustpython_parser::ast::{Expr, Ranged, Stmt};
+use rustpython_parser::ast::{Arguments, Expr, Ranged, Stmt};
 use std::collections::HashSet;
 use std::path::Path;
 use tracing::{debug, info};
@@ -1314,59 +1314,77 @@ impl FixtureDatabase {
         Some(context)
     }
 
-    /// Get information about where to insert a new parameter in a function signature
+    /// Get information about where to insert a new parameter in a function signature.
+    ///
+    /// Uses the cached AST as the primary path: finds the function definition at
+    /// `function_line`, determines `needs_comma` from the AST argument list, and
+    /// locates the closing `)` via paren-depth scanning of the raw source bytes.
+    /// This correctly handles multi-line signatures and return-type annotations
+    /// (`-> T:`), which the old `"):"`  string-matching approach could not.
+    ///
+    /// Falls back to a pure byte-scan when the AST is unavailable (e.g. the file
+    /// has syntax errors), using the same `scan_for_signature_close_paren` helper.
     pub fn get_function_param_insertion_info(
         &self,
         file_path: &Path,
         function_line: usize,
     ) -> Option<ParamInsertionInfo> {
         let content = self.get_file_content(file_path)?;
-        let lines: Vec<&str> = content.lines().collect();
+        let line_index = self.get_line_index(file_path, &content);
+        let bytes = content.as_bytes();
 
-        for i in (function_line.saturating_sub(1))..lines.len().min(function_line + 10) {
-            let line = lines[i];
-            if let Some(paren_pos) = line.find("):") {
-                let has_params = if let Some(open_pos) = line.find('(') {
-                    if open_pos < paren_pos {
-                        let params_section = &line[open_pos + 1..paren_pos];
-                        !params_section.trim().is_empty()
-                    } else {
-                        true
-                    }
-                } else {
-                    let before_close = &line[..paren_pos];
-                    if !before_close.trim().is_empty() {
-                        true
-                    } else {
-                        let mut found_params = false;
-                        for prev_line in lines.iter().take(i).skip(function_line.saturating_sub(1))
-                        {
-                            if prev_line.contains('(') {
-                                if let Some(open_pos) = prev_line.find('(') {
-                                    let after_open = &prev_line[open_pos + 1..];
-                                    if !after_open.trim().is_empty() {
-                                        found_params = true;
-                                        break;
-                                    }
-                                }
-                            } else if !prev_line.trim().is_empty() {
-                                found_params = true;
-                                break;
-                            }
-                        }
-                        found_params
-                    }
-                };
-
-                return Some(ParamInsertionInfo {
-                    line: i + 1,
-                    char_pos: paren_pos,
-                    needs_comma: has_params,
-                });
+        // ── AST path ─────────────────────────────────────────────────────────
+        // Preferred: the AST gives accurate `needs_comma` (from the arg list)
+        // and lets us scan from the exact `def` byte offset.
+        if let Some(ast) = self.get_parsed_ast(file_path, &content) {
+            if let rustpython_parser::ast::Mod::Module(module) = ast.as_ref() {
+                if let Some(info) =
+                    find_insertion_in_stmts(&module.body, function_line, bytes, &line_index)
+                {
+                    return Some(info);
+                }
             }
         }
 
-        None
+        // ── String fallback ───────────────────────────────────────────────────
+        // Used when the AST is unavailable (syntax errors) or the function was
+        // not found in the module-level AST walk (should be rare).
+        let def_line_start = *line_index
+            .get(function_line.saturating_sub(1))
+            .unwrap_or(&0);
+        let close_paren = scan_for_signature_close_paren(bytes, def_line_start)?;
+
+        // Find the opening `(` to determine whether there are existing params.
+        let open_paren = bytes[def_line_start..close_paren]
+            .iter()
+            .position(|&b| b == b'(')
+            .map(|pos| def_line_start + pos)?;
+
+        // has_params: any non-whitespace, non-comment content between `(` and `)`.
+        let between = &bytes[open_paren + 1..close_paren];
+        let has_params = {
+            let mut in_comment = false;
+            between.iter().any(|&b| {
+                if b == b'\n' {
+                    in_comment = false;
+                    return false;
+                }
+                if in_comment {
+                    return false;
+                }
+                if b == b'#' {
+                    in_comment = true;
+                    return false;
+                }
+                !b.is_ascii_whitespace()
+            })
+        };
+
+        Some(ParamInsertionInfo {
+            line: byte_offset_to_line_1based(close_paren, &line_index),
+            char_pos: byte_offset_to_col(close_paren, &line_index),
+            needs_comma: has_params,
+        })
     }
 
     /// Check if a position is inside a test or fixture function (parameter or body)
@@ -1815,4 +1833,174 @@ impl FixtureDatabase {
         }
         None
     }
+}
+
+// ── Free helpers for get_function_param_insertion_info ───────────────────────
+
+/// Scan `bytes` starting from `start`, tracking paren depth, to find the byte
+/// offset of the closing `)` that matches the first `(` encountered.
+///
+/// Properly skips:
+/// - String literals (single, double, and triple-quoted) so that `)` inside a
+///   default value like `def f(x=")")` is never counted.
+/// - Inline comments (`#` to end-of-line).
+///
+/// Returns `None` if no matching `)` is found within `bytes`.
+fn scan_for_signature_close_paren(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut i = start;
+    let mut depth: i32 = 0;
+    let mut found_open = false;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'#' => {
+                // Inline comment: skip to end of line.
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'"' | b'\'' => {
+                let q = bytes[i];
+                // Triple-quoted string?
+                if i + 2 < bytes.len() && bytes[i + 1] == q && bytes[i + 2] == q {
+                    i += 3;
+                    while i < bytes.len() {
+                        if i + 2 < bytes.len()
+                            && bytes[i] == q
+                            && bytes[i + 1] == q
+                            && bytes[i + 2] == q
+                        {
+                            i += 3;
+                            break;
+                        }
+                        i += 1;
+                    }
+                } else {
+                    // Single-quoted string.
+                    i += 1;
+                    while i < bytes.len() {
+                        if bytes[i] == b'\\' {
+                            i += 2; // skip escaped char
+                        } else if bytes[i] == q {
+                            i += 1; // consume closing quote
+                            break;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                }
+            }
+            b'(' => {
+                depth += 1;
+                found_open = true;
+                i += 1;
+            }
+            b')' if found_open => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+                i += 1;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+
+    None
+}
+
+/// Convert a byte offset to a 1-based line number using `line_index`.
+///
+/// `line_index` is built by `FixtureDatabase::build_line_index`: it starts with
+/// `0` (byte 0 = start of line 1) and then stores the byte offset of the first
+/// character of each subsequent line.
+fn byte_offset_to_line_1based(offset: usize, line_index: &[usize]) -> usize {
+    match line_index.binary_search(&offset) {
+        Ok(line) => line + 1,
+        Err(line) => line,
+    }
+}
+
+/// Convert a byte offset to a 0-based column within its line.
+fn byte_offset_to_col(offset: usize, line_index: &[usize]) -> usize {
+    let line = byte_offset_to_line_1based(offset, line_index);
+    // line_index[line - 1] is the byte start of that 1-based line.
+    offset - line_index[line.saturating_sub(1)]
+}
+
+/// Recursively walk `stmts` looking for a function definition whose `def`
+/// keyword is on `function_line` (1-based).  Returns `ParamInsertionInfo`
+/// when the function is found.
+fn find_insertion_in_stmts(
+    stmts: &[Stmt],
+    function_line: usize,
+    bytes: &[u8],
+    line_index: &[usize],
+) -> Option<ParamInsertionInfo> {
+    for stmt in stmts {
+        if let Some(info) = find_insertion_in_stmt(stmt, function_line, bytes, line_index) {
+            return Some(info);
+        }
+    }
+    None
+}
+
+/// Match a single statement, recursing into function/class bodies as needed.
+fn find_insertion_in_stmt(
+    stmt: &Stmt,
+    function_line: usize,
+    bytes: &[u8],
+    line_index: &[usize],
+) -> Option<ParamInsertionInfo> {
+    match stmt {
+        Stmt::FunctionDef(f) => {
+            let def_start = f.range.start().to_usize();
+            if byte_offset_to_line_1based(def_start, line_index) == function_line {
+                return param_insertion_from_args(def_start, &f.args, bytes, line_index);
+            }
+            // Recurse into the function body (handles nested functions).
+            find_insertion_in_stmts(&f.body, function_line, bytes, line_index)
+        }
+        Stmt::AsyncFunctionDef(f) => {
+            let def_start = f.range.start().to_usize();
+            if byte_offset_to_line_1based(def_start, line_index) == function_line {
+                return param_insertion_from_args(def_start, &f.args, bytes, line_index);
+            }
+            find_insertion_in_stmts(&f.body, function_line, bytes, line_index)
+        }
+        Stmt::ClassDef(c) => {
+            // Recurse into the class body to find test methods.
+            find_insertion_in_stmts(&c.body, function_line, bytes, line_index)
+        }
+        _ => None,
+    }
+}
+
+/// Given the byte offset of a `def` keyword and the function's AST `Arguments`,
+/// scan the raw source bytes from `def_start` to find the closing `)` and build
+/// a `ParamInsertionInfo`.
+///
+/// `has_params` (`needs_comma`) comes from the AST arg list, which correctly
+/// handles all argument forms (`*args`, `**kwargs`, keyword-only, etc.).
+fn param_insertion_from_args(
+    def_start: usize,
+    args: &Arguments,
+    bytes: &[u8],
+    line_index: &[usize],
+) -> Option<ParamInsertionInfo> {
+    let has_params = !args.posonlyargs.is_empty()
+        || !args.args.is_empty()
+        || !args.kwonlyargs.is_empty()
+        || args.vararg.is_some()
+        || args.kwarg.is_some();
+
+    let close_paren = scan_for_signature_close_paren(bytes, def_start)?;
+
+    Some(ParamInsertionInfo {
+        line: byte_offset_to_line_1based(close_paren, line_index),
+        char_pos: byte_offset_to_col(close_paren, line_index),
+        needs_comma: has_params,
+    })
 }

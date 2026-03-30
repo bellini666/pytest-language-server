@@ -964,6 +964,339 @@ async fn test_inlay_hint_returns_ok() {
     assert!(result.is_ok());
 }
 
+// Helper: open a file through the LSP did_open notification so that both
+// `file_cache` and `usages` are populated for `handle_inlay_hint`.
+async fn open_file(backend: &Backend, uri: Uri, text: &str) {
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri,
+                language_id: "python".to_string(),
+                version: 1,
+                text: text.to_string(),
+            },
+        })
+        .await;
+}
+
+/// Call `backend.inlay_hint` and unwrap the double-`Option` result,
+/// returning an empty `Vec` when the inner `Option` is `None`.
+async fn get_hints(backend: &Backend, uri: Uri, range: Range) -> Vec<InlayHint> {
+    let result = backend
+        .inlay_hint(InlayHintParams {
+            text_document: TextDocumentIdentifier { uri },
+            range,
+            work_done_progress_params: wdp(),
+        })
+        .await;
+    assert!(result.is_ok(), "inlay_hint must not return an error");
+    result.unwrap().unwrap_or_default()
+}
+
+// ── Happy path: one hint generated ────────────────────────────────────────
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_inlay_hint_generates_hint_for_fixture_with_return_type() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    // Conftest: typed fixture
+    open_file(
+        &backend,
+        turi("test_ih_gen", "conftest.py"),
+        "import pytest\n\n@pytest.fixture\ndef my_fixture() -> int:\n    return 42\n",
+    )
+    .await;
+
+    // Test file: one unannotated parameter
+    open_file(
+        &backend,
+        turi("test_ih_gen", "test_foo.py"),
+        "def test_foo(my_fixture):\n    pass\n",
+    )
+    .await;
+
+    let hints = get_hints(
+        &backend,
+        turi("test_ih_gen", "test_foo.py"),
+        rng(0, 0, 10, 0),
+    )
+    .await;
+
+    assert_eq!(hints.len(), 1, "Should return exactly one hint");
+    match &hints[0].label {
+        InlayHintLabel::String(label) => assert_eq!(label, ": int"),
+        _ => panic!("Expected String label"),
+    }
+    assert_eq!(hints[0].kind, Some(InlayHintKind::TYPE));
+    // Tooltip should mention the fixture name and the type
+    if let Some(InlayHintTooltip::String(tooltip)) = &hints[0].tooltip {
+        assert!(tooltip.contains("my_fixture"));
+        assert!(tooltip.contains("int"));
+    } else {
+        panic!("Expected String tooltip");
+    }
+    assert_eq!(hints[0].padding_left, Some(false));
+    assert_eq!(hints[0].padding_right, Some(false));
+}
+
+// ── Early return when fixture_map is empty ────────────────────────────────
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_inlay_hint_empty_when_no_fixtures_have_return_type() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    // Conftest: fixture WITHOUT a return-type annotation
+    open_file(
+        &backend,
+        turi("test_ih_no_rt", "conftest.py"),
+        "import pytest\n\n@pytest.fixture\ndef my_fixture():\n    return 42\n",
+    )
+    .await;
+
+    open_file(
+        &backend,
+        turi("test_ih_no_rt", "test_foo.py"),
+        "def test_foo(my_fixture):\n    pass\n",
+    )
+    .await;
+
+    let hints = get_hints(
+        &backend,
+        turi("test_ih_no_rt", "test_foo.py"),
+        rng(0, 0, 10, 0),
+    )
+    .await;
+
+    assert!(
+        hints.is_empty(),
+        "Should return no hints when no fixture has a return type"
+    );
+}
+
+// ── Usage outside the requested range is filtered ─────────────────────────
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_inlay_hint_filters_usage_outside_range() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    open_file(
+        &backend,
+        turi("test_ih_range", "conftest.py"),
+        "import pytest\n\n@pytest.fixture\ndef my_fixture() -> int:\n    return 42\n",
+    )
+    .await;
+
+    // Test function is on LSP line 2 (1-based internal line 3)
+    open_file(
+        &backend,
+        turi("test_ih_range", "test_foo.py"),
+        "\n\ndef test_foo(my_fixture):\n    pass\n",
+    )
+    .await;
+
+    // Request a range that ends before the test function (lines 0-1 only)
+    let hints = get_hints(
+        &backend,
+        turi("test_ih_range", "test_foo.py"),
+        rng(0, 0, 1, 0),
+    )
+    .await;
+
+    assert!(
+        hints.is_empty(),
+        "Should return no hints when the range does not cover the test function"
+    );
+}
+
+// ── Already-annotated parameter is skipped ────────────────────────────────
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_inlay_hint_skips_already_annotated_param() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    open_file(
+        &backend,
+        turi("test_ih_ann", "conftest.py"),
+        "import pytest\n\n@pytest.fixture\ndef my_fixture() -> int:\n    return 42\n",
+    )
+    .await;
+
+    // Parameter already has a type annotation — hint must be suppressed
+    open_file(
+        &backend,
+        turi("test_ih_ann", "test_foo.py"),
+        "def test_foo(my_fixture: int):\n    pass\n",
+    )
+    .await;
+
+    let hints = get_hints(
+        &backend,
+        turi("test_ih_ann", "test_foo.py"),
+        rng(0, 0, 10, 0),
+    )
+    .await;
+
+    assert!(
+        hints.is_empty(),
+        "Should skip parameters that already carry a type annotation"
+    );
+}
+
+// ── Type is adapted to the consumer's import style ────────────────────────
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_inlay_hint_adapts_dotted_type_to_consumer_from_import() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    // Fixture returns `pathlib.Path` (dotted form used in conftest)
+    open_file(
+        &backend,
+        turi("test_ih_adapt", "conftest.py"),
+        "import pytest\nimport pathlib\n\n@pytest.fixture\ndef pth() -> pathlib.Path:\n    return pathlib.Path('.')\n",
+    )
+    .await;
+
+    // Consumer already has `from pathlib import Path` → hint should show `: Path`
+    open_file(
+        &backend,
+        turi("test_ih_adapt", "test_foo.py"),
+        "from pathlib import Path\n\ndef test_foo(pth):\n    pass\n",
+    )
+    .await;
+
+    let hints = get_hints(
+        &backend,
+        turi("test_ih_adapt", "test_foo.py"),
+        rng(0, 0, 10, 0),
+    )
+    .await;
+
+    assert_eq!(hints.len(), 1, "Should return one hint");
+    match &hints[0].label {
+        InlayHintLabel::String(label) => assert_eq!(
+            label, ": Path",
+            "Dotted type should be shortened to match consumer's from-import"
+        ),
+        _ => panic!("Expected String label"),
+    }
+}
+
+// ── Multiple fixtures: only typed ones get hints ──────────────────────────
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_inlay_hint_multiple_fixtures_only_typed_get_hints() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    open_file(
+        &backend,
+        turi("test_ih_multi", "conftest.py"),
+        "import pytest\n\n@pytest.fixture\ndef typed_fix() -> str:\n    return 'hi'\n\n@pytest.fixture\ndef untyped_fix():\n    return 42\n",
+    )
+    .await;
+
+    open_file(
+        &backend,
+        turi("test_ih_multi", "test_foo.py"),
+        "def test_foo(typed_fix, untyped_fix):\n    pass\n",
+    )
+    .await;
+
+    let hints = get_hints(
+        &backend,
+        turi("test_ih_multi", "test_foo.py"),
+        rng(0, 0, 5, 0),
+    )
+    .await;
+
+    assert_eq!(
+        hints.len(),
+        1,
+        "Should return a hint only for the typed fixture"
+    );
+    match &hints[0].label {
+        InlayHintLabel::String(label) => assert_eq!(label, ": str"),
+        _ => panic!("Expected String label"),
+    }
+}
+
+// ── File known to the backend but not yet in the usages map ───────────────
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_inlay_hint_returns_none_when_file_has_no_usages() {
+    // A file URI that resolves to a path but has never been analysed →
+    // `usages.get` returns None and `handle_inlay_hint` returns Ok(None).
+    let backend = make_backend();
+    let result = backend
+        .inlay_hint(InlayHintParams {
+            text_document: TextDocumentIdentifier {
+                uri: turi("test_ih_no_usages", "test_unknown.py"),
+            },
+            range: rng(0, 0, 100, 0),
+            work_done_progress_params: wdp(),
+        })
+        .await;
+    assert!(result.is_ok());
+    // Either None or Some(empty) is acceptable — the key check is no panic/error
+    let inner = result.unwrap();
+    assert!(
+        inner.is_none() || inner.unwrap().is_empty(),
+        "Un-analysed file should produce no hints"
+    );
+}
+
+// ── Hint position is at the end of the parameter name ─────────────────────
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_inlay_hint_position_is_at_end_of_param_name() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    open_file(
+        &backend,
+        turi("test_ih_pos", "conftest.py"),
+        "import pytest\n\n@pytest.fixture\ndef db_fix() -> bool:\n    return True\n",
+    )
+    .await;
+
+    // `db_fix` starts at column 13 (after `def test_foo(`), length 6
+    open_file(
+        &backend,
+        turi("test_ih_pos", "test_foo.py"),
+        "def test_foo(db_fix):\n    pass\n",
+    )
+    .await;
+
+    let hints = get_hints(
+        &backend,
+        turi("test_ih_pos", "test_foo.py"),
+        rng(0, 0, 5, 0),
+    )
+    .await;
+
+    assert_eq!(hints.len(), 1);
+    // Hint must be on LSP line 0 (first line of the file)
+    assert_eq!(hints[0].position.line, 0);
+    // Character position must be past the end of `db_fix` (13 + 6 = 19)
+    assert_eq!(
+        hints[0].position.character, 19,
+        "Hint should be placed right after the parameter name"
+    );
+}
+
 // ── prepare_call_hierarchy ────────────────────────────────────────────────
 
 #[tokio::test]

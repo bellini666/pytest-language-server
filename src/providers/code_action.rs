@@ -473,46 +473,24 @@ impl Backend {
                 };
 
                 // ── Build the parameter insertion TextEdit ───────────────────
-                let function_line = Self::internal_line_to_lsp(fixture.function_line);
-
-                let Some(func_line_content) = lines.get(function_line as usize) else {
+                // Delegate to get_function_param_insertion_info which uses an
+                // AST-first approach and correctly handles multi-line signatures
+                // and return-type annotations (`-> T:`).
+                let Some(insertion) = self
+                    .fixture_db
+                    .get_function_param_insertion_info(&file_path, fixture.function_line)
+                else {
                     warn!(
-                        "Function line {} is out of range in {:?}",
-                        function_line, file_path
+                        "Could not find parameter insertion point for '{}' at {:?}:{}",
+                        fixture.name, file_path, fixture.function_line
                     );
                     continue;
                 };
 
-                // Locate the closing `):` of the function signature.
-                let Some(paren_pos) = func_line_content.find("):") else {
-                    continue;
-                };
+                let insert_line = Self::internal_line_to_lsp(insertion.line);
+                let insert_char = insertion.char_pos as u32;
 
-                if !func_line_content[..paren_pos].contains('(') {
-                    continue;
-                }
-
-                let param_start = match func_line_content.find('(') {
-                    Some(pos) => pos + 1,
-                    None => {
-                        warn!(
-                            "Invalid function signature at {:?}:{}",
-                            file_path, function_line
-                        );
-                        continue;
-                    }
-                };
-
-                let params_section = &func_line_content[param_start..paren_pos];
-                let has_params = !params_section.trim().is_empty();
-
-                let (insert_line, insert_char) = if has_params {
-                    (function_line, paren_pos as u32)
-                } else {
-                    (function_line, param_start as u32)
-                };
-
-                let param_text = if has_params {
+                let param_text = if insertion.needs_comma {
                     format!(", {}{}", fixture.name, type_suffix)
                 } else {
                     format!("{}{}", fixture.name, type_suffix)

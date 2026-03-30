@@ -2184,6 +2184,158 @@ def test_multiline(
         info.is_some(),
         "Should find insertion info for multiline signature"
     );
+    let info = info.unwrap();
+    assert!(info.needs_comma, "Multiline with params should need comma");
+    assert_eq!(info.line, 5, "Closing paren should be on line 5");
+    assert_eq!(info.char_pos, 0, "Closing paren should be at column 0");
+}
+
+#[test]
+#[timeout(30000)]
+fn test_get_function_param_insertion_info_return_annotation() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    // Return annotation `-> T:` must NOT confuse the `)` finder — the old
+    // `"):"`  search would fail here because `) -> int:` doesn't contain `):`.
+    let content = r#"
+def test_with_return(existing) -> int:
+    pass
+"#;
+    let file_path = PathBuf::from("/tmp/project/test_return_ann.py");
+    db.analyze_file(file_path.clone(), content);
+
+    let info = db.get_function_param_insertion_info(&file_path, 2);
+    assert!(
+        info.is_some(),
+        "Should find insertion info for signature with return annotation"
+    );
+    let info = info.unwrap();
+    assert!(
+        info.needs_comma,
+        "Should need comma (existing param present)"
+    );
+    assert_eq!(info.line, 2, "Should be on line 2");
+    // `)` is at position 21 in `def test_with_return(existing) -> int:`
+    // i.e. right after `existing`
+    assert_eq!(
+        info.char_pos, 29,
+        "Closing paren position in `def test_with_return(existing) -> int:`"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_get_function_param_insertion_info_empty_return_annotation() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    // Empty param list with return annotation.
+    let content = r#"
+def test_no_params() -> None:
+    pass
+"#;
+    let file_path = PathBuf::from("/tmp/project/test_empty_return_ann.py");
+    db.analyze_file(file_path.clone(), content);
+
+    let info = db.get_function_param_insertion_info(&file_path, 2);
+    assert!(
+        info.is_some(),
+        "Should find insertion info for empty-param signature with return annotation"
+    );
+    let info = info.unwrap();
+    assert!(
+        !info.needs_comma,
+        "Should not need comma (no existing params)"
+    );
+    assert_eq!(info.line, 2);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_get_function_param_insertion_info_multiline_return_annotation() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    // Multi-line signature AND a return annotation — both issues at once.
+    let content = r#"
+def test_multiline_return(
+    first_param,
+    second_param,
+) -> int:
+    pass
+"#;
+    let file_path = PathBuf::from("/tmp/project/test_ml_return_ann.py");
+    db.analyze_file(file_path.clone(), content);
+
+    let info = db.get_function_param_insertion_info(&file_path, 2);
+    assert!(
+        info.is_some(),
+        "Should find insertion info for multi-line signature with return annotation"
+    );
+    let info = info.unwrap();
+    assert!(info.needs_comma, "Should need comma (has existing params)");
+    assert_eq!(info.line, 5, "Closing paren should be on line 5");
+    assert_eq!(info.char_pos, 0, "Closing paren should be at column 0");
+}
+
+#[test]
+#[timeout(30000)]
+fn test_get_function_param_insertion_info_class_method() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    // Test method inside a class — requires recursive AST walk into ClassDef.
+    let content = r#"
+class TestFoo:
+    def test_method(self, existing):
+        pass
+"#;
+    let file_path = PathBuf::from("/tmp/project/test_class_method.py");
+    db.analyze_file(file_path.clone(), content);
+
+    // `def test_method` is on line 3 (1-indexed).
+    let info = db.get_function_param_insertion_info(&file_path, 3);
+    assert!(
+        info.is_some(),
+        "Should find insertion info for a test method inside a class"
+    );
+    let info = info.unwrap();
+    assert!(
+        info.needs_comma,
+        "Should need comma (self and existing_param are present)"
+    );
+    assert_eq!(info.line, 3, "Closing paren should be on line 3");
+}
+
+#[test]
+#[timeout(30000)]
+fn test_get_function_param_insertion_info_nested_parens_in_default() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    // Default value contains nested parens — the scanner must not stop at the
+    // inner `)` of `list()`.
+    let content = r#"
+def test_nested(x=list()):
+    pass
+"#;
+    let file_path = PathBuf::from("/tmp/project/test_nested_parens.py");
+    db.analyze_file(file_path.clone(), content);
+
+    let info = db.get_function_param_insertion_info(&file_path, 2);
+    assert!(
+        info.is_some(),
+        "Should find insertion info when default value has nested parens"
+    );
+    let info = info.unwrap();
+    assert!(info.needs_comma, "Should need comma (param present)");
+    assert_eq!(info.line, 2);
 }
 
 // ============================================================================

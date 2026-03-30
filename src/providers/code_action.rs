@@ -29,10 +29,13 @@
 //!   imports into full conformance with your project's configuration.
 
 use super::Backend;
-use crate::fixtures::is_stdlib_module;
+use crate::fixtures::import_analysis::{
+    adapt_type_for_consumer, can_merge_into, classify_import_statement,
+    find_sorted_insert_position, import_line_sort_key, import_sort_key, parse_import_layout,
+    ImportGroup, ImportKind, ImportLayout,
+};
 use crate::fixtures::string_utils::parameter_has_annotation;
 use crate::fixtures::types::TypeImportSpec;
-use rustpython_parser::ast::Mod;
 use std::collections::{HashMap, HashSet};
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
@@ -48,130 +51,6 @@ const SOURCE_PYTEST_LSP: CodeActionKind = CodeActionKind::new("source.pytest-lsp
 
 /// File-wide: add all missing fixture type annotations + imports.
 const SOURCE_FIX_ALL_PYTEST_LSP: CodeActionKind = CodeActionKind::new("source.fixAll.pytest-lsp");
-
-// ── Import classification (isort groups) ─────────────────────────────────────
-
-/// Whether an import belongs to the stdlib group or the third-party group.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ImportKind {
-    Stdlib,
-    ThirdParty,
-}
-
-/// A contiguous block of module-level import lines, separated from other
-/// blocks by blank lines.
-#[derive(Debug)]
-struct ImportGroup {
-    /// 0-based index of the first import line in this group.
-    first_line: usize,
-    /// 0-based index of the last import line in this group.
-    last_line: usize,
-    /// Classification based on the first import in the group.
-    kind: ImportKind,
-}
-
-/// Extract the top-level package name from an import line.
-///
-/// - `"from typing import Any"`         → `"typing"`
-/// - `"from collections.abc import X"`  → `"collections"`
-/// - `"import pathlib"`                 → `"pathlib"`
-/// - `"import os.path"`                 → `"os"`
-fn extract_top_level_module(line: &str) -> &str {
-    let trimmed = line.trim();
-    let module_str = if let Some(rest) = trimmed.strip_prefix("from ") {
-        rest.split_whitespace().next().unwrap_or("")
-    } else if let Some(rest) = trimmed.strip_prefix("import ") {
-        rest.split_whitespace().next().unwrap_or("")
-    } else {
-        return "";
-    };
-    // "collections.abc" → "collections", "os.path" → "os"
-    module_str.split('.').next().unwrap_or("")
-}
-
-/// Classify an import statement string as stdlib or third-party.
-fn classify_import_statement(statement: &str) -> ImportKind {
-    let top = extract_top_level_module(statement);
-    if is_stdlib_module(top) {
-        ImportKind::Stdlib
-    } else {
-        ImportKind::ThirdParty
-    }
-}
-
-/// Parse the top-of-file import layout into classified groups.
-///
-/// Scans from the top of the file, collecting contiguous runs of unindented
-/// `import`/`from` statements into groups separated by blank lines.  Stops at
-/// the first non-import, non-blank, non-comment line that appears **after** at
-/// least one import has been seen (so that leading docstrings are skipped).
-///
-/// Each group is classified as [`ImportKind::Stdlib`] or
-/// [`ImportKind::ThirdParty`] based on its first import line.
-fn parse_import_groups(lines: &[&str]) -> Vec<ImportGroup> {
-    let mut groups: Vec<ImportGroup> = Vec::new();
-    let mut current_start: Option<usize> = None;
-    let mut current_last: usize = 0;
-    let mut current_kind = ImportKind::ThirdParty;
-    let mut seen_any_import = false;
-
-    for (i, &line) in lines.iter().enumerate() {
-        // Module-level (unindented) import.
-        if line.starts_with("import ") || line.starts_with("from ") {
-            seen_any_import = true;
-            if current_start.is_none() {
-                current_start = Some(i);
-                let module = extract_top_level_module(line);
-                current_kind = if is_stdlib_module(module) {
-                    ImportKind::Stdlib
-                } else {
-                    ImportKind::ThirdParty
-                };
-            }
-            current_last = i;
-            continue;
-        }
-
-        let trimmed = line.trim();
-
-        // Blank line or comment — close current group, keep scanning.
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            if let Some(start) = current_start.take() {
-                groups.push(ImportGroup {
-                    first_line: start,
-                    last_line: current_last,
-                    kind: current_kind,
-                });
-            }
-            continue;
-        }
-
-        // Non-import, non-blank line.
-        if seen_any_import {
-            // We've passed the import section — stop.
-            if let Some(start) = current_start.take() {
-                groups.push(ImportGroup {
-                    first_line: start,
-                    last_line: current_last,
-                    kind: current_kind,
-                });
-            }
-            break;
-        }
-        // Before any import: preamble (docstring, shebang value, etc.) — keep scanning.
-    }
-
-    // Close final group if file ends during imports.
-    if let Some(start) = current_start {
-        groups.push(ImportGroup {
-            first_line: start,
-            last_line: current_last,
-            kind: current_kind,
-        });
-    }
-
-    groups
-}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -200,116 +79,6 @@ fn kind_requested(only: &Option<Vec<CodeActionKind>>, action_kind: &CodeActionKi
 
 // ── Import-edit helpers (isort-aware) ────────────────────────────────────────
 
-/// Parse a `from X import Y` style import statement.
-///
-/// Returns `Some((module, name))` for `from`-imports, `None` for bare
-/// `import X` statements.
-///
-/// # Examples
-/// - `"from typing import Any"` → `Some(("typing", "Any"))`
-/// - `"from pathlib import Path as P"` → `Some(("pathlib", "Path as P"))`
-/// - `"import pathlib"` → `None`
-fn parse_from_import(statement: &str) -> Option<(&str, &str)> {
-    let rest = statement.strip_prefix("from ")?;
-    let (module, rest) = rest.split_once(" import ")?;
-    let module = module.trim();
-    let name = rest.trim();
-    if module.is_empty() || name.is_empty() {
-        return None;
-    }
-    Some((module, name))
-}
-
-/// Try to find an existing single-line `from <module> import ...` in the file.
-///
-/// Only matches **module-level** (unindented) imports — indented imports inside
-/// function/class bodies are ignored.
-///
-/// Returns `Some((line_index_0based, vec_of_existing_name_parts))` on success.
-/// Skips multi-line imports (containing `(` / `)`) and star imports (`*`).
-fn find_matching_from_import_line<'a>(
-    lines: &[&'a str],
-    module: &str,
-) -> Option<(usize, Vec<&'a str>)> {
-    let prefix = format!("from {} import ", module);
-    for (i, &line) in lines.iter().enumerate() {
-        // Only match unindented (module-level) imports.
-        if !line.starts_with(&prefix) {
-            continue;
-        }
-        let trimmed = line.trim();
-        // Skip multi-line and star imports.
-        if trimmed.contains('(') || trimmed.contains(')') || trimmed.contains('*') {
-            continue;
-        }
-        let names_part = &trimmed[prefix.len()..];
-        let names: Vec<&str> = names_part.split(',').map(|s| s.trim()).collect();
-        if names.iter().all(|n| !n.is_empty()) {
-            return Some((i, names));
-        }
-    }
-    None
-}
-
-/// Extract the sort key from an import name part.
-///
-/// For `"Path"` returns `"Path"`.
-/// For `"Path as P"` returns `"Path"` (isort sorts by the original name).
-fn import_sort_key(name: &str) -> &str {
-    match name.find(" as ") {
-        Some(pos) => name[..pos].trim(),
-        None => name.trim(),
-    }
-}
-
-/// Sort key for an entire import **line**, following isort/ruff conventions:
-///
-/// 1. Bare imports (`import X`) sort **before** from-imports (`from X import Y`).
-/// 2. Within each category, sort alphabetically by the full dotted module path
-///    (case-insensitive).
-///
-/// Returns `(category, lowercased_module)` where category `0` = bare, `1` = from.
-fn import_line_sort_key(line: &str) -> (u8, String) {
-    let trimmed = line.trim();
-    if let Some(rest) = trimmed.strip_prefix("import ") {
-        // "import pathlib as pl" → module "pathlib"
-        let module = rest.split_whitespace().next().unwrap_or("");
-        (0, module.to_lowercase())
-    } else if let Some(rest) = trimmed.strip_prefix("from ") {
-        // "from collections.abc import Sequence" → module "collections.abc"
-        let module = rest.split(" import ").next().unwrap_or("").trim();
-        (1, module.to_lowercase())
-    } else {
-        (2, String::new())
-    }
-}
-
-/// Find the correct sorted insertion line for a new import within an existing
-/// group, so that the result stays isort-sorted (bare before from, alphabetical
-/// by module within each sub-category).
-///
-/// Returns the 0-based line number at which a point-insert should be placed.
-/// When the new import sorts after every existing line in the group, the
-/// position is `group.last_line + 1`.
-fn find_sorted_insert_position(
-    lines: &[&str],
-    group: &ImportGroup,
-    sort_key: &(u8, String),
-) -> u32 {
-    for (i, line) in lines
-        .iter()
-        .enumerate()
-        .take(group.last_line + 1)
-        .skip(group.first_line)
-    {
-        let existing_key = import_line_sort_key(line);
-        if *sort_key < existing_key {
-            return i as u32;
-        }
-    }
-    (group.last_line + 1) as u32
-}
-
 /// Emit `TextEdit`s for a set of from-imports and bare imports, trying to
 /// merge from-imports into existing lines before falling back to insertion.
 ///
@@ -317,9 +86,9 @@ fn find_sorted_insert_position(
 /// isort-sorted position within the group.  When `None`, all new lines are
 /// inserted at `fallback_insert_line`.
 fn emit_kind_import_edits(
-    lines: &[&str],
-    from_imports: &HashMap<String, Vec<String>>,
-    bare_imports: &[String],
+    layout: &ImportLayout,
+    new_from_imports: &HashMap<String, Vec<String>>,
+    new_bare_imports: &[String],
     group: Option<&ImportGroup>,
     fallback_insert_line: u32,
     edits: &mut Vec<TextEdit>,
@@ -327,48 +96,58 @@ fn emit_kind_import_edits(
     // ── Pass 1: merge from-imports into existing lines where possible ────
     let mut unmerged_from: Vec<(String, Vec<String>)> = Vec::new();
 
-    let mut modules: Vec<&String> = from_imports.keys().collect();
+    let mut modules: Vec<&String> = new_from_imports.keys().collect();
     modules.sort();
 
+    let line_strs = layout.line_strs();
+
     for module in modules {
-        let new_names = &from_imports[module];
+        let new_names = &new_from_imports[module];
 
-        if let Some((line_idx, existing_names)) = find_matching_from_import_line(lines, module) {
-            // Merge into the existing line.
-            let mut all_names: Vec<String> = existing_names.iter().map(|s| s.to_string()).collect();
-            for n in new_names {
-                if !all_names.iter().any(|existing| existing.trim() == n.trim()) {
-                    all_names.push(n.clone());
+        if let Some(fi) = layout.find_matching_from_import(module) {
+            if can_merge_into(fi) {
+                // Merge new names into the existing import.
+                // For multiline imports (AST path), fi.name_strings() returns
+                // the correct names; the TextEdit replaces all lines of the block.
+                let mut all_names: Vec<String> = fi.name_strings();
+                for n in new_names {
+                    if !all_names.iter().any(|existing| existing.trim() == n.trim()) {
+                        all_names.push(n.clone());
+                    }
                 }
+                all_names.sort_by(|a, b| {
+                    import_sort_key(a)
+                        .to_lowercase()
+                        .cmp(&import_sort_key(b).to_lowercase())
+                });
+                all_names.dedup();
+
+                let merged_line = format!("from {} import {}", module, all_names.join(", "));
+                info!(
+                    "Merging import into existing line {}: {}",
+                    fi.line, merged_line
+                );
+
+                // Cover all lines of the import (same range for single-line and
+                // multiline — for single-line fi.line == fi.end_line).
+                let end_char = layout.line(fi.end_line).len() as u32;
+                edits.push(TextEdit {
+                    range: Range {
+                        start: Position {
+                            line: fi.line as u32,
+                            character: 0,
+                        },
+                        end: Position {
+                            line: fi.end_line as u32,
+                            character: end_char,
+                        },
+                    },
+                    new_text: merged_line,
+                });
+            } else {
+                // Cannot merge (string-fallback multiline without names) → insert new line.
+                unmerged_from.push((module.clone(), new_names.clone()));
             }
-            all_names.sort_by(|a, b| {
-                import_sort_key(a)
-                    .to_lowercase()
-                    .cmp(&import_sort_key(b).to_lowercase())
-            });
-            all_names.dedup();
-
-            let merged_line = format!("from {} import {}", module, all_names.join(", "));
-            info!(
-                "Merging import into existing line {}: {}",
-                line_idx, merged_line
-            );
-
-            let original_line = lines[line_idx];
-            let line_len = original_line.len() as u32;
-            edits.push(TextEdit {
-                range: Range {
-                    start: Position {
-                        line: line_idx as u32,
-                        character: 0,
-                    },
-                    end: Position {
-                        line: line_idx as u32,
-                        character: line_len,
-                    },
-                },
-                new_text: merged_line,
-            });
         } else {
             unmerged_from.push((module.clone(), new_names.clone()));
         }
@@ -387,7 +166,7 @@ fn emit_kind_import_edits(
     let mut new_imports: Vec<NewImport> = Vec::new();
 
     // Bare imports.
-    for stmt in bare_imports {
+    for stmt in new_bare_imports {
         new_imports.push(NewImport {
             sort_key: import_line_sort_key(stmt),
             text: stmt.clone(),
@@ -415,7 +194,7 @@ fn emit_kind_import_edits(
 
     for ni in &new_imports {
         let insert_line = match group {
-            Some(g) => find_sorted_insert_position(lines, g, &ni.sort_key),
+            Some(g) => find_sorted_insert_position(&line_strs, g, &ni.sort_key),
             None => fallback_insert_line,
         };
         info!("Adding new import line at {}: {}", insert_line, ni.text);
@@ -426,184 +205,7 @@ fn emit_kind_import_edits(
     }
 }
 
-/// Find a bare-import entry in the consumer's import map for a given module.
-///
-/// Scans all specs looking for `import <module>` or `import <module> as <alias>`.
-/// Returns the consumer's `check_name` for that module (which may be an alias).
-fn find_consumer_bare_import<'a>(
-    consumer_import_map: &'a HashMap<String, TypeImportSpec>,
-    module: &str,
-) -> Option<&'a str> {
-    for spec in consumer_import_map.values() {
-        if let Some(rest) = spec.import_statement.strip_prefix("import ") {
-            let module_part = rest.split(" as ").next().unwrap_or("").trim();
-            if module_part == module {
-                return Some(&spec.check_name);
-            }
-        }
-    }
-    None
-}
-
-/// Adapt a fixture's return-type annotation and import specs to the consumer
-/// file's existing import context.
-///
-/// Two adaptations are performed:
-///
-/// 1. **Dotted → short** — when a fixture uses a bare `import` (e.g.
-///    `import pathlib`) producing `pathlib.Path`, and the consumer already has
-///    `from pathlib import Path`, the annotation is shortened to `Path` and the
-///    bare-import spec is dropped.
-///
-/// 2. **Short → dotted** — when a fixture uses `from X import Y` producing the
-///    short name `Y`, and the consumer already has `import X` (bare), the
-///    annotation is lengthened to `X.Y` and the from-import spec is dropped,
-///    respecting the consumer's import style.
-///
-/// Returns `(adapted_type_string, remaining_import_specs)`.
-fn adapt_type_for_consumer(
-    return_type: &str,
-    fixture_imports: &[TypeImportSpec],
-    consumer_import_map: &HashMap<String, TypeImportSpec>,
-) -> (String, Vec<TypeImportSpec>) {
-    let mut adapted = return_type.to_string();
-    let mut remaining = Vec::new();
-
-    for spec in fixture_imports {
-        if spec.import_statement.starts_with("import ") {
-            // ── Case 1: bare-import spec → try dotted-to-short rewrite ───
-            let bare_module = spec
-                .import_statement
-                .strip_prefix("import ")
-                .unwrap()
-                .split(" as ")
-                .next()
-                .unwrap_or("")
-                .trim();
-
-            if bare_module.is_empty() {
-                remaining.push(spec.clone());
-                continue;
-            }
-
-            // Look for `check_name.Name` patterns in the type string.
-            let prefix = format!("{}.", spec.check_name);
-            if !adapted.contains(&prefix) {
-                remaining.push(spec.clone());
-                continue;
-            }
-
-            // Collect every `check_name.Name` occurrence and verify that the
-            // consumer already imports `Name` from the same module.
-            let mut rewrites: Vec<(String, String)> = Vec::new(); // (dotted, short)
-            let mut all_rewritable = true;
-            let mut pos = 0;
-
-            while let Some(hit) = adapted[pos..].find(&prefix) {
-                let abs = pos + hit;
-
-                // Guard against partial matches (e.g. `mypathlib.X` matching `pathlib.`)
-                if abs > 0 {
-                    let prev = adapted.as_bytes()[abs - 1];
-                    if prev.is_ascii_alphanumeric() || prev == b'_' {
-                        pos = abs + prefix.len();
-                        continue;
-                    }
-                }
-
-                let name_start = abs + prefix.len();
-                let rest = &adapted[name_start..];
-                let name_end = rest
-                    .find(|c: char| !c.is_alphanumeric() && c != '_')
-                    .unwrap_or(rest.len());
-                let name = &rest[..name_end];
-
-                if name.is_empty() {
-                    pos = name_start;
-                    continue;
-                }
-
-                // Check the consumer's import map for this name.
-                if let Some(consumer_spec) = consumer_import_map.get(name) {
-                    let expected = format!("from {} import", bare_module);
-                    if consumer_spec.import_statement.starts_with(&expected) {
-                        let dotted = format!("{}.{}", spec.check_name, name);
-                        if !rewrites.iter().any(|(d, _)| d == &dotted) {
-                            rewrites.push((dotted, consumer_spec.check_name.clone()));
-                        }
-                    } else {
-                        // Name imported from a different module — can't safely rewrite.
-                        all_rewritable = false;
-                        break;
-                    }
-                } else {
-                    // Name not in consumer's import map — can't rewrite.
-                    all_rewritable = false;
-                    break;
-                }
-
-                pos = name_start + name_end;
-            }
-
-            if all_rewritable && !rewrites.is_empty() {
-                for (dotted, short) in &rewrites {
-                    adapted = adapted.replace(dotted.as_str(), short.as_str());
-                }
-                info!(
-                    "Adapted type '{}' → '{}' (consumer already imports short names)",
-                    return_type, adapted
-                );
-            } else {
-                // Full-or-nothing: if any dotted name in the type string cannot
-                // be safely rewritten to a short form (because it is absent from
-                // the consumer's import map or imported from a different module),
-                // keep the bare-import spec as-is rather than producing a
-                // partially-rewritten type string that mixes dotted and short
-                // notation (e.g. `pathlib.Path | PurePath`).
-                remaining.push(spec.clone());
-            }
-        } else if let Some((module, name_part)) = parse_from_import(&spec.import_statement) {
-            // ── Case 2: from-import spec → try short-to-dotted rewrite ───
-            //
-            // The fixture uses `from X import Y` so the type string contains
-            // the short name `Y`.  If the consumer already has `import X`
-            // (bare), we rewrite `Y` → `X.Y` and drop the from-import.
-
-            // Handle `from X import Y as Z` — the original name is `Y`, the
-            // check_name (used in the type string) is `Z`.
-            let original_name = name_part.split(" as ").next().unwrap_or(name_part).trim();
-
-            if let Some(consumer_module_name) =
-                find_consumer_bare_import(consumer_import_map, module)
-            {
-                let dotted = format!("{}.{}", consumer_module_name, original_name);
-                let new_adapted = crate::fixtures::string_utils::replace_identifier(
-                    &adapted,
-                    &spec.check_name,
-                    &dotted,
-                );
-                if new_adapted != adapted {
-                    info!(
-                        "Adapted type: '{}' → '{}' (consumer has bare import for '{}')",
-                        spec.check_name, dotted, module
-                    );
-                    adapted = new_adapted;
-                    // Drop the from-import spec — consumer's bare import covers it.
-                } else {
-                    // The check_name wasn't found as a standalone identifier in
-                    // the type string (word-boundary mismatch).  Keep the spec.
-                    remaining.push(spec.clone());
-                }
-            } else {
-                remaining.push(spec.clone());
-            }
-        } else {
-            remaining.push(spec.clone());
-        }
-    }
-
-    (adapted, remaining)
-}
+// ── Import-edit helpers ───────────────────────────────────────────────────────
 
 /// Build `TextEdit`s to add import statements, respecting isort-style grouping.
 ///
@@ -613,11 +215,11 @@ fn adapt_type_for_consumer(
 /// necessary).  Within a group, from-imports for the same module are merged
 /// into a single line with names sorted alphabetically.
 fn build_import_edits(
-    lines: &[&str],
+    layout: &ImportLayout,
     specs: &[&TypeImportSpec],
     existing_imports: &HashSet<String>,
 ) -> Vec<TextEdit> {
-    let groups = parse_import_groups(lines);
+    let groups = &layout.groups;
 
     // 1. Filter already-imported specs, deduplicate, and classify.
     let mut stdlib_from: HashMap<String, Vec<String>> = HashMap::new();
@@ -637,21 +239,27 @@ fn build_import_edits(
 
         let kind = classify_import_statement(&spec.import_statement);
 
-        if let Some((module, name)) = parse_from_import(&spec.import_statement) {
-            match kind {
-                ImportKind::Stdlib => &mut stdlib_from,
-                ImportKind::ThirdParty => &mut tp_from,
+        if let Some(rest) = spec.import_statement.strip_prefix("from ") {
+            if let Some((module, name)) = rest.split_once(" import ") {
+                let module = module.trim();
+                let name = name.trim();
+                if !module.is_empty() && !name.is_empty() {
+                    match kind {
+                        ImportKind::Future | ImportKind::Stdlib => &mut stdlib_from,
+                        ImportKind::ThirdParty => &mut tp_from,
+                    }
+                    .entry(module.to_string())
+                    .or_default()
+                    .push(name.to_string());
+                    continue;
+                }
             }
-            .entry(module.to_string())
-            .or_default()
-            .push(name.to_string());
-        } else {
-            match kind {
-                ImportKind::Stdlib => &mut stdlib_bare,
-                ImportKind::ThirdParty => &mut tp_bare,
-            }
-            .push(spec.import_statement.clone());
         }
+        match kind {
+            ImportKind::Future | ImportKind::Stdlib => &mut stdlib_bare,
+            ImportKind::ThirdParty => &mut tp_bare,
+        }
+        .push(spec.import_statement.clone());
     }
 
     let has_new_stdlib = !stdlib_from.is_empty() || !stdlib_bare.is_empty();
@@ -674,13 +282,20 @@ fn build_import_edits(
     //    (as opposed to only merging into existing `from X import …` lines).
     //    Separators are only needed when new lines appear — merging into an
     //    existing line doesn't change the group layout.
-    let will_insert_stdlib = stdlib_from
-        .keys()
-        .any(|m| find_matching_from_import_line(lines, m).is_none())
-        || !stdlib_bare.is_empty();
+    let will_insert_stdlib =
+        stdlib_from
+            .keys()
+            .any(|m| match layout.find_matching_from_import(m) {
+                None => true,
+                Some(fi) => !can_merge_into(fi),
+            })
+            || !stdlib_bare.is_empty();
     let will_insert_tp = tp_from
         .keys()
-        .any(|m| find_matching_from_import_line(lines, m).is_none())
+        .any(|m| match layout.find_matching_from_import(m) {
+            None => true,
+            Some(fi) => !can_merge_into(fi),
+        })
         || !tp_bare.is_empty();
 
     let mut edits: Vec<TextEdit> = Vec::new();
@@ -694,7 +309,7 @@ fn build_import_edits(
         };
 
         emit_kind_import_edits(
-            lines,
+            layout,
             &stdlib_from,
             &stdlib_bare,
             last_stdlib_group,
@@ -704,11 +319,6 @@ fn build_import_edits(
 
         // Trailing separator when inserting a new stdlib group before an
         // *existing* third-party group.
-        // NOTE: this separator and the stdlib import lines above may share the
-        // same insertion position (e.g. both at line 0 when there are no
-        // existing imports).  The LSP spec guarantees that multiple TextEdits
-        // at the same position are applied in array order, so the separator
-        // always lands after the stdlib lines as intended.
         if will_insert_stdlib && last_stdlib_group.is_none() && first_tp_group.is_some() {
             edits.push(TextEdit {
                 range: Backend::create_point_range(fallback_line, 0),
@@ -727,9 +337,6 @@ fn build_import_edits(
 
         // Leading separator when inserting a new third-party group after
         // an existing or newly-created stdlib group.
-        // Same LSP array-order guarantee applies: the separator is pushed
-        // before the third-party import lines so it appears first at the
-        // shared insertion position.
         if will_insert_tp
             && last_tp_group.is_none()
             && (last_stdlib_group.is_some() || will_insert_stdlib)
@@ -741,7 +348,7 @@ fn build_import_edits(
         }
 
         emit_kind_import_edits(
-            lines,
+            layout,
             &tp_from,
             &tp_bare,
             last_tp_group,
@@ -797,18 +404,12 @@ impl Backend {
         // Build a name→TypeImportSpec map for the consumer (test) file so we
         // can detect when the file already imports a name that appears in a
         // dotted form in a fixture's return type (e.g. `pathlib.Path` → `Path`).
-        let consumer_import_map: HashMap<String, TypeImportSpec> =
-            match self.fixture_db.get_parsed_ast(&file_path, &content) {
-                Some(ast) => {
-                    if let Mod::Module(module) = ast.as_ref() {
-                        self.fixture_db
-                            .build_name_to_import_map(&module.body, &file_path)
-                    } else {
-                        HashMap::new()
-                    }
-                }
-                None => HashMap::new(),
-            };
+        // Cached by content hash — reused across code-action and inlay-hint requests.
+        let consumer_import_map = self.fixture_db.get_name_to_import_map(&file_path, &content);
+
+        // Parse the import layout once for this request (groups + individual
+        // import entries).  Used by build_import_edits for all three action kinds.
+        let layout = parse_import_layout(&content);
 
         let mut actions: Vec<CodeActionOrCommand> = Vec::new();
 
@@ -919,7 +520,7 @@ impl Backend {
 
                 // ── Build import + parameter edits ───────────────────────────
                 let spec_refs: Vec<&TypeImportSpec> = return_type_imports.iter().collect();
-                let mut all_edits = build_import_edits(&lines, &spec_refs, &existing_imports);
+                let mut all_edits = build_import_edits(&layout, &spec_refs, &existing_imports);
 
                 // Parameter insertion goes last so that line numbers for earlier
                 // import edits remain valid (imports are above the function).
@@ -1032,7 +633,7 @@ impl Backend {
                             // ── Build TextEdits ──────────────────────────────
                             let spec_refs: Vec<&TypeImportSpec> = adapted_imports.iter().collect();
                             let mut all_edits =
-                                build_import_edits(&lines, &spec_refs, &existing_imports);
+                                build_import_edits(&layout, &spec_refs, &existing_imports);
 
                             let lsp_line = Self::internal_line_to_lsp(usage.line);
                             all_edits.push(TextEdit {
@@ -1123,7 +724,7 @@ impl Backend {
                             let spec_refs: Vec<&TypeImportSpec> =
                                 all_adapted_imports.iter().collect();
                             let mut all_edits =
-                                build_import_edits(&lines, &spec_refs, &existing_imports);
+                                build_import_edits(&layout, &spec_refs, &existing_imports);
                             all_edits.extend(annotation_edits);
 
                             let ws_edit = WorkspaceEdit {
@@ -1173,186 +774,13 @@ impl Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fixtures::import_analysis::parse_import_layout;
 
-    // ── extract_top_level_module tests ────────────────────────────────────
+    // ── helper ───────────────────────────────────────────────────────────
 
-    #[test]
-    fn test_extract_top_level_module_from_import() {
-        assert_eq!(extract_top_level_module("from typing import Any"), "typing");
-    }
-
-    #[test]
-    fn test_extract_top_level_module_dotted() {
-        assert_eq!(
-            extract_top_level_module("from collections.abc import Sequence"),
-            "collections"
-        );
-    }
-
-    #[test]
-    fn test_extract_top_level_module_bare() {
-        assert_eq!(extract_top_level_module("import pathlib"), "pathlib");
-    }
-
-    #[test]
-    fn test_extract_top_level_module_bare_dotted() {
-        assert_eq!(extract_top_level_module("import os.path"), "os");
-    }
-
-    #[test]
-    fn test_extract_top_level_module_bare_alias() {
-        assert_eq!(extract_top_level_module("import pathlib as pl"), "pathlib");
-    }
-
-    #[test]
-    fn test_extract_top_level_module_non_import() {
-        assert_eq!(extract_top_level_module("x = 1"), "");
-    }
-
-    // ── classify_import_statement tests ──────────────────────────────────
-
-    #[test]
-    fn test_classify_stdlib() {
-        assert_eq!(
-            classify_import_statement("from typing import Any"),
-            ImportKind::Stdlib
-        );
-        assert_eq!(
-            classify_import_statement("import pathlib"),
-            ImportKind::Stdlib
-        );
-        assert_eq!(
-            classify_import_statement("from collections.abc import Sequence"),
-            ImportKind::Stdlib
-        );
-    }
-
-    #[test]
-    fn test_classify_third_party() {
-        assert_eq!(
-            classify_import_statement("import pytest"),
-            ImportKind::ThirdParty
-        );
-        assert_eq!(
-            classify_import_statement("from myapp.db import Database"),
-            ImportKind::ThirdParty
-        );
-    }
-
-    // ── parse_import_groups tests ────────────────────────────────────────
-
-    #[test]
-    fn test_parse_groups_stdlib_and_third_party() {
-        let lines = vec![
-            "import time",
-            "",
-            "import pytest",
-            "from vcc.framework import fixture",
-            "",
-            "LOGGING_TIME = 2",
-        ];
-        let groups = parse_import_groups(&lines);
-        assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0].first_line, 0);
-        assert_eq!(groups[0].last_line, 0);
-        assert_eq!(groups[0].kind, ImportKind::Stdlib);
-        assert_eq!(groups[1].first_line, 2);
-        assert_eq!(groups[1].last_line, 3);
-        assert_eq!(groups[1].kind, ImportKind::ThirdParty);
-    }
-
-    #[test]
-    fn test_parse_groups_single_third_party() {
-        let lines = vec!["import pytest", "", "def test(): pass"];
-        let groups = parse_import_groups(&lines);
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].kind, ImportKind::ThirdParty);
-        assert_eq!(groups[0].first_line, 0);
-        assert_eq!(groups[0].last_line, 0);
-    }
-
-    #[test]
-    fn test_parse_groups_no_imports() {
-        let lines = vec!["def test(): pass"];
-        let groups = parse_import_groups(&lines);
-        assert!(groups.is_empty());
-    }
-
-    #[test]
-    fn test_parse_groups_empty_file() {
-        let groups = parse_import_groups(&[]);
-        assert!(groups.is_empty());
-    }
-
-    #[test]
-    fn test_parse_groups_with_docstring_preamble() {
-        let lines = vec![
-            r#""""Module docstring.""""#,
-            "",
-            "import pytest",
-            "from pathlib import Path",
-            "",
-            "def test(): pass",
-        ];
-        let groups = parse_import_groups(&lines);
-        // pytest is third-party, pathlib is stdlib — but they're in the same
-        // contiguous block, classified by the first import (pytest → third-party).
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].first_line, 2);
-        assert_eq!(groups[0].last_line, 3);
-        assert_eq!(groups[0].kind, ImportKind::ThirdParty);
-    }
-
-    #[test]
-    fn test_parse_groups_ignores_indented_imports() {
-        let lines = vec![
-            "import pytest",
-            "",
-            "def test():",
-            "    from .utils import helper",
-            "    import os",
-        ];
-        let groups = parse_import_groups(&lines);
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].first_line, 0);
-        assert_eq!(groups[0].last_line, 0);
-    }
-
-    #[test]
-    fn test_parse_groups_future_then_stdlib_then_third_party() {
-        let lines = vec![
-            "from __future__ import annotations",
-            "",
-            "import os",
-            "import time",
-            "",
-            "import pytest",
-            "",
-            "def test(): pass",
-        ];
-        let groups = parse_import_groups(&lines);
-        assert_eq!(groups.len(), 3);
-        assert_eq!(groups[0].kind, ImportKind::Stdlib); // __future__ is stdlib
-        assert_eq!(groups[1].kind, ImportKind::Stdlib); // os, time
-        assert_eq!(groups[2].kind, ImportKind::ThirdParty); // pytest
-    }
-
-    #[test]
-    fn test_parse_groups_with_comments_between() {
-        let lines = vec![
-            "import os",
-            "# stdlib above, third-party below",
-            "import pytest",
-            "",
-            "def test(): pass",
-        ];
-        let groups = parse_import_groups(&lines);
-        // Comment closes the first group, starts a new one.
-        assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0].kind, ImportKind::Stdlib);
-        assert_eq!(groups[0].last_line, 0);
-        assert_eq!(groups[1].kind, ImportKind::ThirdParty);
-        assert_eq!(groups[1].first_line, 2);
+    /// Build an ImportLayout from a slice of lines joined with newlines.
+    fn layout_from_lines(lines: &[&str]) -> ImportLayout {
+        parse_import_layout(&lines.join("\n"))
     }
 
     // ── kind_requested tests ─────────────────────────────────────────────
@@ -1411,124 +839,23 @@ mod tests {
         assert!(!kind_requested(&only, &SOURCE_FIX_ALL_PYTEST_LSP));
     }
 
-    // ── parse_from_import tests ──────────────────────────────────────────
-
-    #[test]
-    fn test_parse_from_import_simple() {
-        assert_eq!(
-            parse_from_import("from typing import Any"),
-            Some(("typing", "Any"))
-        );
-    }
-
-    #[test]
-    fn test_parse_from_import_with_alias() {
-        assert_eq!(
-            parse_from_import("from pathlib import Path as P"),
-            Some(("pathlib", "Path as P"))
-        );
-    }
-
-    #[test]
-    fn test_parse_from_import_deep_module() {
-        assert_eq!(
-            parse_from_import("from collections.abc import Sequence"),
-            Some(("collections.abc", "Sequence"))
-        );
-    }
-
-    #[test]
-    fn test_parse_from_import_bare_import() {
-        assert_eq!(parse_from_import("import pathlib"), None);
-    }
-
-    #[test]
-    fn test_parse_from_import_bare_import_with_alias() {
-        assert_eq!(parse_from_import("import pathlib as pl"), None);
-    }
-
-    // ── find_matching_from_import_line tests ─────────────────────────────
-
-    #[test]
-    fn test_find_matching_line_found() {
-        let lines = vec![
-            "import pytest",
-            "from typing import Optional",
-            "",
-            "def test(): pass",
-        ];
-        let result = find_matching_from_import_line(&lines, "typing");
-        assert_eq!(result, Some((1, vec!["Optional"])));
-    }
-
-    #[test]
-    fn test_find_matching_line_multiple_names() {
-        let lines = vec![
-            "from typing import Any, Optional, Union",
-            "from pathlib import Path",
-        ];
-        let result = find_matching_from_import_line(&lines, "typing");
-        assert_eq!(result, Some((0, vec!["Any", "Optional", "Union"])));
-    }
-
-    #[test]
-    fn test_find_matching_line_not_found() {
-        let lines = vec!["import pytest", "from pathlib import Path"];
-        assert_eq!(find_matching_from_import_line(&lines, "typing"), None);
-    }
-
-    #[test]
-    fn test_find_matching_line_skips_multiline() {
-        let lines = vec!["from typing import (", "    Any,", "    Optional,", ")"];
-        assert_eq!(find_matching_from_import_line(&lines, "typing"), None);
-    }
-
-    #[test]
-    fn test_find_matching_line_skips_star() {
-        let lines = vec!["from typing import *"];
-        assert_eq!(find_matching_from_import_line(&lines, "typing"), None);
-    }
-
-    #[test]
-    fn test_find_matching_line_ignores_indented() {
-        let lines = vec![
-            "import pytest",
-            "",
-            "def test():",
-            "    from typing import Any",
-        ];
-        assert_eq!(find_matching_from_import_line(&lines, "typing"), None);
-    }
-
-    // ── import_sort_key tests ────────────────────────────────────────────
-
-    #[test]
-    fn test_import_sort_key_plain() {
-        assert_eq!(import_sort_key("Path"), "Path");
-    }
-
-    #[test]
-    fn test_import_sort_key_alias() {
-        assert_eq!(import_sort_key("Path as P"), "Path");
-    }
-
     // ── build_import_edits tests ─────────────────────────────────────────
 
     #[test]
     fn test_build_import_edits_merge_into_existing() {
-        // Existing `from typing import Optional` should get `Any` merged in.
         let lines = vec![
             "import pytest",
             "from typing import Optional",
             "",
             "def test(): pass",
         ];
+        let layout = layout_from_lines(&lines);
         let spec = TypeImportSpec {
             check_name: "Any".to_string(),
             import_statement: "from typing import Any".to_string(),
         };
         let existing: HashSet<String> = HashSet::new();
-        let edits = build_import_edits(&lines, &[&spec], &existing);
+        let edits = build_import_edits(&layout, &[&spec], &existing);
 
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].range.start.line, 1);
@@ -1540,20 +867,21 @@ mod tests {
     #[test]
     fn test_build_import_edits_skips_already_imported() {
         let lines = vec!["from typing import Any"];
+        let layout = layout_from_lines(&lines);
         let spec = TypeImportSpec {
             check_name: "Any".to_string(),
             import_statement: "from typing import Any".to_string(),
         };
         let mut existing: HashSet<String> = HashSet::new();
         existing.insert("Any".to_string());
-        let edits = build_import_edits(&lines, &[&spec], &existing);
-
+        let edits = build_import_edits(&layout, &[&spec], &existing);
         assert!(edits.is_empty());
     }
 
     #[test]
     fn test_build_import_edits_merge_multiple_into_existing() {
         let lines = vec!["from typing import Union", "", "def test(): pass"];
+        let layout = layout_from_lines(&lines);
         let spec1 = TypeImportSpec {
             check_name: "Any".to_string(),
             import_statement: "from typing import Any".to_string(),
@@ -1563,8 +891,7 @@ mod tests {
             import_statement: "from typing import Optional".to_string(),
         };
         let existing: HashSet<String> = HashSet::new();
-        let edits = build_import_edits(&lines, &[&spec1, &spec2], &existing);
-
+        let edits = build_import_edits(&layout, &[&spec1, &spec2], &existing);
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].new_text, "from typing import Any, Optional, Union");
     }
@@ -1572,13 +899,13 @@ mod tests {
     #[test]
     fn test_build_import_edits_merge_preserves_alias() {
         let lines = vec!["from pathlib import Path as P", "", "def test(): pass"];
+        let layout = layout_from_lines(&lines);
         let spec = TypeImportSpec {
             check_name: "PurePath".to_string(),
             import_statement: "from pathlib import PurePath".to_string(),
         };
         let existing: HashSet<String> = HashSet::new();
-        let edits = build_import_edits(&lines, &[&spec], &existing);
-
+        let edits = build_import_edits(&layout, &[&spec], &existing);
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].new_text, "from pathlib import Path as P, PurePath");
     }
@@ -1586,6 +913,7 @@ mod tests {
     #[test]
     fn test_build_import_edits_deduplicates_specs() {
         let lines = vec!["import pytest", "", "def test(): pass"];
+        let layout = layout_from_lines(&lines);
         let spec1 = TypeImportSpec {
             check_name: "Path".to_string(),
             import_statement: "from pathlib import Path".to_string(),
@@ -1595,9 +923,7 @@ mod tests {
             import_statement: "from pathlib import Path".to_string(),
         };
         let existing: HashSet<String> = HashSet::new();
-        let edits = build_import_edits(&lines, &[&spec1, &spec2], &existing);
-
-        // Insertion + separator (stdlib before existing third-party group).
+        let edits = build_import_edits(&layout, &[&spec1, &spec2], &existing);
         let import_edits: Vec<_> = edits
             .iter()
             .filter(|e| e.new_text.contains("Path"))
@@ -1606,12 +932,77 @@ mod tests {
         assert_eq!(import_edits[0].new_text, "from pathlib import Path\n");
     }
 
-    // ── isort-group-aware insertion tests ─────────────────────────────────
+    #[test]
+    fn test_build_import_edits_merge_into_multi_name_existing() {
+        let lines = vec!["from os import path, othermodule", "", "def test(): pass"];
+        let layout = layout_from_lines(&lines);
+        let spec = TypeImportSpec {
+            check_name: "getcwd".to_string(),
+            import_statement: "from os import getcwd".to_string(),
+        };
+        let existing: HashSet<String> = HashSet::new();
+        let edits = build_import_edits(&layout, &[&spec], &existing);
+        assert_eq!(edits.len(), 1);
+        assert_eq!(
+            edits[0].new_text,
+            "from os import getcwd, othermodule, path"
+        );
+    }
+
+    #[test]
+    fn test_build_import_edits_merge_strips_comment() {
+        let lines = vec![
+            "from typing import Any  # needed for X",
+            "",
+            "def test(): pass",
+        ];
+        let layout = layout_from_lines(&lines);
+        let spec = TypeImportSpec {
+            check_name: "Optional".to_string(),
+            import_statement: "from typing import Optional".to_string(),
+        };
+        let existing: HashSet<String> = HashSet::new();
+        let edits = build_import_edits(&layout, &[&spec], &existing);
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].new_text, "from typing import Any, Optional");
+        assert!(
+            !edits[0].new_text.contains('#'),
+            "merged line must not contain the original comment"
+        );
+    }
+
+    #[test]
+    fn test_build_import_edits_multiline_import_merged() {
+        // With AST-based parsing, merging into a multiline import is now supported.
+        // The entire block (lines 0–3) should be replaced with a single merged line.
+        let lines = vec![
+            "from typing import (",
+            "    Any,",
+            "    Optional,",
+            ")",
+            "",
+            "def test(): pass",
+        ];
+        let layout = layout_from_lines(&lines);
+        let spec = TypeImportSpec {
+            check_name: "Union".to_string(),
+            import_statement: "from typing import Union".to_string(),
+        };
+        let existing: HashSet<String> = HashSet::new();
+        let edits = build_import_edits(&layout, &[&spec], &existing);
+
+        // Should merge all names into a single replacement edit.
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].range.start.line, 0);
+        assert_eq!(edits[0].range.start.character, 0);
+        assert_eq!(edits[0].range.end.line, 3);
+        assert_eq!(edits[0].new_text, "from typing import Any, Optional, Union");
+    }
+
+    // adapt tests live in src/fixtures/import_analysis.rs
 
     #[test]
     fn test_stdlib_import_into_existing_stdlib_group() {
-        // File has stdlib group (import time) and third-party group (import pytest).
-        // Adding `from typing import Any` should go into the stdlib group.
         let lines = vec![
             "import time",
             "",
@@ -1620,14 +1011,13 @@ mod tests {
             "",
             "LOGGING_TIME = 2",
         ];
+        let layout = layout_from_lines(&lines);
         let spec = TypeImportSpec {
             check_name: "Any".to_string(),
             import_statement: "from typing import Any".to_string(),
         };
         let existing: HashSet<String> = HashSet::new();
-        let edits = build_import_edits(&lines, &[&spec], &existing);
-
-        // from-import sorts after the bare `import time`, so insert at line 1.
+        let edits = build_import_edits(&layout, &[&spec], &existing);
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].range.start.line, 1);
         assert_eq!(edits[0].new_text, "from typing import Any\n");
@@ -1635,22 +1025,19 @@ mod tests {
 
     #[test]
     fn test_stdlib_import_before_third_party_when_no_stdlib_group() {
-        // File has only third-party imports. Stdlib import should go before them
-        // with a blank-line separator.
         let lines = vec![
             "import pytest",
             "from vcc.framework import fixture",
             "",
             "def test(): pass",
         ];
+        let layout = layout_from_lines(&lines);
         let spec = TypeImportSpec {
             check_name: "Any".to_string(),
             import_statement: "from typing import Any".to_string(),
         };
         let existing: HashSet<String> = HashSet::new();
-        let edits = build_import_edits(&lines, &[&spec], &existing);
-
-        // Insertion at line 0 (before third-party) + separator.
+        let edits = build_import_edits(&layout, &[&spec], &existing);
         assert_eq!(edits.len(), 2);
         assert_eq!(edits[0].new_text, "from typing import Any\n");
         assert_eq!(edits[0].range.start.line, 0);
@@ -1660,17 +1047,14 @@ mod tests {
 
     #[test]
     fn test_third_party_import_after_stdlib_when_no_tp_group() {
-        // File has only stdlib imports. Third-party import should go after them
-        // with a blank-line separator.
         let lines = vec!["import os", "import time", "", "def test(): pass"];
+        let layout = layout_from_lines(&lines);
         let spec = TypeImportSpec {
             check_name: "FlaskClient".to_string(),
             import_statement: "from flask.testing import FlaskClient".to_string(),
         };
         let existing: HashSet<String> = HashSet::new();
-        let edits = build_import_edits(&lines, &[&spec], &existing);
-
-        // Separator + insertion after stdlib group (line 1), at line 2.
+        let edits = build_import_edits(&layout, &[&spec], &existing);
         assert_eq!(edits.len(), 2);
         assert_eq!(edits[0].new_text, "\n");
         assert_eq!(edits[0].range.start.line, 2);
@@ -1680,16 +1064,14 @@ mod tests {
 
     #[test]
     fn test_third_party_import_into_existing_tp_group() {
-        // File has both groups. Third-party import goes into the tp group, sorted.
         let lines = vec!["import time", "", "import pytest", "", "def test(): pass"];
+        let layout = layout_from_lines(&lines);
         let spec = TypeImportSpec {
             check_name: "FlaskClient".to_string(),
             import_statement: "from flask.testing import FlaskClient".to_string(),
         };
         let existing: HashSet<String> = HashSet::new();
-        let edits = build_import_edits(&lines, &[&spec], &existing);
-
-        // from-import sorts after bare `import pytest`, so insert at line 3.
+        let edits = build_import_edits(&layout, &[&spec], &existing);
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].range.start.line, 3);
         assert_eq!(edits[0].new_text, "from flask.testing import FlaskClient\n");
@@ -1698,14 +1080,13 @@ mod tests {
     #[test]
     fn test_no_imports_at_all() {
         let lines = vec!["def test(): pass"];
+        let layout = layout_from_lines(&lines);
         let spec = TypeImportSpec {
             check_name: "Path".to_string(),
             import_statement: "from pathlib import Path".to_string(),
         };
         let existing: HashSet<String> = HashSet::new();
-        let edits = build_import_edits(&lines, &[&spec], &existing);
-
-        // Insert at line 0 (no groups exist).
+        let edits = build_import_edits(&layout, &[&spec], &existing);
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].range.start.line, 0);
         assert_eq!(edits[0].new_text, "from pathlib import Path\n");
@@ -1713,9 +1094,8 @@ mod tests {
 
     #[test]
     fn test_both_stdlib_and_tp_imports_no_existing_groups() {
-        // No existing imports at all. Adding both stdlib and third-party should
-        // produce stdlib first, separator, then third-party.
         let lines = vec!["def test(): pass"];
+        let layout = layout_from_lines(&lines);
         let spec_stdlib = TypeImportSpec {
             check_name: "Any".to_string(),
             import_statement: "from typing import Any".to_string(),
@@ -1725,19 +1105,15 @@ mod tests {
             import_statement: "from flask.testing import FlaskClient".to_string(),
         };
         let existing: HashSet<String> = HashSet::new();
-        let edits = build_import_edits(&lines, &[&spec_stdlib, &spec_tp], &existing);
-
-        // stdlib insertion, then tp separator + tp insertion (all at line 0).
-        // Array order: [stdlib_edit, tp_separator, tp_edit]
+        let edits = build_import_edits(&layout, &[&spec_stdlib, &spec_tp], &existing);
         assert_eq!(edits.len(), 3);
         assert_eq!(edits[0].new_text, "from typing import Any\n");
-        assert_eq!(edits[1].new_text, "\n"); // separator
+        assert_eq!(edits[1].new_text, "\n");
         assert_eq!(edits[2].new_text, "from flask.testing import FlaskClient\n");
     }
 
     #[test]
     fn test_bare_stdlib_import_sorted_within_group() {
-        // `import pathlib` should sort between `import os` and `import time`.
         let lines = vec![
             "import os",
             "import time",
@@ -1746,14 +1122,13 @@ mod tests {
             "",
             "def test(): pass",
         ];
+        let layout = layout_from_lines(&lines);
         let spec = TypeImportSpec {
             check_name: "pathlib".to_string(),
             import_statement: "import pathlib".to_string(),
         };
         let existing: HashSet<String> = HashSet::new();
-        let edits = build_import_edits(&lines, &[&spec], &existing);
-
-        // `pathlib` sorts after `os` (line 0) but before `time` (line 1).
+        let edits = build_import_edits(&layout, &[&spec], &existing);
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].range.start.line, 1);
         assert_eq!(edits[0].new_text, "import pathlib\n");
@@ -1761,16 +1136,14 @@ mod tests {
 
     #[test]
     fn test_from_import_sorts_after_bare_imports_in_group() {
-        // A from-import should go after all bare imports within the same group.
         let lines = vec!["import os", "import time", "", "def test(): pass"];
+        let layout = layout_from_lines(&lines);
         let spec = TypeImportSpec {
             check_name: "Any".to_string(),
             import_statement: "from typing import Any".to_string(),
         };
         let existing: HashSet<String> = HashSet::new();
-        let edits = build_import_edits(&lines, &[&spec], &existing);
-
-        // from-import sorts after all bare imports, so line 2 (after `import time`).
+        let edits = build_import_edits(&layout, &[&spec], &existing);
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].range.start.line, 2);
         assert_eq!(edits[0].new_text, "from typing import Any\n");
@@ -1778,8 +1151,8 @@ mod tests {
 
     #[test]
     fn test_mixed_stdlib_from_imports_grouped() {
-        // Adding two stdlib from-imports for the same module should combine them.
         let lines = vec!["import time", "", "import pytest", "", "def test(): pass"];
+        let layout = layout_from_lines(&lines);
         let spec1 = TypeImportSpec {
             check_name: "Any".to_string(),
             import_statement: "from typing import Any".to_string(),
@@ -1789,9 +1162,7 @@ mod tests {
             import_statement: "from typing import Optional".to_string(),
         };
         let existing: HashSet<String> = HashSet::new();
-        let edits = build_import_edits(&lines, &[&spec1, &spec2], &existing);
-
-        // Combined from-import sorts after `import time` (line 0), at line 1.
+        let edits = build_import_edits(&layout, &[&spec1, &spec2], &existing);
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].range.start.line, 1);
         assert_eq!(edits[0].new_text, "from typing import Any, Optional\n");
@@ -1799,7 +1170,6 @@ mod tests {
 
     #[test]
     fn test_tp_from_import_sorted_before_existing() {
-        // `from vcc import conx_canoe` should sort before `from vcc.conxtfw...`.
         let lines = vec![
             "import time",
             "",
@@ -1808,14 +1178,13 @@ mod tests {
             "",
             "LOGGING_TIME = 2",
         ];
+        let layout = layout_from_lines(&lines);
         let spec = TypeImportSpec {
             check_name: "conx_canoe".to_string(),
             import_statement: "from vcc import conx_canoe".to_string(),
         };
         let existing: HashSet<String> = HashSet::new();
-        let edits = build_import_edits(&lines, &[&spec], &existing);
-
-        // "vcc" < "vcc.conxtfw...", so insert before line 3.
+        let edits = build_import_edits(&layout, &[&spec], &existing);
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].range.start.line, 3);
         assert_eq!(edits[0].new_text, "from vcc import conx_canoe\n");
@@ -1823,9 +1192,6 @@ mod tests {
 
     #[test]
     fn test_user_scenario_stdlib_into_correct_group() {
-        // This is the exact scenario from the bug report:
-        // File has `import time` (stdlib) + `import pytest` + `from vcc...` (third-party).
-        // Adding `from typing import Any` should go into the stdlib group.
         let lines = vec![
             "import time",
             "",
@@ -1834,14 +1200,13 @@ mod tests {
             "",
             "LOGGING_TIME = 2",
         ];
+        let layout = layout_from_lines(&lines);
         let spec = TypeImportSpec {
             check_name: "Any".to_string(),
             import_statement: "from typing import Any".to_string(),
         };
         let existing: HashSet<String> = HashSet::new();
-        let edits = build_import_edits(&lines, &[&spec], &existing);
-
-        // from-import sorts after bare `import time`, insert at line 1.
+        let edits = build_import_edits(&layout, &[&spec], &existing);
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].range.start.line, 1);
         assert_eq!(edits[0].range.start.character, 0);
@@ -1850,8 +1215,6 @@ mod tests {
 
     #[test]
     fn test_user_scenario_fix_all_multi_import() {
-        // Full fixAll scenario: adding stdlib (pathlib, typing) and tp (vcc)
-        // imports into a file that already has both groups.
         let lines = vec![
             "import time",
             "",
@@ -1860,6 +1223,7 @@ mod tests {
             "",
             "LOGGING_TIME = 2",
         ];
+        let layout = layout_from_lines(&lines);
         let spec_typing = TypeImportSpec {
             check_name: "Any".to_string(),
             import_statement: "from typing import Any".to_string(),
@@ -1873,30 +1237,24 @@ mod tests {
             import_statement: "from vcc import conx_canoe".to_string(),
         };
         let existing: HashSet<String> = HashSet::new();
-        let edits =
-            build_import_edits(&lines, &[&spec_typing, &spec_pathlib, &spec_vcc], &existing);
-
-        // Three insertion edits, no separators (groups already exist):
-        //   stdlib: `import pathlib` before `import time` (line 0), key (0,"pathlib") < (0,"time")
-        //   stdlib: `from typing import Any` after `import time` (line 1), key (1,"typing") > (0,"time")
-        //   tp:     `from vcc import conx_canoe` before existing from-import (line 3),
-        //           key (1,"vcc") < (1,"vcc.conxtfw...")
+        let edits = build_import_edits(
+            &layout,
+            &[&spec_typing, &spec_pathlib, &spec_vcc],
+            &existing,
+        );
         assert_eq!(edits.len(), 3);
-
         let pathlib_edit = edits
             .iter()
             .find(|e| e.new_text.contains("pathlib"))
             .unwrap();
         assert_eq!(pathlib_edit.range.start.line, 0);
         assert_eq!(pathlib_edit.new_text, "import pathlib\n");
-
         let typing_edit = edits
             .iter()
             .find(|e| e.new_text.contains("typing"))
             .unwrap();
         assert_eq!(typing_edit.range.start.line, 1);
         assert_eq!(typing_edit.new_text, "from typing import Any\n");
-
         let vcc_edit = edits
             .iter()
             .find(|e| e.new_text.contains("conx_canoe"))
@@ -1907,8 +1265,8 @@ mod tests {
 
     #[test]
     fn test_future_import_skipped_for_stdlib_insertion() {
-        // __future__ is its own group. Regular stdlib should go into the second
-        // stdlib group (after os/time), not after __future__.
+        // `from __future__ import annotations` gets ImportKind::Future.
+        // `last_stdlib_group` skips Future groups → stdlib inserts after os/time.
         let lines = vec![
             "from __future__ import annotations",
             "",
@@ -1919,15 +1277,13 @@ mod tests {
             "",
             "def test(): pass",
         ];
+        let layout = layout_from_lines(&lines);
         let spec = TypeImportSpec {
             check_name: "Any".to_string(),
             import_statement: "from typing import Any".to_string(),
         };
         let existing: HashSet<String> = HashSet::new();
-        let edits = build_import_edits(&lines, &[&spec], &existing);
-
-        // from-import sorts after bare imports in the os/time group (lines 2-3),
-        // so insert at line 4.
+        let edits = build_import_edits(&layout, &[&spec], &existing);
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].range.start.line, 4);
         assert_eq!(edits[0].new_text, "from typing import Any\n");
@@ -1935,8 +1291,8 @@ mod tests {
 
     #[test]
     fn test_different_modules_stdlib_and_tp() {
-        // Adding one stdlib and one third-party import to a file that has both groups.
         let lines = vec!["import os", "", "import pytest", "", "def test(): pass"];
+        let layout = layout_from_lines(&lines);
         let spec_stdlib = TypeImportSpec {
             check_name: "Any".to_string(),
             import_statement: "from typing import Any".to_string(),
@@ -1946,9 +1302,7 @@ mod tests {
             import_statement: "from flask.testing import FlaskClient".to_string(),
         };
         let existing: HashSet<String> = HashSet::new();
-        let edits = build_import_edits(&lines, &[&spec_stdlib, &spec_tp], &existing);
-
-        // stdlib from-import after `import os` (line 1), tp from-import after `import pytest` (line 3).
+        let edits = build_import_edits(&layout, &[&spec_stdlib, &spec_tp], &existing);
         assert_eq!(edits.len(), 2);
         let stdlib_edit = edits
             .iter()
@@ -1960,474 +1314,4 @@ mod tests {
         assert_eq!(tp_edit.range.start.line, 3);
         assert_eq!(tp_edit.new_text, "from flask.testing import FlaskClient\n");
     }
-
-    // ── import_line_sort_key tests ───────────────────────────────────────
-
-    #[test]
-    fn test_import_line_sort_key_bare_before_from() {
-        let bare = import_line_sort_key("import os");
-        let from = import_line_sort_key("from typing import Any");
-        assert!(bare < from, "bare imports should sort before from-imports");
-    }
-
-    #[test]
-    fn test_import_line_sort_key_alphabetical_bare() {
-        let a = import_line_sort_key("import os");
-        let b = import_line_sort_key("import pathlib");
-        let c = import_line_sort_key("import time");
-        assert!(a < b);
-        assert!(b < c);
-    }
-
-    #[test]
-    fn test_import_line_sort_key_alphabetical_from() {
-        let a = import_line_sort_key("from pathlib import Path");
-        let b = import_line_sort_key("from typing import Any");
-        assert!(a < b);
-    }
-
-    #[test]
-    fn test_import_line_sort_key_dotted_module_ordering() {
-        let short = import_line_sort_key("from vcc import conx_canoe");
-        let long = import_line_sort_key("from vcc.conxtfw.framework import fixture");
-        assert!(
-            short < long,
-            "shorter module path should sort before longer"
-        );
-    }
-
-    // ── find_sorted_insert_position tests ────────────────────────────────
-
-    #[test]
-    fn test_sorted_position_bare_before_existing_bare() {
-        let lines = vec!["import os", "import time"];
-        let group = ImportGroup {
-            first_line: 0,
-            last_line: 1,
-            kind: ImportKind::Stdlib,
-        };
-        // `import pathlib` sorts between os and time.
-        let key = import_line_sort_key("import pathlib");
-        assert_eq!(find_sorted_insert_position(&lines, &group, &key), 1);
-    }
-
-    #[test]
-    fn test_sorted_position_from_after_all_bare() {
-        let lines = vec!["import os", "import time"];
-        let group = ImportGroup {
-            first_line: 0,
-            last_line: 1,
-            kind: ImportKind::Stdlib,
-        };
-        // from-import sorts after all bare imports.
-        let key = import_line_sort_key("from typing import Any");
-        assert_eq!(find_sorted_insert_position(&lines, &group, &key), 2);
-    }
-
-    #[test]
-    fn test_sorted_position_from_between_existing_froms() {
-        let lines = vec!["import pytest", "from aaa import X", "from zzz import Y"];
-        let group = ImportGroup {
-            first_line: 0,
-            last_line: 2,
-            kind: ImportKind::ThirdParty,
-        };
-        let key = import_line_sort_key("from mmm import Z");
-        assert_eq!(find_sorted_insert_position(&lines, &group, &key), 2);
-    }
-
-    #[test]
-    fn test_sorted_position_before_everything() {
-        let lines = vec!["import time", "from typing import Any"];
-        let group = ImportGroup {
-            first_line: 0,
-            last_line: 1,
-            kind: ImportKind::Stdlib,
-        };
-        // `import os` sorts before `import time`.
-        let key = import_line_sort_key("import os");
-        assert_eq!(find_sorted_insert_position(&lines, &group, &key), 0);
-    }
-
-    // ── adapt_type_for_consumer tests ────────────────────────────────────
-
-    /// Helper: build a TypeImportSpec quickly.
-    fn spec(check_name: &str, import_statement: &str) -> TypeImportSpec {
-        TypeImportSpec {
-            check_name: check_name.to_string(),
-            import_statement: import_statement.to_string(),
-        }
-    }
-
-    #[test]
-    fn test_adapt_dotted_to_short_when_consumer_has_from_import() {
-        // Fixture: `import pathlib` → type `pathlib.Path`
-        // Consumer: `from pathlib import Path`
-        // Expected: type rewritten to `Path`, bare-import spec dropped.
-        let fixture_imports = vec![spec("pathlib", "import pathlib")];
-        let mut consumer_map = HashMap::new();
-        consumer_map.insert("Path".to_string(), spec("Path", "from pathlib import Path"));
-
-        let (adapted, remaining) =
-            adapt_type_for_consumer("pathlib.Path", &fixture_imports, &consumer_map);
-
-        assert_eq!(adapted, "Path");
-        assert!(
-            remaining.is_empty(),
-            "No import should remain: {:?}",
-            remaining
-        );
-    }
-
-    #[test]
-    fn test_adapt_no_rewrite_when_consumer_lacks_from_import() {
-        // Fixture: `import pathlib` → type `pathlib.Path`
-        // Consumer: no pathlib imports at all
-        // Expected: type unchanged, import spec kept.
-        let fixture_imports = vec![spec("pathlib", "import pathlib")];
-        let consumer_map = HashMap::new();
-
-        let (adapted, remaining) =
-            adapt_type_for_consumer("pathlib.Path", &fixture_imports, &consumer_map);
-
-        assert_eq!(adapted, "pathlib.Path");
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].import_statement, "import pathlib");
-    }
-
-    #[test]
-    fn test_adapt_no_rewrite_when_consumer_imports_from_different_module() {
-        // Fixture: `import pathlib` → type `pathlib.Path`
-        // Consumer: `from mylib import Path` (different module!)
-        // Expected: type unchanged, import spec kept.
-        let fixture_imports = vec![spec("pathlib", "import pathlib")];
-        let mut consumer_map = HashMap::new();
-        consumer_map.insert("Path".to_string(), spec("Path", "from mylib import Path"));
-
-        let (adapted, remaining) =
-            adapt_type_for_consumer("pathlib.Path", &fixture_imports, &consumer_map);
-
-        assert_eq!(adapted, "pathlib.Path");
-        assert_eq!(remaining.len(), 1);
-    }
-
-    #[test]
-    fn test_adapt_from_import_specs_pass_through_unchanged() {
-        // `from pathlib import Path` specs already use the short name — no rewrite.
-        let fixture_imports = vec![spec("Path", "from pathlib import Path")];
-        let consumer_map = HashMap::new();
-
-        let (adapted, remaining) = adapt_type_for_consumer("Path", &fixture_imports, &consumer_map);
-
-        assert_eq!(adapted, "Path");
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].check_name, "Path");
-    }
-
-    #[test]
-    fn test_adapt_complex_generic_with_dotted_and_from() {
-        // Fixture: `import pathlib` + `from typing import Optional`
-        // Type: `Optional[pathlib.Path]`
-        // Consumer: `from pathlib import Path` + `from typing import Optional`
-        // Expected: `Optional[Path]`, only the bare-import spec dropped,
-        //           the `from typing import Optional` spec passes through.
-        let fixture_imports = vec![
-            spec("Optional", "from typing import Optional"),
-            spec("pathlib", "import pathlib"),
-        ];
-        let mut consumer_map = HashMap::new();
-        consumer_map.insert("Path".to_string(), spec("Path", "from pathlib import Path"));
-        consumer_map.insert(
-            "Optional".to_string(),
-            spec("Optional", "from typing import Optional"),
-        );
-
-        let (adapted, remaining) =
-            adapt_type_for_consumer("Optional[pathlib.Path]", &fixture_imports, &consumer_map);
-
-        assert_eq!(adapted, "Optional[Path]");
-        // Only the `from typing import Optional` spec should remain.
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].check_name, "Optional");
-    }
-
-    #[test]
-    fn test_adapt_multiple_dotted_refs_same_module() {
-        // Type: `tuple[pathlib.Path, pathlib.PurePath]`
-        // Consumer has both `from pathlib import Path` and `from pathlib import PurePath`.
-        let fixture_imports = vec![spec("pathlib", "import pathlib")];
-        let mut consumer_map = HashMap::new();
-        consumer_map.insert("Path".to_string(), spec("Path", "from pathlib import Path"));
-        consumer_map.insert(
-            "PurePath".to_string(),
-            spec("PurePath", "from pathlib import PurePath"),
-        );
-
-        let (adapted, remaining) = adapt_type_for_consumer(
-            "tuple[pathlib.Path, pathlib.PurePath]",
-            &fixture_imports,
-            &consumer_map,
-        );
-
-        assert_eq!(adapted, "tuple[Path, PurePath]");
-        assert!(remaining.is_empty());
-    }
-
-    #[test]
-    fn test_adapt_partial_match_one_name_missing() {
-        // Type: `tuple[pathlib.Path, pathlib.PurePath]`
-        // Consumer only has `from pathlib import Path` — `PurePath` is missing.
-        // Expected: no rewrite (all-or-nothing for a given import spec).
-        let fixture_imports = vec![spec("pathlib", "import pathlib")];
-        let mut consumer_map = HashMap::new();
-        consumer_map.insert("Path".to_string(), spec("Path", "from pathlib import Path"));
-
-        let (adapted, remaining) = adapt_type_for_consumer(
-            "tuple[pathlib.Path, pathlib.PurePath]",
-            &fixture_imports,
-            &consumer_map,
-        );
-
-        assert_eq!(adapted, "tuple[pathlib.Path, pathlib.PurePath]");
-        assert_eq!(remaining.len(), 1);
-    }
-
-    #[test]
-    fn test_adapt_aliased_bare_import() {
-        // Fixture: `import pathlib as pl` → type `pl.Path`
-        // Consumer: `from pathlib import Path`
-        // Expected: `Path`, spec dropped.
-        let fixture_imports = vec![spec("pl", "import pathlib as pl")];
-        let mut consumer_map = HashMap::new();
-        consumer_map.insert("Path".to_string(), spec("Path", "from pathlib import Path"));
-
-        let (adapted, remaining) =
-            adapt_type_for_consumer("pl.Path", &fixture_imports, &consumer_map);
-
-        assert_eq!(adapted, "Path");
-        assert!(remaining.is_empty());
-    }
-
-    #[test]
-    fn test_adapt_no_false_match_on_prefix_substring() {
-        // Type contains `mypathlib.Path` — must NOT match the `pathlib.` prefix.
-        let fixture_imports = vec![spec("pathlib", "import pathlib")];
-        let mut consumer_map = HashMap::new();
-        consumer_map.insert("Path".to_string(), spec("Path", "from pathlib import Path"));
-
-        let (adapted, remaining) =
-            adapt_type_for_consumer("mypathlib.Path", &fixture_imports, &consumer_map);
-
-        // `mypathlib.Path` should NOT be rewritten — `mypathlib` != `pathlib`.
-        assert_eq!(adapted, "mypathlib.Path");
-        assert_eq!(remaining.len(), 1);
-    }
-
-    #[test]
-    fn test_adapt_dotted_module_collections_abc() {
-        // Fixture: `import collections.abc` → type `collections.abc.Iterable[str]`
-        // Consumer: `from collections.abc import Iterable`
-        // check_name for bare `import collections.abc` is `"collections.abc"`.
-        let fixture_imports = vec![spec("collections.abc", "import collections.abc")];
-        let mut consumer_map = HashMap::new();
-        consumer_map.insert(
-            "Iterable".to_string(),
-            spec("Iterable", "from collections.abc import Iterable"),
-        );
-
-        let (adapted, remaining) = adapt_type_for_consumer(
-            "collections.abc.Iterable[str]",
-            &fixture_imports,
-            &consumer_map,
-        );
-
-        assert_eq!(adapted, "Iterable[str]");
-        assert!(remaining.is_empty());
-    }
-
-    #[test]
-    fn test_adapt_consumer_has_bare_import_no_rewrite() {
-        // Fixture: `import pathlib` → type `pathlib.Path`
-        // Consumer: `import pathlib` (bare import, NOT from-import)
-        // Expected: no rewrite — the consumer's map has `"pathlib"` (not `"Path"`).
-        let fixture_imports = vec![spec("pathlib", "import pathlib")];
-        let mut consumer_map = HashMap::new();
-        consumer_map.insert("pathlib".to_string(), spec("pathlib", "import pathlib"));
-
-        let (adapted, remaining) =
-            adapt_type_for_consumer("pathlib.Path", &fixture_imports, &consumer_map);
-
-        // `Path` is NOT in consumer_map — only `pathlib` is. No rewrite.
-        assert_eq!(adapted, "pathlib.Path");
-        assert_eq!(remaining.len(), 1);
-    }
-
-    // ── adapt_type_for_consumer: reverse (short → dotted) tests ──────────
-
-    #[test]
-    fn test_adapt_short_to_dotted_when_consumer_has_bare_import() {
-        // Fixture: `from pathlib import Path` → type `Path`
-        // Consumer: `import pathlib`
-        // Expected: type rewritten to `pathlib.Path`, from-import spec dropped.
-        let fixture_imports = vec![spec("Path", "from pathlib import Path")];
-        let mut consumer_map = HashMap::new();
-        consumer_map.insert("pathlib".to_string(), spec("pathlib", "import pathlib"));
-
-        let (adapted, remaining) = adapt_type_for_consumer("Path", &fixture_imports, &consumer_map);
-
-        assert_eq!(adapted, "pathlib.Path");
-        assert!(
-            remaining.is_empty(),
-            "No import should remain: {:?}",
-            remaining
-        );
-    }
-
-    #[test]
-    fn test_adapt_short_to_dotted_consumer_has_aliased_bare_import() {
-        // Fixture: `from pathlib import Path` → type `Path`
-        // Consumer: `import pathlib as pl`
-        // Expected: type rewritten to `pl.Path`, from-import spec dropped.
-        let fixture_imports = vec![spec("Path", "from pathlib import Path")];
-        let mut consumer_map = HashMap::new();
-        consumer_map.insert("pl".to_string(), spec("pl", "import pathlib as pl"));
-
-        let (adapted, remaining) = adapt_type_for_consumer("Path", &fixture_imports, &consumer_map);
-
-        assert_eq!(adapted, "pl.Path");
-        assert!(remaining.is_empty());
-    }
-
-    #[test]
-    fn test_adapt_short_no_rewrite_when_consumer_lacks_bare_import() {
-        // Fixture: `from pathlib import Path` → type `Path`
-        // Consumer: no pathlib imports at all
-        // Expected: type unchanged, from-import spec kept.
-        let fixture_imports = vec![spec("Path", "from pathlib import Path")];
-        let consumer_map = HashMap::new();
-
-        let (adapted, remaining) = adapt_type_for_consumer("Path", &fixture_imports, &consumer_map);
-
-        assert_eq!(adapted, "Path");
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].check_name, "Path");
-    }
-
-    #[test]
-    fn test_adapt_short_to_dotted_generic_type() {
-        // Fixture: `from pathlib import Path` + `from typing import Optional`
-        // Type: `Optional[Path]`
-        // Consumer: `import pathlib` (but NOT `from typing import Optional`)
-        // Expected: `Optional[pathlib.Path]`, Path spec dropped, Optional kept.
-        let fixture_imports = vec![
-            spec("Optional", "from typing import Optional"),
-            spec("Path", "from pathlib import Path"),
-        ];
-        let mut consumer_map = HashMap::new();
-        consumer_map.insert("pathlib".to_string(), spec("pathlib", "import pathlib"));
-
-        let (adapted, remaining) =
-            adapt_type_for_consumer("Optional[Path]", &fixture_imports, &consumer_map);
-
-        assert_eq!(adapted, "Optional[pathlib.Path]");
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].check_name, "Optional");
-    }
-
-    #[test]
-    fn test_adapt_short_to_dotted_word_boundary_safety() {
-        // Type contains `PathLike` — replacing `Path` must not produce `pathlib.PathLike`.
-        let fixture_imports = vec![spec("Path", "from pathlib import Path")];
-        let mut consumer_map = HashMap::new();
-        consumer_map.insert("pathlib".to_string(), spec("pathlib", "import pathlib"));
-
-        let (adapted, remaining) =
-            adapt_type_for_consumer("PathLike", &fixture_imports, &consumer_map);
-
-        // `PathLike` is NOT the same identifier as `Path` — no rewrite.
-        // The spec is kept because the replacement had no effect.
-        assert_eq!(adapted, "PathLike");
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].check_name, "Path");
-    }
-
-    #[test]
-    fn test_adapt_short_to_dotted_multiple_occurrences() {
-        // Type: `tuple[Path, Path]` — `Path` appears twice.
-        // Consumer: `import pathlib`
-        // Expected: both replaced to `pathlib.Path`.
-        let fixture_imports = vec![spec("Path", "from pathlib import Path")];
-        let mut consumer_map = HashMap::new();
-        consumer_map.insert("pathlib".to_string(), spec("pathlib", "import pathlib"));
-
-        let (adapted, remaining) =
-            adapt_type_for_consumer("tuple[Path, Path]", &fixture_imports, &consumer_map);
-
-        assert_eq!(adapted, "tuple[pathlib.Path, pathlib.Path]");
-        assert!(remaining.is_empty());
-    }
-
-    #[test]
-    fn test_adapt_short_to_dotted_aliased_from_import() {
-        // Fixture: `from pathlib import Path as P` → type uses `P`
-        // Consumer: `import pathlib`
-        // Expected: `P` → `pathlib.Path` (uses the original name, not the alias).
-        let fixture_imports = vec![spec("P", "from pathlib import Path as P")];
-        let mut consumer_map = HashMap::new();
-        consumer_map.insert("pathlib".to_string(), spec("pathlib", "import pathlib"));
-
-        let (adapted, remaining) = adapt_type_for_consumer("P", &fixture_imports, &consumer_map);
-
-        assert_eq!(adapted, "pathlib.Path");
-        assert!(remaining.is_empty());
-    }
-
-    #[test]
-    fn test_adapt_short_to_dotted_collections_abc() {
-        // Fixture: `from collections.abc import Iterable` → type `Iterable[str]`
-        // Consumer: `import collections.abc`
-        // Expected: `collections.abc.Iterable[str]`, from-import spec dropped.
-        let fixture_imports = vec![spec("Iterable", "from collections.abc import Iterable")];
-        let mut consumer_map = HashMap::new();
-        consumer_map.insert(
-            "collections.abc".to_string(),
-            spec("collections.abc", "import collections.abc"),
-        );
-
-        let (adapted, remaining) =
-            adapt_type_for_consumer("Iterable[str]", &fixture_imports, &consumer_map);
-
-        assert_eq!(adapted, "collections.abc.Iterable[str]");
-        assert!(remaining.is_empty());
-    }
-
-    #[test]
-    fn test_adapt_both_directions_in_one_call() {
-        // Mix of Case 1 and Case 2 in a single type:
-        // Fixture: `import pathlib` + `from typing import Sequence`
-        // Type: `Sequence[pathlib.Path]`
-        // Consumer: `from pathlib import Path` + `import typing`
-        // Expected: `typing.Sequence[Path]`
-        //   - pathlib.Path → Path (Case 1: consumer has from-import)
-        //   - Sequence → typing.Sequence (Case 2: consumer has bare import)
-        let fixture_imports = vec![
-            spec("Sequence", "from typing import Sequence"),
-            spec("pathlib", "import pathlib"),
-        ];
-        let mut consumer_map = HashMap::new();
-        consumer_map.insert("Path".to_string(), spec("Path", "from pathlib import Path"));
-        consumer_map.insert("typing".to_string(), spec("typing", "import typing"));
-
-        let (adapted, remaining) =
-            adapt_type_for_consumer("Sequence[pathlib.Path]", &fixture_imports, &consumer_map);
-
-        assert_eq!(adapted, "typing.Sequence[Path]");
-        assert!(
-            remaining.is_empty(),
-            "Both specs should be dropped: {:?}",
-            remaining
-        );
-    }
-
-    // ── replace_identifier tests live in src/fixtures/string_utils.rs ────
 }

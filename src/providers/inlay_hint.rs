@@ -2,9 +2,15 @@
 //!
 //! Shows fixture return types inline for fixture parameters in test functions
 //! when the fixture has an explicit return type annotation.
+//!
+//! The displayed type is adapted to the consumer file's import context via
+//! [`adapt_type_for_consumer`]: if the consumer already has `from pathlib import Path`
+//! the hint shows `Path` rather than `pathlib.Path`, and vice versa.
 
 use super::Backend;
+use crate::fixtures::import_analysis::adapt_type_for_consumer;
 use crate::fixtures::string_utils::parameter_has_annotation;
+use crate::fixtures::FixtureDefinition;
 use std::collections::HashMap;
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
@@ -51,15 +57,29 @@ impl Backend {
             .map(|c| c.lines().collect())
             .unwrap_or_default();
 
-        // Pre-compute a map of fixture name -> definition for O(1) lookup.
-        // This avoids calling find_closest_definition for each usage.
+        // Build the consumer file's name→TypeImportSpec map so that
+        // adapt_type_for_consumer can rewrite dotted types to short names (or
+        // vice versa) to match the consumer's existing import style.
+        // Cached by content hash — reused across requests without re-parsing.
+        let consumer_import_map = if let Some(ref c) = content {
+            self.fixture_db
+                .get_name_to_import_map(&file_path, c.as_str())
+        } else {
+            HashMap::new()
+        };
+
+        // Pre-compute a map of fixture name → definition for O(1) lookup.
+        // Stores the full FixtureDefinition so we can access return_type_imports
+        // when calling adapt_type_for_consumer.
         let available = self.fixture_db.get_available_fixtures(&file_path);
-        let fixture_map: HashMap<&str, &str> = available
+        let fixture_map: HashMap<&str, &FixtureDefinition> = available
             .iter()
             .filter_map(|def| {
-                def.return_type
-                    .as_ref()
-                    .map(|rt| (def.name.as_str(), rt.as_str()))
+                if def.return_type.is_some() {
+                    Some((def.name.as_str(), def))
+                } else {
+                    None
+                }
             })
             .collect();
 
@@ -87,13 +107,27 @@ impl Backend {
                 continue;
             }
 
-            // Look up return type from pre-computed map
-            if let Some(&return_type) = fixture_map.get(usage.name.as_str()) {
+            // Look up fixture definition from pre-computed map
+            if let Some(def) = fixture_map.get(usage.name.as_str()) {
                 // Check if this parameter already has a type annotation
                 // by looking at the text after the parameter name in the current buffer
                 if parameter_has_annotation(&lines, usage.line, usage.end_char) {
                     continue;
                 }
+
+                // Safety: fixture_map only contains defs with return_type.is_some()
+                let return_type = def.return_type.as_deref().unwrap();
+
+                // Adapt the type string to the consumer's import style.
+                // e.g. if the consumer has `from pathlib import Path` already,
+                // show `Path` instead of `pathlib.Path`, and vice versa.
+                // The returned import specs are discarded — inlay hints are
+                // display-only and do not insert imports.
+                let (display_type, _) = adapt_type_for_consumer(
+                    return_type,
+                    &def.return_type_imports,
+                    &consumer_import_map,
+                );
 
                 let lsp_line = Self::internal_line_to_lsp(usage.line);
 
@@ -102,12 +136,12 @@ impl Backend {
                         line: lsp_line,
                         character: usage.end_char as u32,
                     },
-                    label: InlayHintLabel::String(format!(": {}", return_type)),
+                    label: InlayHintLabel::String(format!(": {}", display_type)),
                     kind: Some(InlayHintKind::TYPE),
                     text_edits: None,
                     tooltip: Some(InlayHintTooltip::String(format!(
                         "Fixture '{}' returns {}",
-                        usage.name, return_type
+                        usage.name, display_type
                     ))),
                     padding_left: Some(false),
                     padding_right: Some(false),

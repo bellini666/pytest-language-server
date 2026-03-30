@@ -13431,14 +13431,9 @@ fn test_completion_third_party_fixture_has_flag() {
             start_char: 4,
             end_char: 14,
             docstring: Some("A third-party fixture".to_string()),
-            return_type: None,
-            return_type_imports: vec![],
             is_third_party: true,
-            is_plugin: false,
-            dependencies: vec![],
             scope: pytest_language_server::FixtureScope::Session,
-            yield_line: None,
-            autouse: false,
+            ..Default::default()
         }],
     );
 

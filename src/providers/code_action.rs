@@ -245,6 +245,13 @@ fn build_import_edits(
                 let name = name.trim();
                 if !module.is_empty() && !name.is_empty() {
                     match kind {
+                        // `Future` is grouped with `Stdlib` intentionally.
+                        // `from __future__ import …` statements will never appear
+                        // in a fixture's `return_type_imports` in practice (no
+                        // return-type annotation references `__future__` identifiers),
+                        // but if one somehow did we treat it as stdlib-level so it
+                        // lands after any existing `from __future__` group rather
+                        // than being dropped or misclassified as third-party.
                         ImportKind::Future | ImportKind::Stdlib => &mut stdlib_from,
                         ImportKind::ThirdParty => &mut tp_from,
                     }
@@ -255,6 +262,7 @@ fn build_import_edits(
                 }
             }
         }
+        // Same Future→Stdlib grouping rationale as the from-import arm above.
         match kind {
             ImportKind::Future | ImportKind::Stdlib => &mut stdlib_bare,
             ImportKind::ThirdParty => &mut tp_bare,

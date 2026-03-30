@@ -64,6 +64,13 @@ type ImportedFixturesCacheEntry = (u64, u64, Arc<HashSet<String>>);
 
 /// Cache entry for the name→TypeImportSpec map: (content_hash, map).
 /// Invalidated when the file content changes (same strategy as ast_cache).
+///
+/// **Size bound**: this cache is only populated by `get_name_to_import_map`, which
+/// is called from code-action and inlay-hint providers — i.e. only for files that
+/// are already in `file_cache`.  Entries are evicted alongside `file_cache` entries
+/// in both `cleanup_file_cache` (per-file, on close/delete) and
+/// `evict_cache_if_needed` (bulk, when `file_cache` exceeds `MAX_FILE_CACHE_SIZE`).
+/// No independent size constant is needed.
 type NameImportMapCacheEntry = (u64, HashMap<String, crate::fixtures::types::TypeImportSpec>);
 
 /// Maximum number of files to keep in the file content cache.
@@ -125,6 +132,8 @@ pub struct FixtureDatabase {
     /// Cache of the name→TypeImportSpec map per file.
     /// Stores (content_hash, map) so the result of `build_name_to_import_map`
     /// is reused across code-action and inlay-hint requests without re-parsing.
+    ///
+    /// Bounded implicitly: see [`NameImportMapCacheEntry`] for the eviction strategy.
     pub name_import_map_cache: Arc<DashMap<PathBuf, NameImportMapCacheEntry>>,
 }
 

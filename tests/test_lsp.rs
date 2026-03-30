@@ -20,14 +20,7 @@ fn test_hover_content_with_leading_newline() {
         start_char: 4,
         end_char: 14,
         docstring: Some("This is a test fixture.\n\nIt does something useful.".to_string()),
-        return_type: None,
-        return_type_imports: vec![],
-        is_third_party: false,
-        is_plugin: false,
-        dependencies: vec![],
-        scope: pytest_language_server::FixtureScope::Function,
-        yield_line: None,
-        autouse: false,
+        ..Default::default()
     };
 
     // Build hover content (same logic as hover method)
@@ -89,15 +82,7 @@ fn test_hover_content_structure_without_docstring() {
         end_line: 6,
         start_char: 4,
         end_char: 18,
-        docstring: None,
-        return_type: None,
-        return_type_imports: vec![],
-        is_third_party: false,
-        is_plugin: false,
-        dependencies: vec![],
-        scope: pytest_language_server::FixtureScope::Function,
-        yield_line: None,
-        autouse: false,
+        ..Default::default()
     };
 
     // Build hover content

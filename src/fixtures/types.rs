@@ -67,7 +67,18 @@ impl FixtureScope {
 }
 
 /// A fixture definition extracted from a Python file.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// New fields may be added in future versions.  External crates constructing
+/// literals should use the struct-update syntax to stay forward-compatible:
+///
+/// ```rust,ignore
+/// let def = FixtureDefinition {
+///     name: "my_fixture".to_string(),
+///     file_path: PathBuf::from("/tmp/conftest.py"),
+///     ..Default::default()
+/// };
+/// ```
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct FixtureDefinition {
     pub name: String,
     pub file_path: PathBuf,
@@ -87,6 +98,11 @@ pub struct FixtureDefinition {
 }
 
 /// A fixture usage (reference) in a Python file.
+///
+/// This struct is `#[non_exhaustive]`: new fields may be added in future versions
+/// without a semver-major bump.  External crates must not construct literals of
+/// this type directly; obtain instances from [`FixtureDatabase`] instead.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct FixtureUsage {
     pub name: String,

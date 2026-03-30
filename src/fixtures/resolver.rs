@@ -1390,7 +1390,6 @@ impl FixtureDatabase {
     /// Check if a position is inside a test or fixture function (parameter or body)
     /// Returns Some((function_name, is_fixture, declared_params)) if inside a function
     #[allow(dead_code)] // Used in tests
-    #[allow(dead_code)] // Used in tests
     pub fn is_inside_function(
         &self,
         file_path: &Path,

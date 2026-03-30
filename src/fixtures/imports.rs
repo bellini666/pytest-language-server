@@ -13,10 +13,24 @@ use once_cell::sync::Lazy;
 use rustpython_parser::ast::{Expr, Stmt};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tracing::{debug, info};
+use std::sync::{Arc, OnceLock};
+use tracing::{debug, info, warn};
 
-/// Static HashSet of standard library module names for O(1) lookup.
+/// Runtime stdlib module names populated from the venv's Python binary via
+/// `sys.stdlib_module_names` (Python ≥ 3.10).  When set, this takes
+/// precedence over the static [`STDLIB_MODULES`] fallback list in
+/// [`is_stdlib_module`].
+///
+/// Set at most once per process lifetime by [`try_init_stdlib_from_python`].
+static RUNTIME_STDLIB_MODULES: OnceLock<HashSet<String>> = OnceLock::new();
+
+/// Built-in fallback list of standard library module names for O(1) lookup.
+///
+/// Used when [`RUNTIME_STDLIB_MODULES`] has not been populated (no venv
+/// found, Python < 3.10, or the Python binary could not be executed).
+/// Intentionally conservative — it is better to misclassify an unknown
+/// third-party module as stdlib (and skip inserting a redundant import)
+/// than to misclassify a stdlib module as third-party.
 static STDLIB_MODULES: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     [
         "os",
@@ -571,11 +585,145 @@ impl FixtureDatabase {
 /// Check whether `module` (possibly dotted, e.g. `"collections.abc"`) belongs
 /// to the Python standard library.  Only the top-level package name is tested.
 ///
+/// Checks [`RUNTIME_STDLIB_MODULES`] first (populated by
+/// [`try_init_stdlib_from_python`] when a venv with Python ≥ 3.10 is found),
+/// then falls back to the built-in [`STDLIB_MODULES`] list.
+///
 /// Exposed as a free function so that the code-action provider can classify
 /// import statements without access to a `FixtureDatabase` instance.
 pub(crate) fn is_stdlib_module(module: &str) -> bool {
     let first_part = module.split('.').next().unwrap_or(module);
-    STDLIB_MODULES.contains(first_part)
+    if let Some(runtime) = RUNTIME_STDLIB_MODULES.get() {
+        runtime.contains(first_part)
+    } else {
+        STDLIB_MODULES.contains(first_part)
+    }
+}
+
+/// Try to locate the Python interpreter inside a virtual environment.
+///
+/// Checks the standard Unix (`bin/python3`, `bin/python`) and Windows
+/// (`Scripts/python3.exe`, `Scripts/python.exe`) layouts in that order.
+/// Returns the first path that resolves to an existing regular file (or
+/// symlink to one).
+fn find_venv_python(venv_path: &Path) -> Option<PathBuf> {
+    // Unix / macOS layout
+    for name in &["python3", "python"] {
+        let candidate = venv_path.join("bin").join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    // Windows layout
+    for name in &["python3.exe", "python.exe"] {
+        let candidate = venv_path.join("Scripts").join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Attempt to populate [`RUNTIME_STDLIB_MODULES`] by querying the Python
+/// interpreter found inside `venv_path`.
+///
+/// Runs:
+/// ```text
+/// python -I -c "import sys; print('\n'.join(sorted(sys.stdlib_module_names)))"
+/// ```
+///
+/// `sys.stdlib_module_names` was added in Python 3.10.  For older interpreters
+/// the command exits with a non-zero status and this function returns `false`,
+/// leaving [`is_stdlib_module`] to use the static fallback list.
+///
+/// The `OnceLock` guarantees that the runtime list is set at most once per
+/// process lifetime.  Subsequent calls return `true` immediately when the
+/// lock is already populated.
+///
+/// Returns `true` if the runtime list is now available (either just populated
+/// or already set by a previous call), `false` otherwise.
+pub(crate) fn try_init_stdlib_from_python(venv_path: &Path) -> bool {
+    // Already initialised — nothing to do.
+    if RUNTIME_STDLIB_MODULES.get().is_some() {
+        return true;
+    }
+
+    let Some(python) = find_venv_python(venv_path) else {
+        debug!(
+            "try_init_stdlib_from_python: no Python binary found in {:?}",
+            venv_path
+        );
+        return false;
+    };
+
+    debug!(
+        "try_init_stdlib_from_python: querying stdlib module names via {:?}",
+        python
+    );
+
+    // -I (isolated): ignore PYTHONPATH, user site, PYTHONSTARTUP — we only
+    // need a pristine `sys` module, nothing else.
+    let output = match std::process::Command::new(&python)
+        .args([
+            "-I",
+            "-c",
+            "import sys; print('\\n'.join(sorted(sys.stdlib_module_names)))",
+        ])
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => {
+            warn!(
+                "try_init_stdlib_from_python: failed to run {:?}: {}",
+                python, e
+            );
+            return false;
+        }
+    };
+
+    if !output.status.success() {
+        // Most likely Python < 3.10 — AttributeError on sys.stdlib_module_names.
+        debug!(
+            "try_init_stdlib_from_python: Python exited with {:?} \
+             (Python < 3.10 or other error) — using built-in stdlib list",
+            output.status.code()
+        );
+        return false;
+    }
+
+    let stdout = match std::str::from_utf8(&output.stdout) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(
+                "try_init_stdlib_from_python: Python output is not valid UTF-8: {}",
+                e
+            );
+            return false;
+        }
+    };
+
+    let modules: HashSet<String> = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .collect();
+
+    if modules.is_empty() {
+        warn!("try_init_stdlib_from_python: Python returned an empty module list");
+        return false;
+    }
+
+    info!(
+        "try_init_stdlib_from_python: loaded {} stdlib module names from {:?}",
+        modules.len(),
+        python
+    );
+
+    // Ignore the error — another thread may have raced us; either way the
+    // OnceLock now contains a valid set.
+    let _ = RUNTIME_STDLIB_MODULES.set(modules);
+    true
 }
 
 impl FixtureDatabase {
@@ -802,6 +950,93 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    // ── find_venv_python ───────────────────────────────────────────────────
+
+    /// Write an empty file at `path`, creating parent directories as needed.
+    fn touch(path: &std::path::Path) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"").unwrap();
+    }
+
+    #[test]
+    fn test_find_venv_python_unix_python3() {
+        let dir = TempDir::new("fvp_unix_py3");
+        touch(&dir.path().join("bin/python3"));
+        let result = find_venv_python(dir.path());
+        assert_eq!(result, Some(dir.path().join("bin/python3")));
+    }
+
+    #[test]
+    fn test_find_venv_python_unix_python_fallback() {
+        // Only `python` present (no `python3`).
+        let dir = TempDir::new("fvp_unix_py");
+        touch(&dir.path().join("bin/python"));
+        let result = find_venv_python(dir.path());
+        assert_eq!(result, Some(dir.path().join("bin/python")));
+    }
+
+    #[test]
+    fn test_find_venv_python_unix_prefers_python3_over_python() {
+        let dir = TempDir::new("fvp_unix_prefer");
+        touch(&dir.path().join("bin/python3"));
+        touch(&dir.path().join("bin/python"));
+        let result = find_venv_python(dir.path());
+        assert_eq!(
+            result,
+            Some(dir.path().join("bin/python3")),
+            "python3 should be preferred over python"
+        );
+    }
+
+    #[test]
+    fn test_find_venv_python_windows_style() {
+        let dir = TempDir::new("fvp_win_py");
+        touch(&dir.path().join("Scripts/python.exe"));
+        let result = find_venv_python(dir.path());
+        assert_eq!(result, Some(dir.path().join("Scripts/python.exe")));
+    }
+
+    #[test]
+    fn test_find_venv_python_windows_prefers_python3_exe() {
+        let dir = TempDir::new("fvp_win_prefer");
+        touch(&dir.path().join("Scripts/python3.exe"));
+        touch(&dir.path().join("Scripts/python.exe"));
+        let result = find_venv_python(dir.path());
+        assert_eq!(
+            result,
+            Some(dir.path().join("Scripts/python3.exe")),
+            "python3.exe should be preferred over python.exe"
+        );
+    }
+
+    #[test]
+    fn test_find_venv_python_not_found() {
+        let dir = TempDir::new("fvp_empty");
+        assert_eq!(find_venv_python(dir.path()), None);
+    }
+
+    #[test]
+    fn test_find_venv_python_wrong_layout() {
+        // Python binary at the venv root — not in bin/ or Scripts/.
+        let dir = TempDir::new("fvp_wrong_layout");
+        touch(&dir.path().join("python3"));
+        assert_eq!(find_venv_python(dir.path()), None);
+    }
+
+    #[test]
+    fn test_try_init_stdlib_no_python_returns_false_or_already_set() {
+        // An empty venv directory has no Python binary → should return false
+        // without panicking.  If RUNTIME_STDLIB_MODULES was already populated
+        // by a prior test (OnceLock is set once per process) the function
+        // returns true; either way is_stdlib_module must remain correct.
+        let dir = TempDir::new("fvp_no_python");
+        let _ = try_init_stdlib_from_python(dir.path());
+        assert!(is_stdlib_module("os"), "os must always be stdlib");
+        assert!(is_stdlib_module("sys"), "sys must always be stdlib");
+        assert!(!is_stdlib_module("pytest"), "pytest is not stdlib");
+        assert!(!is_stdlib_module("flask"), "flask is not stdlib");
     }
 
     // ── file_path_to_module_path ────────────────────────────────────────────

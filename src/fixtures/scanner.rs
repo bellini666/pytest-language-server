@@ -1,5 +1,6 @@
 //! Workspace and virtual environment scanning for fixture definitions.
 
+use super::imports::try_init_stdlib_from_python;
 use super::FixtureDatabase;
 use glob::Pattern;
 use rayon::prelude::*;
@@ -487,6 +488,20 @@ impl FixtureDatabase {
 
     fn scan_venv_site_packages(&self, venv_path: &Path) {
         info!("Scanning venv site-packages in: {:?}", venv_path);
+
+        // Attempt to replace the built-in stdlib list with the authoritative set
+        // from the venv's own Python binary (requires Python ≥ 3.10).  Falls back
+        // silently to the static list for older interpreters or if the binary
+        // cannot be found or executed.
+        if try_init_stdlib_from_python(venv_path) {
+            info!("stdlib module list populated from venv Python");
+        } else {
+            info!(
+                "using built-in stdlib module list \
+                 (Python < 3.10 or binary not found in {:?})",
+                venv_path
+            );
+        }
 
         // Find site-packages directory
         let lib_path = venv_path.join("lib");

@@ -1,9 +1,3 @@
-[features]
-# Gate the forced process::exit in the shutdown handler behind this feature so
-# that library consumers and integration tests are not terminated unexpectedly.
-# The binary target enables it via `required-features` below.
-lsp_force_exit = []
-
 [package]
 name = "pytest-language-server"
 version = "0.21.2"
@@ -19,7 +13,6 @@ categories = ["development-tools", "development-tools::testing"]
 [[bin]]
 name = "pytest-language-server"
 path = "src/main.rs"
-required-features = ["lsp_force_exit"]
 
 [lib]
 name = "pytest_language_server"

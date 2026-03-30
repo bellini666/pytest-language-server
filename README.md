@@ -166,12 +166,12 @@ Intelligent code actions for pytest fixtures, covering quick fixes, type annotat
 - Automatically inserts any `import` statements needed for the return type
 - Smart insertion handles both empty and existing parameter lists
 
-**Add Type Annotation** (`source.pytest-lsp`):
+**Add Type Annotation** (`source.pytest-ls`):
 - Cursor-based: place your cursor on an existing fixture parameter that lacks a type annotation
 - Inserts `: ReturnType` matching the inlay-hint text (e.g., `database` → `database: Database`)
 - Automatically adds any required import statements
 
-**Add All Fixture Type Annotations** (`source.fixAll.pytest-lsp`):
+**Add All Fixture Type Annotations** (`source.fixAll.pytest-ls`):
 - File-wide: annotates **every** unannotated fixture parameter in the file in a single action
 - Collects and deduplicates all required imports across all fixtures
 - Great for bringing an entire test file up to date in one click
@@ -251,9 +251,9 @@ def test_broken():  # ⚠️ Warning: 'user_db' used but not declared
 ```
 
 **How to use code actions:**
-1. **Quick fix** (undeclared fixture): Place cursor on the warning squiggle → trigger code actions (Cmd+. / Ctrl+.) → select "pytest-lsp: Add 'fixture_name' fixture parameter (Type)"
-2. **Add type annotation** (single fixture): Place cursor on an unannotated fixture parameter → trigger code actions → select "pytest-lsp: Add type annotation for fixture 'name'"
-3. **Add all type annotations** (file-wide): Trigger code actions anywhere in the file → select "pytest-lsp: Add all fixture type annotations (N fixtures)"
+1. **Quick fix** (undeclared fixture): Place cursor on the warning squiggle → trigger code actions (Cmd+. / Ctrl+.) → select "pytest-ls: Add 'fixture_name' fixture parameter (Type)"
+2. **Add type annotation** (single fixture): Place cursor on an unannotated fixture parameter → trigger code actions → select "pytest-ls: Add type annotation for fixture 'name'"
+3. **Add all type annotations** (file-wide): Trigger code actions anywhere in the file → select "pytest-ls: Add all fixture type annotations (N fixtures)"
 
 ### ⚡️ Performance
 Built with Rust for maximum performance:
@@ -475,8 +475,8 @@ Code actions are available in three forms:
 | Kind | Trigger | What it does |
 |------|---------|-------------|
 | `quickfix` | Diagnostic warning | Adds missing fixture parameter (with type + import) |
-| `source.pytest-lsp` | Cursor on unannotated param | Adds `: ReturnType` + import for one fixture |
-| `source.fixAll.pytest-lsp` | Anywhere in file | Adds all missing type annotations + imports |
+| `source.pytest-ls` | Cursor on unannotated param | Adds `: ReturnType` + import for one fixture |
+| `source.fixAll.pytest-ls` | Anywhere in file | Adds all missing type annotations + imports |
 
 > **Import ordering is best-effort.** Generated imports attempt to follow common isort conventions (stdlib before third-party, alphabetical within groups, merging into existing `from X import` lines) but the server does not read your project's `pyproject.toml` or `.isort.cfg`. After applying code actions, run `ruff check --fix` or `isort` to bring imports into full conformance with your project's configuration.
 

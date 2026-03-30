@@ -36,7 +36,7 @@ src/
 │   └── cli.rs              # CLI commands (fixtures list/unused)
 └── providers/              # LSP handlers (one file per feature)
     ├── mod.rs              # Backend struct, URI/path helpers
-    ├── code_action.rs      # Code actions: quickfix, source.pytest-lsp, source.fixAll.pytest-lsp
+    ├── code_action.rs      # Code actions: quickfix, source.pytest-ls, source.fixAll.pytest-ls
     │                       #   Uses import_analysis for layout + adapt; TextEdit production stays here
     ├── inlay_hint.rs       # Inlay hints with import-context-aware type display (adapt_type_for_consumer)
     ├── definition.rs, references.rs, hover.rs, completion.rs, ...
@@ -52,8 +52,8 @@ The code action provider (`src/providers/code_action.rs`) emits three kinds:
 | Kind | Trigger | Behaviour |
 |------|---------|-----------|
 | `quickfix` | `undeclared-fixture` diagnostic | Adds missing fixture param with type annotation + import |
-| `source.pytest-lsp` | Cursor on unannotated fixture param | Adds `: ReturnType` + import for that fixture |
-| `source.fixAll.pytest-lsp` | Anywhere in file | Adds all missing type annotations + imports in one edit |
+| `source.pytest-ls` | Cursor on unannotated fixture param | Adds `: ReturnType` + import for that fixture |
+| `source.fixAll.pytest-ls` | Anywhere in file | Adds all missing type annotations + imports in one edit |
 
 **Import insertion** is isort/ruff-aware:
 - `parse_import_layout()` (in `import_analysis.rs`) parses the file via AST (or string fallback on

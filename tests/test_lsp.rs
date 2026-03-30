@@ -6620,7 +6620,7 @@ def test_param(my_db):
 #[tokio::test]
 async fn test_code_action_source_pytest_lsp_skips_usefixtures_cursor() {
     // When the cursor is positioned on a fixture name inside a usefixtures
-    // decorator, the source.pytest-lsp code action (single annotation) must
+    // decorator, the source.pytest-ls code action (single annotation) must
     // NOT be generated — that position is a string literal, not a parameter.
     use pytest_language_server::FixtureDatabase;
 
@@ -6673,7 +6673,7 @@ def test_with_usefixtures():
         },
         context: CodeActionContext {
             diagnostics: vec![],
-            only: Some(vec![CodeActionKind::from("source.pytest-lsp")]),
+            only: Some(vec![CodeActionKind::from("source.pytest-ls")]),
             trigger_kind: None,
         },
         work_done_progress_params: WorkDoneProgressParams {
@@ -6686,7 +6686,7 @@ def test_with_usefixtures():
 
     let response = backend.handle_code_action(params).await.unwrap();
 
-    // No source.pytest-lsp action should be generated for a usefixtures string.
+    // No source.pytest-ls action should be generated for a usefixtures string.
     match response {
         None => {} // Expected: nothing to annotate
         Some(actions) => {
@@ -6694,7 +6694,7 @@ def test_with_usefixtures():
                 .iter()
                 .filter_map(|a| match a {
                     CodeActionOrCommand::CodeAction(ca)
-                        if ca.kind == Some(CodeActionKind::from("source.pytest-lsp")) =>
+                        if ca.kind == Some(CodeActionKind::from("source.pytest-ls")) =>
                     {
                         Some(ca)
                     }
@@ -6703,7 +6703,7 @@ def test_with_usefixtures():
                 .collect();
             assert!(
                 source_actions.is_empty(),
-                "source.pytest-lsp must not annotate usefixtures strings: {:?}",
+                "source.pytest-ls must not annotate usefixtures strings: {:?}",
                 source_actions.iter().map(|a| &a.title).collect::<Vec<_>>()
             );
         }
@@ -6712,7 +6712,7 @@ def test_with_usefixtures():
 
 #[tokio::test]
 async fn test_code_action_fix_all_skips_usefixtures() {
-    // source.fixAll.pytest-lsp must not include usefixtures string usages
+    // source.fixAll.pytest-ls must not include usefixtures string usages
     // in the set of positions it annotates.
     use pytest_language_server::FixtureDatabase;
 
@@ -6765,7 +6765,7 @@ def test_marker_only():
         },
         context: CodeActionContext {
             diagnostics: vec![],
-            only: Some(vec![CodeActionKind::from("source.fixAll.pytest-lsp")]),
+            only: Some(vec![CodeActionKind::from("source.fixAll.pytest-ls")]),
             trigger_kind: None,
         },
         work_done_progress_params: WorkDoneProgressParams {
@@ -6785,7 +6785,7 @@ def test_marker_only():
                 .iter()
                 .filter_map(|a| match a {
                     CodeActionOrCommand::CodeAction(ca)
-                        if ca.kind == Some(CodeActionKind::from("source.fixAll.pytest-lsp")) =>
+                        if ca.kind == Some(CodeActionKind::from("source.fixAll.pytest-ls")) =>
                     {
                         Some(ca)
                     }
@@ -6794,7 +6794,7 @@ def test_marker_only():
                 .collect();
             assert!(
                 fix_all_actions.is_empty(),
-                "source.fixAll.pytest-lsp must not annotate usefixtures strings: {:?}",
+                "source.fixAll.pytest-ls must not annotate usefixtures strings: {:?}",
                 fix_all_actions.iter().map(|a| &a.title).collect::<Vec<_>>()
             );
         }
@@ -6855,7 +6855,7 @@ def test_param(my_db):
         },
         context: CodeActionContext {
             diagnostics: vec![],
-            only: Some(vec![CodeActionKind::from("source.fixAll.pytest-lsp")]),
+            only: Some(vec![CodeActionKind::from("source.fixAll.pytest-ls")]),
             trigger_kind: None,
         },
         work_done_progress_params: WorkDoneProgressParams {
@@ -6873,13 +6873,13 @@ def test_param(my_db):
         .iter()
         .find_map(|a| match a {
             CodeActionOrCommand::CodeAction(ca)
-                if ca.kind == Some(CodeActionKind::from("source.fixAll.pytest-lsp")) =>
+                if ca.kind == Some(CodeActionKind::from("source.fixAll.pytest-ls")) =>
             {
                 Some(ca)
             }
             _ => None,
         })
-        .expect("Should have a source.fixAll.pytest-lsp action");
+        .expect("Should have a source.fixAll.pytest-ls action");
 
     // The title should mention exactly 1 fixture (the parameter), not 2.
     assert!(
@@ -6961,7 +6961,7 @@ def test_something():
         },
         context: CodeActionContext {
             diagnostics: vec![],
-            only: Some(vec![CodeActionKind::from("source.fixAll.pytest-lsp")]),
+            only: Some(vec![CodeActionKind::from("source.fixAll.pytest-ls")]),
             trigger_kind: None,
         },
         work_done_progress_params: WorkDoneProgressParams {
@@ -6981,7 +6981,7 @@ def test_something():
                 .iter()
                 .filter_map(|a| match a {
                     CodeActionOrCommand::CodeAction(ca)
-                        if ca.kind == Some(CodeActionKind::from("source.fixAll.pytest-lsp")) =>
+                        if ca.kind == Some(CodeActionKind::from("source.fixAll.pytest-ls")) =>
                     {
                         Some(ca)
                     }
@@ -6990,7 +6990,7 @@ def test_something():
                 .collect();
             assert!(
                 fix_all_actions.is_empty(),
-                "source.fixAll.pytest-lsp must not annotate pytestmark usefixtures strings: {:?}",
+                "source.fixAll.pytest-ls must not annotate pytestmark usefixtures strings: {:?}",
                 fix_all_actions.iter().map(|a| &a.title).collect::<Vec<_>>()
             );
         }

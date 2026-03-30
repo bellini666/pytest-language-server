@@ -33,7 +33,6 @@ Issues = "https://github.com/bellini666/pytest-language-server/issues"
 
 [tool.maturin]
 bindings = "bin"
-features = ["lsp_force_exit"]
 
 [dependency-groups]
 dev = [

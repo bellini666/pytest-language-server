@@ -8,12 +8,12 @@
 //!    `import` statement needed to use the fixture's return type annotation in
 //!    the consumer file.
 //!
-//! 2. **`source.pytest-lsp`** (cursor-based) – when the cursor is on a fixture
+//! 2. **`source.pytest-ls`** (cursor-based) – when the cursor is on a fixture
 //!    parameter that already exists but lacks a type annotation, offers to
 //!    insert `: ReturnType` (mirroring the inlay-hint text) and any necessary
 //!    import statements.
 //!
-//! 3. **`source.fixAll.pytest-lsp`** (file-wide) – adds **all** missing type
+//! 3. **`source.fixAll.pytest-ls`** (file-wide) – adds **all** missing type
 //!    annotations and their imports for every unannotated fixture parameter in
 //!    the file in a single action.
 //!
@@ -44,13 +44,13 @@ use tracing::{info, warn};
 // ── Custom code-action kinds ─────────────────────────────────────────────────
 
 /// Prefix for all code-action titles so they are visually grouped in the UI.
-const TITLE_PREFIX: &str = "pytest-lsp";
+const TITLE_PREFIX: &str = "pytest-ls";
 
 /// Add type annotation + import for the fixture at the cursor.
-const SOURCE_PYTEST_LSP: CodeActionKind = CodeActionKind::new("source.pytest-lsp");
+const SOURCE_PYTEST_LSP: CodeActionKind = CodeActionKind::new("source.pytest-ls");
 
 /// File-wide: add all missing fixture type annotations + imports.
-const SOURCE_FIX_ALL_PYTEST_LSP: CodeActionKind = CodeActionKind::new("source.fixAll.pytest-lsp");
+const SOURCE_FIX_ALL_PYTEST_LSP: CodeActionKind = CodeActionKind::new("source.fixAll.pytest-ls");
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -60,9 +60,9 @@ const SOURCE_FIX_ALL_PYTEST_LSP: CodeActionKind = CodeActionKind::new("source.fi
 /// matches an entry `E` in the `only` list when `K` starts with `E` (using a
 /// dot-separated prefix match).  For example:
 ///
-/// - `only: ["source"]` matches `source.fixAll.pytest-lsp`
-/// - `only: ["source.fixAll"]` matches `source.fixAll.pytest-lsp`
-/// - `only: ["quickfix"]` does **not** match `source.pytest-lsp`
+/// - `only: ["source"]` matches `source.fixAll.pytest-ls`
+/// - `only: ["source.fixAll"]` matches `source.fixAll.pytest-ls`
+/// - `only: ["quickfix"]` does **not** match `source.pytest-ls`
 ///
 /// When `only` is `None` every kind is accepted.
 fn kind_requested(only: &Option<Vec<CodeActionKind>>, action_kind: &CodeActionKind) -> bool {
@@ -582,7 +582,7 @@ impl Backend {
                 if !fixture_map.is_empty() {
                     // ════════════════════════════════════════════════════════
                     // Pass 2: cursor-based single-fixture annotation
-                    //   source.pytest-lsp
+                    //   source.pytest-ls
                     // ════════════════════════════════════════════════════════
 
                     if want_source {
@@ -662,14 +662,14 @@ impl Backend {
                                 disabled: None,
                                 data: None,
                             };
-                            info!("Created source.pytest-lsp action: {}", title);
+                            info!("Created source.pytest-ls action: {}", title);
                             actions.push(CodeActionOrCommand::CodeAction(action));
                         }
                     }
 
                     // ════════════════════════════════════════════════════════
                     // Pass 3: file-wide fix-all
-                    //   source.fixAll.pytest-lsp
+                    //   source.fixAll.pytest-ls
                     // ════════════════════════════════════════════════════════
 
                     if want_fix_all {
@@ -751,7 +751,7 @@ impl Backend {
                                 data: None,
                             };
 
-                            info!("Created source.fixAll.pytest-lsp action: {}", title);
+                            info!("Created source.fixAll.pytest-ls action: {}", title);
                             actions.push(CodeActionOrCommand::CodeAction(action));
                         }
                     }

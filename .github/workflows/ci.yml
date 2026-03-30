@@ -42,10 +42,11 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Build
-        run: cargo build --release --features lsp_force_exit --verbose
+        run: cargo build --release --verbose
 
       - name: Build binary for tests
-        run: cargo build --features lsp_force_exit
+        run: cargo build
+
 
       - name: Run tests
         run: cargo test --verbose
@@ -68,7 +69,8 @@ jobs:
         run: cargo install cargo-tarpaulin
 
       - name: Build binary for tests
-        run: cargo build --features lsp_force_exit
+        run: cargo build
+
 
       - name: Generate coverage report
         run: cargo tarpaulin --out Xml --skip-clean

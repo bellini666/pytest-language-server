@@ -12,6 +12,7 @@ use crate::fixtures::import_analysis::adapt_type_for_consumer;
 use crate::fixtures::string_utils::parameter_has_annotation;
 use crate::fixtures::FixtureDefinition;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 use tracing::info;
@@ -65,7 +66,7 @@ impl Backend {
             self.fixture_db
                 .get_name_to_import_map(&file_path, c.as_str())
         } else {
-            HashMap::new()
+            Arc::new(HashMap::new())
         };
 
         // Pre-compute a map of fixture name → definition for O(1) lookup.

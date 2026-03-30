@@ -619,10 +619,10 @@ impl Backend {
                                 continue;
                             };
 
-                            let return_type = match &def.return_type {
-                                Some(rt) => rt,
-                                None => continue,
-                            };
+                            // SAFETY: fixture_map is built with
+                            //   filter_map(|def| def.return_type.as_ref().map(…))
+                            // so every def stored in the map has return_type.is_some().
+                            let return_type = def.return_type.as_deref().unwrap();
 
                             // Adapt dotted types to consumer's import context.
                             let (adapted_type, adapted_imports) = adapt_type_for_consumer(
@@ -700,10 +700,10 @@ impl Backend {
                                 continue;
                             };
 
-                            let return_type = match &def.return_type {
-                                Some(rt) => rt,
-                                None => continue,
-                            };
+                            // SAFETY: fixture_map is built with
+                            //   filter_map(|def| def.return_type.as_ref().map(…))
+                            // so every def stored in the map has return_type.is_some().
+                            let return_type = def.return_type.as_deref().unwrap();
 
                             // Adapt dotted types to consumer's import context.
                             let (adapted_type, adapted_imports) = adapt_type_for_consumer(

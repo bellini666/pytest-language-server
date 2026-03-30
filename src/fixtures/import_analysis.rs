@@ -25,7 +25,7 @@ use crate::fixtures::types::TypeImportSpec;
 use rustpython_parser::ast::{Mod, Stmt};
 use rustpython_parser::Mode;
 use std::collections::HashMap;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -403,6 +403,12 @@ pub fn adapt_type_for_consumer(
             } else {
                 // Full-or-nothing: if any dotted name in the type string cannot
                 // be safely rewritten, keep the bare-import spec as-is.
+                debug!(
+                    "adapt_type_for_consumer: cannot fully rewrite '{}' in '{}' \
+                     (not all dotted names have matching from-imports in consumer) \
+                     — keeping bare-import spec",
+                    spec.check_name, return_type,
+                );
                 remaining.push(spec.clone());
             }
         } else if let Some((module, name_part)) = split_from_import(&spec.import_statement) {

@@ -62,8 +62,11 @@ type AvailableFixturesCacheEntry = (u64, Arc<Vec<FixtureDefinition>>);
 /// Invalidated when either the file content or fixture definitions change.
 type ImportedFixturesCacheEntry = (u64, u64, Arc<HashSet<String>>);
 
-/// Cache entry for the name→TypeImportSpec map: (content_hash, map).
+/// Cache entry for the name→TypeImportSpec map: (content_hash, Arc<map>).
 /// Invalidated when the file content changes (same strategy as ast_cache).
+///
+/// The map is wrapped in `Arc` so a cache hit is an O(1) refcount bump rather
+/// than a full `HashMap` clone.
 ///
 /// **Size bound**: this cache is only populated by `get_name_to_import_map`, which
 /// is called from code-action and inlay-hint providers — i.e. only for files that
@@ -71,7 +74,10 @@ type ImportedFixturesCacheEntry = (u64, u64, Arc<HashSet<String>>);
 /// in both `cleanup_file_cache` (per-file, on close/delete) and
 /// `evict_cache_if_needed` (bulk, when `file_cache` exceeds `MAX_FILE_CACHE_SIZE`).
 /// No independent size constant is needed.
-type NameImportMapCacheEntry = (u64, HashMap<String, crate::fixtures::types::TypeImportSpec>);
+type NameImportMapCacheEntry = (
+    u64,
+    Arc<HashMap<String, crate::fixtures::types::TypeImportSpec>>,
+);
 
 /// Maximum number of files to keep in the file content cache.
 /// When exceeded, the oldest entries are evicted to prevent unbounded memory growth.
@@ -273,14 +279,15 @@ impl FixtureDatabase {
         &self,
         file_path: &Path,
         content: &str,
-    ) -> HashMap<String, crate::fixtures::types::TypeImportSpec> {
+    ) -> Arc<HashMap<String, crate::fixtures::types::TypeImportSpec>> {
         let hash = Self::hash_content(content);
 
         // Return cached value when content hasn't changed.
+        // Arc::clone is an O(1) refcount bump — no HashMap data is copied.
         if let Some(entry) = self.name_import_map_cache.get(file_path) {
-            let (cached_hash, ref map) = *entry;
+            let (cached_hash, ref arc_map) = *entry;
             if cached_hash == hash {
-                return map.clone();
+                return Arc::clone(arc_map);
             }
         }
 
@@ -296,9 +303,10 @@ impl FixtureDatabase {
             None => HashMap::new(),
         };
 
+        let arc_map = Arc::new(map);
         self.name_import_map_cache
-            .insert(file_path.to_path_buf(), (hash, map.clone()));
-        map
+            .insert(file_path.to_path_buf(), (hash, Arc::clone(&arc_map)));
+        arc_map
     }
 
     /// Compute a hash of the content for cache invalidation.

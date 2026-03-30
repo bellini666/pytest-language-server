@@ -277,6 +277,7 @@ fn build_import_edits(
         .iter()
         .rev()
         .find(|g| g.kind == ImportKind::ThirdParty);
+    let last_future_group = groups.iter().rev().find(|g| g.kind == ImportKind::Future);
 
     // 3. Pre-compute whether each kind will actually *insert* new lines
     //    (as opposed to only merging into existing `from X import …` lines).
@@ -305,8 +306,27 @@ fn build_import_edits(
         let fallback_line = match (last_stdlib_group, first_tp_group) {
             (Some(sg), _) => (sg.last_line + 1) as u32,
             (None, Some(tpg)) => tpg.first_line as u32,
-            (None, None) => 0,
+            // When no stdlib or third-party group exists, default to line 0 —
+            // UNLESS there is a `from __future__ import …` group, in which
+            // case we must insert *after* it (future imports must be first).
+            (None, None) => last_future_group
+                .map(|fg| (fg.last_line + 1) as u32)
+                .unwrap_or(0),
         };
+
+        // Leading separator when a `from __future__ import …` group exists but
+        // no stdlib or third-party group does — the new stdlib imports land right
+        // after the future group and need a blank line to separate them.
+        if will_insert_stdlib
+            && last_stdlib_group.is_none()
+            && last_future_group.is_some()
+            && first_tp_group.is_none()
+        {
+            edits.push(TextEdit {
+                range: Backend::create_point_range(fallback_line, 0),
+                new_text: "\n".to_string(),
+            });
+        }
 
         emit_kind_import_edits(
             layout,
@@ -1265,6 +1285,70 @@ mod tests {
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].range.start.line, 4);
         assert_eq!(edits[0].new_text, "from typing import Any\n");
+    }
+
+    #[test]
+    fn test_stdlib_not_inserted_before_future_import() {
+        // Regression: when a file has only `from __future__ import annotations`
+        // (no other stdlib group, no third-party group), a new stdlib import must
+        // be placed AFTER the future import, not before it at line 0.
+        // Before the fix, `fallback_line` was unconditionally 0 in the (None, None)
+        // arm, producing invalid Python (future import must come first).
+        let lines = vec!["from __future__ import annotations", "", "def test(): pass"];
+        let layout = layout_from_lines(&lines);
+        let spec = TypeImportSpec {
+            check_name: "Any".to_string(),
+            import_statement: "from typing import Any".to_string(),
+        };
+        let existing: HashSet<String> = HashSet::new();
+        let edits = build_import_edits(&layout, &[&spec], &existing);
+
+        // There should be a separator and the import itself.
+        assert_eq!(edits.len(), 2);
+        // The separator blank line comes first (leading separator before stdlib group).
+        assert_eq!(edits[0].range.start.line, 1);
+        assert_eq!(edits[0].new_text, "\n");
+        // The import itself goes after the future import, not before it.
+        let import_edit = edits
+            .iter()
+            .find(|e| e.new_text.contains("typing"))
+            .expect("expected a typing import edit");
+        assert!(
+            import_edit.range.start.line > 0,
+            "stdlib import was inserted at line {}, which is before \
+             `from __future__ import annotations` at line 0",
+            import_edit.range.start.line,
+        );
+        assert_eq!(import_edit.new_text, "from typing import Any\n");
+    }
+
+    #[test]
+    fn test_stdlib_not_inserted_before_future_import_no_blank_line() {
+        // Same regression, but the file has no blank line between the future
+        // import and the function definition.
+        let lines = vec!["from __future__ import annotations", "def test(): pass"];
+        let layout = layout_from_lines(&lines);
+        let spec = TypeImportSpec {
+            check_name: "Any".to_string(),
+            import_statement: "from typing import Any".to_string(),
+        };
+        let existing: HashSet<String> = HashSet::new();
+        let edits = build_import_edits(&layout, &[&spec], &existing);
+
+        assert_eq!(edits.len(), 2);
+        assert_eq!(edits[0].range.start.line, 1);
+        assert_eq!(edits[0].new_text, "\n");
+        let import_edit = edits
+            .iter()
+            .find(|e| e.new_text.contains("typing"))
+            .expect("expected a typing import edit");
+        assert!(
+            import_edit.range.start.line > 0,
+            "stdlib import was inserted at line {}, which is before \
+             `from __future__ import annotations` at line 0",
+            import_edit.range.start.line,
+        );
+        assert_eq!(import_edit.new_text, "from typing import Any\n");
     }
 
     #[test]

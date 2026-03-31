@@ -285,8 +285,8 @@ impl FixtureDatabase {
         // Return cached value when content hasn't changed.
         // Arc::clone is an O(1) refcount bump — no HashMap data is copied.
         if let Some(entry) = self.name_import_map_cache.get(file_path) {
-            let (cached_hash, ref arc_map) = *entry;
-            if cached_hash == hash {
+            let (cached_hash, arc_map) = entry.value();
+            if *cached_hash == hash {
                 return Arc::clone(arc_map);
             }
         }

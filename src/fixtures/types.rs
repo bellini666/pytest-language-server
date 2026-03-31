@@ -100,8 +100,7 @@ pub struct FixtureDefinition {
 /// A fixture usage (reference) in a Python file.
 ///
 /// This struct is `#[non_exhaustive]`: new fields may be added in future versions
-/// without a semver-major bump.  External crates must not construct literals of
-/// this type directly; obtain instances from [`FixtureDatabase`] instead.
+/// without a semver-major bump.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct FixtureUsage {

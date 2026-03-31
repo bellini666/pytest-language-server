@@ -849,7 +849,8 @@ impl FixtureDatabase {
                                 format!("import {} as {}", module, asname_str),
                             )
                         } else {
-                            (module.clone(), format!("import {}", module))
+                            let top_level = module.split('.').next().unwrap_or(&module).to_string();
+                            (top_level, format!("import {}", module))
                         };
                         map.insert(
                             check_name.clone(),
@@ -1129,6 +1130,91 @@ mod tests {
         assert_eq!(
             FixtureDatabase::file_path_to_module_path(&file),
             Some("mypkg.conftest".to_string())
+        );
+    }
+
+    // ── build_name_to_import_map / get_name_to_import_map ─────────────────
+    //
+    // These tests exercise the import-map key used for `import X.Y` (bare
+    // dotted imports without an alias).  Python binds only the top-level name
+    // in the local namespace (`import collections.abc` → name `collections`),
+    // so the map key must be the top-level component, not the full dotted path.
+
+    #[test]
+    fn test_build_map_dotted_import_keyed_by_top_level() {
+        // `import collections.abc` without alias: the bound name in Python is
+        // "collections", so the map key must be "collections" — NOT the full
+        // dotted path "collections.abc".  The import_statement must preserve
+        // the full dotted path for correct insertion in consumer files.
+        let db = FixtureDatabase::new();
+        let map = db.get_name_to_import_map(
+            &PathBuf::from("/tmp/test_bm_dotted.py"),
+            "import collections.abc\n",
+        );
+        let spec = map
+            .get("collections")
+            .expect("key 'collections' must be present");
+        assert_eq!(spec.check_name, "collections");
+        assert_eq!(spec.import_statement, "import collections.abc");
+        assert!(
+            !map.contains_key("collections.abc"),
+            "full dotted path must not be a key; only the top-level bound name is"
+        );
+    }
+
+    #[test]
+    fn test_build_map_two_level_dotted_import_keyed_by_top_level() {
+        // `import xml.etree.ElementTree` — three components; bound name is "xml".
+        // The map key must be "xml" and import_statement the full dotted path.
+        let db = FixtureDatabase::new();
+        let map = db.get_name_to_import_map(
+            &PathBuf::from("/tmp/test_bm_two_level.py"),
+            "import xml.etree.ElementTree\n",
+        );
+        let spec = map.get("xml").expect("key 'xml' must be present");
+        assert_eq!(spec.check_name, "xml");
+        assert_eq!(spec.import_statement, "import xml.etree.ElementTree");
+        assert!(
+            !map.contains_key("xml.etree.ElementTree"),
+            "full dotted path must not be a key"
+        );
+        assert!(
+            !map.contains_key("xml.etree"),
+            "partial dotted path must not be a key"
+        );
+    }
+
+    #[test]
+    fn test_build_map_simple_import_unaffected() {
+        // `import pathlib` — single component; fix must not change behaviour for
+        // module names that contain no dots.
+        let db = FixtureDatabase::new();
+        let map =
+            db.get_name_to_import_map(&PathBuf::from("/tmp/test_bm_simple.py"), "import pathlib\n");
+        let spec = map.get("pathlib").expect("key 'pathlib' must be present");
+        assert_eq!(spec.check_name, "pathlib");
+        assert_eq!(spec.import_statement, "import pathlib");
+    }
+
+    #[test]
+    fn test_build_map_aliased_dotted_import_unaffected() {
+        // `import collections.abc as abc_mod` — aliased: check_name is the alias,
+        // not the top-level module name.  The fix only touches the non-aliased branch.
+        let db = FixtureDatabase::new();
+        let map = db.get_name_to_import_map(
+            &PathBuf::from("/tmp/test_bm_aliased.py"),
+            "import collections.abc as abc_mod\n",
+        );
+        let spec = map.get("abc_mod").expect("key 'abc_mod' must be present");
+        assert_eq!(spec.check_name, "abc_mod");
+        assert_eq!(spec.import_statement, "import collections.abc as abc_mod");
+        assert!(
+            !map.contains_key("collections"),
+            "top-level name must not be keyed when alias present"
+        );
+        assert!(
+            !map.contains_key("collections.abc"),
+            "dotted path must not be keyed when alias present"
         );
     }
 }

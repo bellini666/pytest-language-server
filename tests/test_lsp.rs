@@ -4995,16 +4995,14 @@ def endpoint() -> Callable[[Request], Response]:
 #[test]
 #[timeout(30000)]
 fn test_return_type_imports_dotted_collections_abc() {
-    // `collections.abc.Iterable[str]` with `import collections.abc` — the
-    // import map stores the key as `"collections.abc"` (the full dotted name),
-    // but the tokeniser splits the return type string into individual
-    // identifiers `collections`, `abc`, `Iterable`, `str`.  None of those
-    // match the full dotted key, so no import spec is produced.
-    //
-    // This is a known limitation: `import X.Y` followed by `X.Y.Z` in an
-    // annotation is not resolved.  Use `from collections.abc import Iterable`
-    // instead for proper resolution.
-    use pytest_language_server::FixtureDatabase;
+    // `import collections.abc` + `-> collections.abc.Iterable[str]`.
+    // Python binds the top-level name "collections" when you write
+    // `import collections.abc`, so the import-map key must be "collections"
+    // and the import_statement must preserve the full dotted path.
+    // The tokeniser extracts ["collections", "abc", "Iterable", "str"];
+    // "collections" hits the map, "abc"/"Iterable" miss (correct), "str" is
+    // a builtin.  Result: one spec keyed by "collections".
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
 
     let db = FixtureDatabase::new();
     let conftest_path = PathBuf::from("/tmp/test_type_dotted_abc/conftest.py");
@@ -5026,12 +5024,95 @@ def items() -> collections.abc.Iterable[str]:
         def.return_type.as_deref(),
         Some("collections.abc.Iterable[str]")
     );
-    // No import specs produced — the dotted import key doesn't match any
-    // individual identifier token.  This documents the current limitation.
-    assert!(
-        def.return_type_imports.is_empty(),
-        "Expected no imports for dotted bare import (known limitation), got: {:?}",
-        def.return_type_imports
+    assert_eq!(
+        def.return_type_imports,
+        vec![TypeImportSpec {
+            check_name: "collections".to_string(),
+            import_statement: "import collections.abc".to_string(),
+        }],
+        "bare dotted import must be keyed by the top-level bound name"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_dotted_two_level_submodule() {
+    // `import xml.etree.ElementTree` (three components) + return type
+    // `xml.etree.ElementTree.Element`.  The bound name is "xml", so
+    // check_name is "xml" and import_statement is the full dotted path.
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_type_two_level_dotted/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+import xml.etree.ElementTree
+
+@pytest.fixture
+def element() -> xml.etree.ElementTree.Element:
+    return xml.etree.ElementTree.Element("root")
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("element").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(
+        def.return_type.as_deref(),
+        Some("xml.etree.ElementTree.Element")
+    );
+    assert_eq!(
+        def.return_type_imports,
+        vec![TypeImportSpec {
+            check_name: "xml".to_string(),
+            import_statement: "import xml.etree.ElementTree".to_string(),
+        }]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_return_type_imports_dotted_import_combined_with_from_import() {
+    // `import collections.abc` alongside `from pathlib import Path`.
+    // Return type `collections.abc.Sequence[Path]` needs both imports:
+    // one keyed by "collections" (dotted bare import) and one keyed by "Path"
+    // (from-import).
+    use pytest_language_server::{FixtureDatabase, TypeImportSpec};
+
+    let db = FixtureDatabase::new();
+    let conftest_path = PathBuf::from("/tmp/test_type_dotted_combined/conftest.py");
+
+    let conftest_content = r#"
+import pytest
+import collections.abc
+from pathlib import Path
+
+@pytest.fixture
+def paths() -> collections.abc.Sequence[Path]:
+    return [Path("/tmp")]
+"#;
+    db.analyze_file(conftest_path.clone(), conftest_content);
+
+    let defs = db.definitions.get("paths").expect("fixture not found");
+    let def = &defs[0];
+
+    assert_eq!(
+        def.return_type.as_deref(),
+        Some("collections.abc.Sequence[Path]")
+    );
+    assert_eq!(
+        def.return_type_imports,
+        vec![
+            TypeImportSpec {
+                check_name: "collections".to_string(),
+                import_statement: "import collections.abc".to_string(),
+            },
+            TypeImportSpec {
+                check_name: "Path".to_string(),
+                import_statement: "from pathlib import Path".to_string(),
+            },
+        ]
     );
 }
 

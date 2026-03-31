@@ -7505,7 +7505,7 @@ def test_uses_request(request):
 
 #[tokio::test]
 async fn test_request_code_action_fix_all_annotates_request_param() {
-    // source.fixAll.pytest-lsp must include `request: FixtureRequest` when
+    // source.fixAll.pytest-ls must include `request: FixtureRequest` when
     // the `request` fixture definition is available with a return type.
     use pytest_language_server::FixtureDatabase;
     use std::path::PathBuf;
@@ -7564,7 +7564,7 @@ def test_parametrized(request):
         },
         context: CodeActionContext {
             diagnostics: vec![],
-            only: Some(vec![CodeActionKind::from("source.fixAll.pytest-lsp")]),
+            only: Some(vec![CodeActionKind::from("source.fixAll.pytest-ls")]),
             trigger_kind: None,
         },
         work_done_progress_params: WorkDoneProgressParams {
@@ -7582,13 +7582,13 @@ def test_parametrized(request):
         .iter()
         .find_map(|a| match a {
             CodeActionOrCommand::CodeAction(ca)
-                if ca.kind == Some(CodeActionKind::from("source.fixAll.pytest-lsp")) =>
+                if ca.kind == Some(CodeActionKind::from("source.fixAll.pytest-ls")) =>
             {
                 Some(ca)
             }
             _ => None,
         })
-        .expect("Should have a source.fixAll.pytest-lsp action");
+        .expect("Should have a source.fixAll.pytest-ls action");
 
     // Exactly 1 fixture (request) should be annotated.
     assert!(

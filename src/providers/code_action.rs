@@ -518,10 +518,25 @@ impl Backend {
                 let insert_line = Self::internal_line_to_lsp(insertion.line);
                 let insert_char = insertion.char_pos as u32;
 
-                let param_text = if insertion.needs_comma {
-                    format!(", {}{}", fixture.name, type_suffix)
-                } else {
-                    format!("{}{}", fixture.name, type_suffix)
+                let param_text = match &insertion.multiline_indent {
+                    Some(indent) => {
+                        if insertion.needs_comma {
+                            // No trailing comma on the last argument — append `,`
+                            // after it, then the new parameter on a new indented line.
+                            format!(",\n{}{}{}", indent, fixture.name, type_suffix)
+                        } else {
+                            // Trailing comma already present — add the new parameter
+                            // on a new indented line and mirror the trailing-comma style.
+                            format!("\n{}{}{},", indent, fixture.name, type_suffix)
+                        }
+                    }
+                    None => {
+                        if insertion.needs_comma {
+                            format!(", {}{}", fixture.name, type_suffix)
+                        } else {
+                            format!("{}{}", fixture.name, type_suffix)
+                        }
+                    }
                 };
 
                 // ── Build import + parameter edits ───────────────────────────

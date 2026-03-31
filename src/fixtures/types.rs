@@ -176,10 +176,28 @@ pub enum CompletionContext {
 /// Information about where to insert a new parameter in a function signature.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParamInsertionInfo {
-    /// Line number (1-indexed) where the function signature is.
+    /// Line number (1-indexed) where the new parameter should be inserted.
     pub line: usize,
     /// Character position where the new parameter should be inserted.
     pub char_pos: usize,
     /// Whether a comma needs to be added before the new parameter.
+    ///
+    /// For single-line signatures: prepend `, ` to the new parameter text.
+    /// For multiline signatures (`multiline_indent` is `Some`): if `true`, the
+    /// last argument has no trailing comma and one must be appended there; if
+    /// `false`, a trailing comma already exists and only the new-line + indent
+    /// prefix is needed.
     pub needs_comma: bool,
+    /// For multiline signatures where `)` sits on its own line: the indentation
+    /// string (spaces/tabs) to use for the new parameter.  The insertion point
+    /// (`line` / `char_pos`) is set to right after the last argument's content
+    /// rather than at the `)` itself.
+    ///
+    /// When `Some`, callers should produce:
+    ///   - `needs_comma=true`  → insert `,\n<indent><param>`  (adds trailing comma to prev arg)
+    ///   - `needs_comma=false` → insert `\n<indent><param>,`  (mirrors trailing-comma style)
+    ///
+    /// When `None` this is a single-line (or inline-paren) signature and the
+    /// classic `, <param>` / `<param>` text applies.
+    pub multiline_indent: Option<String>,
 }

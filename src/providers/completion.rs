@@ -321,10 +321,25 @@ impl Backend {
 
                 // Create additional text edit to add the fixture as a parameter
                 let additional_text_edits = insertion_info.as_ref().map(|info| {
-                    let text = if info.needs_comma {
-                        format!(", {}", ef.fixture.name)
-                    } else {
-                        ef.fixture.name.clone()
+                    let text = match &info.multiline_indent {
+                        Some(indent) => {
+                            if info.needs_comma {
+                                // No trailing comma — append `,` after last arg,
+                                // then new param on a new indented line.
+                                format!(",\n{}{}", indent, ef.fixture.name)
+                            } else {
+                                // Trailing comma present — new param on a new
+                                // indented line, mirroring the trailing-comma style.
+                                format!("\n{}{},", indent, ef.fixture.name)
+                            }
+                        }
+                        None => {
+                            if info.needs_comma {
+                                format!(", {}", ef.fixture.name)
+                            } else {
+                                ef.fixture.name.clone()
+                            }
+                        }
                     };
                     let lsp_line = Self::internal_line_to_lsp(info.line);
                     vec![TextEdit {

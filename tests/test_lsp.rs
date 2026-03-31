@@ -2153,6 +2153,8 @@ fn test_get_function_param_insertion_info_multiline() {
 
     let db = FixtureDatabase::new();
 
+    // Trailing-comma style: last arg ends with `,` — new param should be
+    // inserted after that comma, not before `)`.
     let content = r#"
 def test_multiline(
     first_param,
@@ -2170,9 +2172,73 @@ def test_multiline(
         "Should find insertion info for multiline signature"
     );
     let info = info.unwrap();
-    assert!(info.needs_comma, "Multiline with params should need comma");
-    assert_eq!(info.line, 5, "Closing paren should be on line 5");
-    assert_eq!(info.char_pos, 0, "Closing paren should be at column 0");
+
+    // The insertion point is right after the trailing `,` on the last-arg line,
+    // NOT at the `)` position.
+    //   line 4 = `    second_param,`  →  `,` is at col 16, insert after it at col 17.
+    assert!(
+        info.multiline_indent.is_some(),
+        "Should use multiline indent for paren-on-own-line signature"
+    );
+    assert_eq!(
+        info.multiline_indent.as_deref(),
+        Some("    "),
+        "Indent should match existing param indentation"
+    );
+    // Trailing comma already present → no extra comma needed before new param.
+    assert!(
+        !info.needs_comma,
+        "Trailing comma present — needs_comma should be false"
+    );
+    assert_eq!(info.line, 4, "Insert on the last-arg line (line 4)");
+    assert_eq!(
+        info.char_pos, 17,
+        "Insert right after the trailing comma (col 17)"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_get_function_param_insertion_info_multiline_no_trailing_comma() {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = FixtureDatabase::new();
+
+    // No trailing comma: last arg has no `,` before `)`.  The fix must add a
+    // comma after that arg and then put the new param on a fresh line.
+    let content = r#"
+def test_multiline(
+    first_param,
+    second_param
+):
+    pass
+"#;
+    let file_path = PathBuf::from("/tmp/project/test_example_no_tc.py");
+    db.analyze_file(file_path.clone(), content);
+
+    let info = db.get_function_param_insertion_info(&file_path, 2);
+    assert!(
+        info.is_some(),
+        "Should find insertion info for multiline signature without trailing comma"
+    );
+    let info = info.unwrap();
+
+    // The insertion point is right after `second_param` (col 16, the char after `m`).
+    assert!(
+        info.multiline_indent.is_some(),
+        "Should use multiline indent"
+    );
+    assert_eq!(info.multiline_indent.as_deref(), Some("    "));
+    // No trailing comma → caller must prepend `,` before the new param.
+    assert!(
+        info.needs_comma,
+        "No trailing comma — needs_comma should be true"
+    );
+    assert_eq!(info.line, 4, "Insert on the last-arg line (line 4)");
+    assert_eq!(
+        info.char_pos, 16,
+        "Insert right after `second_param` (col 16)"
+    );
 }
 
 #[test]
@@ -2246,6 +2312,8 @@ fn test_get_function_param_insertion_info_multiline_return_annotation() {
     let db = FixtureDatabase::new();
 
     // Multi-line signature AND a return annotation — both issues at once.
+    // The `-> int:` must not confuse the `)` finder, and the multiline
+    // insertion strategy still applies.
     let content = r#"
 def test_multiline_return(
     first_param,
@@ -2262,9 +2330,22 @@ def test_multiline_return(
         "Should find insertion info for multi-line signature with return annotation"
     );
     let info = info.unwrap();
-    assert!(info.needs_comma, "Should need comma (has existing params)");
-    assert_eq!(info.line, 5, "Closing paren should be on line 5");
-    assert_eq!(info.char_pos, 0, "Closing paren should be at column 0");
+
+    // Same multiline strategy: insert after trailing `,` on last-arg line.
+    assert!(
+        info.multiline_indent.is_some(),
+        "Should use multiline indent"
+    );
+    assert_eq!(info.multiline_indent.as_deref(), Some("    "));
+    assert!(
+        !info.needs_comma,
+        "Trailing comma present — needs_comma should be false"
+    );
+    assert_eq!(info.line, 4, "Insert on the last-arg line (line 4)");
+    assert_eq!(
+        info.char_pos, 17,
+        "Insert right after the trailing comma (col 17)"
+    );
 }
 
 #[test]

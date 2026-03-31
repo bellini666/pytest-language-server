@@ -1380,10 +1380,24 @@ impl FixtureDatabase {
             })
         };
 
+        // Check whether `)` is on its own line (only whitespace before it on
+        // that line).  If so, and there are existing params, use the multiline
+        // insertion strategy: insert right after the last argument content
+        // instead of at `)` itself.
+        let close_paren_line = byte_offset_to_line_1based(close_paren, &line_index);
+        if has_params {
+            if let Some(ml) =
+                try_multiline_insertion(close_paren, close_paren_line, bytes, &line_index)
+            {
+                return Some(ml);
+            }
+        }
+
         Some(ParamInsertionInfo {
-            line: byte_offset_to_line_1based(close_paren, &line_index),
+            line: close_paren_line,
             char_pos: byte_offset_to_col(close_paren, &line_index),
             needs_comma: has_params,
+            multiline_indent: None,
         })
     }
 
@@ -1996,10 +2010,108 @@ fn param_insertion_from_args(
         || args.kwarg.is_some();
 
     let close_paren = scan_for_signature_close_paren(bytes, def_start)?;
+    let close_paren_line = byte_offset_to_line_1based(close_paren, line_index);
+
+    // When `)` sits on its own line and there are existing params, use the
+    // multiline-paren insertion strategy so that the comma ends up after the
+    // last argument rather than before `)`.
+    if has_params {
+        if let Some(ml) = try_multiline_insertion(close_paren, close_paren_line, bytes, line_index)
+        {
+            return Some(ml);
+        }
+    }
 
     Some(ParamInsertionInfo {
-        line: byte_offset_to_line_1based(close_paren, line_index),
+        line: close_paren_line,
         char_pos: byte_offset_to_col(close_paren, line_index),
         needs_comma: has_params,
+        multiline_indent: None,
     })
+}
+
+/// If `close_paren` is on a line that contains only whitespace before it
+/// (i.e. `)` is on its own line), return a `ParamInsertionInfo` whose
+/// insertion point is right after the last non-whitespace byte before `)`.
+///
+/// This ensures that for multiline signatures like
+/// ```python
+/// def test_foo(
+///     fixture_a: TypeA,
+///     fixture_b: TypeB,   ← last content; trailing comma present
+/// ):
+/// ```
+/// the new parameter is appended as `\n    new_fixture,` rather than
+/// `, new_fixture` being injected in front of the lone `)`.
+///
+/// Returns `None` when `)` is NOT on its own line (single-line or inline-paren
+/// signature), telling callers to fall back to the classic strategy.
+fn try_multiline_insertion(
+    close_paren: usize,
+    close_paren_line: usize,
+    bytes: &[u8],
+    line_index: &[usize],
+) -> Option<ParamInsertionInfo> {
+    // `)` must be on its own line — only whitespace may precede it on that line.
+    let line_start = line_index[close_paren_line - 1];
+    let only_ws = bytes[line_start..close_paren]
+        .iter()
+        .all(|&b| b == b' ' || b == b'\t');
+    if !only_ws {
+        return None;
+    }
+
+    // Scan backwards from the byte just before `)` to find the last
+    // non-whitespace byte.  That is either a `,` (trailing comma) or the
+    // last character of the final argument.
+    let last_content_pos = find_last_content_before(bytes, close_paren)?;
+    let has_trailing_comma = bytes[last_content_pos] == b',';
+
+    // Determine the indentation for the new parameter by looking at the
+    // leading whitespace of the line that contains `last_content_pos`.
+    let indent = indent_of_line_at(bytes, last_content_pos, line_index);
+
+    // Insert point: the byte immediately after `last_content_pos`.
+    // For `    fixture_b: TypeB,\n` that's right after the `,`, before `\n`.
+    let insert_offset = last_content_pos + 1;
+    let insert_line = byte_offset_to_line_1based(insert_offset, line_index);
+    let insert_col = byte_offset_to_col(insert_offset, line_index);
+
+    Some(ParamInsertionInfo {
+        line: insert_line,
+        char_pos: insert_col,
+        // If there is already a trailing comma we only need to emit the
+        // newline + indent + new param (+ trailing comma to mirror style).
+        // If there is no trailing comma we must first add `,` after the last
+        // argument and then emit the newline + indent + new param.
+        needs_comma: !has_trailing_comma,
+        multiline_indent: Some(indent),
+    })
+}
+
+/// Scan backwards from `before` (exclusive) through `bytes`, skipping ASCII
+/// whitespace (`' '`, `'\t'`, `'\n'`, `'\r'`), and return the byte offset of
+/// the first non-whitespace byte found, or `None` if only whitespace precedes
+/// the position.
+fn find_last_content_before(bytes: &[u8], before: usize) -> Option<usize> {
+    let mut pos = before;
+    while pos > 0 {
+        pos -= 1;
+        match bytes[pos] {
+            b' ' | b'\t' | b'\n' | b'\r' => continue,
+            _ => return Some(pos),
+        }
+    }
+    None
+}
+
+/// Return the leading-whitespace string of the line that contains `byte_pos`.
+fn indent_of_line_at(bytes: &[u8], byte_pos: usize, line_index: &[usize]) -> String {
+    let line_1based = byte_offset_to_line_1based(byte_pos, line_index);
+    let line_start = line_index[line_1based - 1];
+    let indent_len = bytes[line_start..]
+        .iter()
+        .take_while(|&&b| b == b' ' || b == b'\t')
+        .count();
+    String::from_utf8_lossy(&bytes[line_start..line_start + indent_len]).into_owned()
 }

@@ -15,7 +15,7 @@ This is a [Zed](https://zed.dev) extension that provides support for the [pytest
 - **Code Lens**: See fixture usage counts directly above definitions
 - **Inlay Hints**: See fixture return types inline next to parameters
 - **Diagnostics**: Warnings for undeclared fixtures, scope mismatches, and circular dependencies
-- **Code Actions**: Quick fixes to add missing fixture parameters
+- **Code Actions**: Quick fixes to add missing fixture parameters, add type annotations for fixture parameters, and bulk-annotate all fixtures in a file — with automatic isort-aware import insertion
 - **Fixture Priority**: Correctly handles pytest's fixture shadowing rules
 - **Simple Setup**: Uses your existing pytest-language-server installation
 - **Cross-platform**: Works on macOS, Linux, and Windows

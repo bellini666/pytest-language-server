@@ -7,15 +7,30 @@
 //! defined in that module become available as if they were defined in the
 //! conftest.py itself.
 
+use super::types::TypeImportSpec;
 use super::FixtureDatabase;
 use once_cell::sync::Lazy;
 use rustpython_parser::ast::{Expr, Stmt};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tracing::{debug, info};
+use std::sync::{Arc, OnceLock};
+use tracing::{debug, info, warn};
 
-/// Static HashSet of standard library module names for O(1) lookup.
+/// Runtime stdlib module names populated from the venv's Python binary via
+/// `sys.stdlib_module_names` (Python ≥ 3.10).  When set, this takes
+/// precedence over the static [`STDLIB_MODULES`] fallback list in
+/// [`is_stdlib_module`].
+///
+/// Set at most once per process lifetime by [`try_init_stdlib_from_python`].
+static RUNTIME_STDLIB_MODULES: OnceLock<HashSet<String>> = OnceLock::new();
+
+/// Built-in fallback list of standard library module names for O(1) lookup.
+///
+/// Used when [`RUNTIME_STDLIB_MODULES`] has not been populated (no venv
+/// found, Python < 3.10, or the Python binary could not be executed).
+/// Intentionally conservative — it is better to misclassify an unknown
+/// third-party module as stdlib (and skip inserting a redundant import)
+/// than to misclassify a stdlib module as third-party.
 static STDLIB_MODULES: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     [
         "os",
@@ -272,8 +287,7 @@ impl FixtureDatabase {
     /// Check if a module is a standard library module that can't contain fixtures.
     /// Uses a static HashSet for O(1) lookup instead of linear array search.
     fn is_standard_library_module(&self, module: &str) -> bool {
-        let first_part = module.split('.').next().unwrap_or(module);
-        STDLIB_MODULES.contains(first_part)
+        is_stdlib_module(module)
     }
 
     /// Resolve a module path to a file path.
@@ -565,5 +579,642 @@ impl FixtureDatabase {
         let mut visited = HashSet::new();
         let imported = self.get_imported_fixtures(file_path, &mut visited);
         imported.contains(fixture_name)
+    }
+}
+
+/// Check whether `module` (possibly dotted, e.g. `"collections.abc"`) belongs
+/// to the Python standard library.  Only the top-level package name is tested.
+///
+/// Checks [`RUNTIME_STDLIB_MODULES`] first (populated by
+/// [`try_init_stdlib_from_python`] when a venv with Python ≥ 3.10 is found),
+/// then falls back to the built-in [`STDLIB_MODULES`] list.
+///
+/// Exposed as a free function so that the code-action provider can classify
+/// import statements without access to a `FixtureDatabase` instance.
+pub(crate) fn is_stdlib_module(module: &str) -> bool {
+    let first_part = module.split('.').next().unwrap_or(module);
+    if let Some(runtime) = RUNTIME_STDLIB_MODULES.get() {
+        runtime.contains(first_part)
+    } else {
+        STDLIB_MODULES.contains(first_part)
+    }
+}
+
+/// Try to locate the Python interpreter inside a virtual environment.
+///
+/// Checks the standard Unix (`bin/python3`, `bin/python`) and Windows
+/// (`Scripts/python3.exe`, `Scripts/python.exe`) layouts in that order.
+/// Returns the first path that resolves to an existing regular file (or
+/// symlink to one).
+fn find_venv_python(venv_path: &Path) -> Option<PathBuf> {
+    // Unix / macOS layout
+    for name in &["python3", "python"] {
+        let candidate = venv_path.join("bin").join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    // Windows layout
+    for name in &["python3.exe", "python.exe"] {
+        let candidate = venv_path.join("Scripts").join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Attempt to populate [`RUNTIME_STDLIB_MODULES`] by querying the Python
+/// interpreter found inside `venv_path`.
+///
+/// Runs:
+/// ```text
+/// python -I -c "import sys; print('\n'.join(sorted(sys.stdlib_module_names)))"
+/// ```
+///
+/// `sys.stdlib_module_names` was added in Python 3.10.  For older interpreters
+/// the command exits with a non-zero status and this function returns `false`,
+/// leaving [`is_stdlib_module`] to use the static fallback list.
+///
+/// The `OnceLock` guarantees that the runtime list is set at most once per
+/// process lifetime.  Subsequent calls return `true` immediately when the
+/// lock is already populated.
+///
+/// Returns `true` if the runtime list is now available (either just populated
+/// or already set by a previous call), `false` otherwise.
+pub(crate) fn try_init_stdlib_from_python(venv_path: &Path) -> bool {
+    // Already initialised — nothing to do.
+    if RUNTIME_STDLIB_MODULES.get().is_some() {
+        return true;
+    }
+
+    let Some(python) = find_venv_python(venv_path) else {
+        debug!(
+            "try_init_stdlib_from_python: no Python binary found in {:?}",
+            venv_path
+        );
+        return false;
+    };
+
+    debug!(
+        "try_init_stdlib_from_python: querying stdlib module names via {:?}",
+        python
+    );
+
+    // -I (isolated): ignore PYTHONPATH, user site, PYTHONSTARTUP — we only
+    // need a pristine `sys` module, nothing else.
+    let output = match std::process::Command::new(&python)
+        .args([
+            "-I",
+            "-c",
+            "import sys; print('\\n'.join(sorted(sys.stdlib_module_names)))",
+        ])
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => {
+            warn!(
+                "try_init_stdlib_from_python: failed to run {:?}: {}",
+                python, e
+            );
+            return false;
+        }
+    };
+
+    if !output.status.success() {
+        // Most likely Python < 3.10 — AttributeError on sys.stdlib_module_names.
+        debug!(
+            "try_init_stdlib_from_python: Python exited with {:?} \
+             (Python < 3.10 or other error) — using built-in stdlib list",
+            output.status.code()
+        );
+        return false;
+    }
+
+    let stdout = match std::str::from_utf8(&output.stdout) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(
+                "try_init_stdlib_from_python: Python output is not valid UTF-8: {}",
+                e
+            );
+            return false;
+        }
+    };
+
+    let modules: HashSet<String> = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .collect();
+
+    if modules.is_empty() {
+        warn!("try_init_stdlib_from_python: Python returned an empty module list");
+        return false;
+    }
+
+    info!(
+        "try_init_stdlib_from_python: loaded {} stdlib module names from {:?}",
+        modules.len(),
+        python
+    );
+
+    // Ignore the error — another thread may have raced us; either way the
+    // OnceLock now contains a valid set.
+    let _ = RUNTIME_STDLIB_MODULES.set(modules);
+    true
+}
+
+impl FixtureDatabase {
+    /// Convert a file path to a dotted Python module path string.
+    ///
+    /// Walks upward from the file's parent directory, accumulating package
+    /// components as long as each directory contains an `__init__.py` file.
+    /// Stops at the first directory that is not a package.
+    ///
+    /// **Note:** This function checks the filesystem (`__init__.py` existence)
+    /// at call time.  Results are captured in `FixtureDefinition::return_type_imports`
+    /// during analysis — if `__init__.py` files are added or removed after
+    /// analysis, re-analysis of the fixture file is required for the module
+    /// path to update.
+    ///
+    /// Examples (assuming `tests/` has `__init__.py` but `project/` does not):
+    /// - `/project/tests/conftest.py`      →  `"tests.conftest"`
+    /// - `/project/tests/__init__.py`      →  `"tests"`   (package root, stem dropped)
+    /// - `/tmp/conftest.py`                →  `"conftest"`   (no __init__.py found)
+    /// - `/project/tests/helpers/utils.py` →  `"tests.helpers.utils"` (nested package)
+    pub(crate) fn file_path_to_module_path(file_path: &Path) -> Option<String> {
+        let stem = file_path.file_stem()?.to_str()?;
+        // `__init__.py` *is* the package — its stem must not be added as a
+        // component.  The parent-directory traversal loop below will push the
+        // directory name (e.g. `pkg/sub/__init__.py` → `"pkg.sub"`).
+        // Any other file gets its stem as the first component
+        // (e.g. `pkg/sub/module.py` → `"pkg.sub.module"`).
+        let mut components = if stem == "__init__" {
+            vec![]
+        } else {
+            vec![stem.to_string()]
+        };
+        let mut current = file_path.parent()?;
+
+        loop {
+            if current.join("__init__.py").exists() {
+                let name = current.file_name().and_then(|n| n.to_str())?;
+                components.push(name.to_string());
+                match current.parent() {
+                    Some(parent) => current = parent,
+                    None => break,
+                }
+            } else {
+                break;
+            }
+        }
+
+        if components.is_empty() {
+            return None;
+        }
+
+        components.reverse();
+        Some(components.join("."))
+    }
+
+    /// Resolve a relative import (e.g. `from .models import X` where level=1,
+    /// module="models") to an absolute dotted module path string suitable for
+    /// use in any file (not just the fixture's package).
+    ///
+    /// Returns `None` when the path cannot be resolved (e.g. level goes above
+    /// the filesystem root).
+    fn resolve_relative_module_to_string(
+        &self,
+        module: &str,
+        level: usize,
+        fixture_file: &Path,
+    ) -> Option<String> {
+        // Navigate up `level` directories from the fixture file's own directory.
+        // level=1 means "current package" (.models), level=2 means "parent" (..models).
+        let mut base = fixture_file.parent()?;
+        for _ in 1..level {
+            base = base.parent()?;
+        }
+
+        // Build the theoretical target file path (may or may not exist on disk).
+        let target = if module.is_empty() {
+            // `from . import X` — target is the package __init__.py itself.
+            base.join("__init__.py")
+        } else {
+            // Replace dots in sub-module path with path separators.
+            let rel_path = module.replace('.', "/");
+            base.join(format!("{}.py", rel_path))
+        };
+
+        // Convert that file path to a dotted module path string.
+        Self::file_path_to_module_path(&target)
+    }
+
+    /// Build a map from imported name → `TypeImportSpec` for all import
+    /// statements in `stmts`.
+    ///
+    /// Unlike `extract_fixture_imports`, this function processes **all** imports
+    /// (including stdlib such as `pathlib` and `typing`) because type annotations
+    /// may reference any imported name.  Relative imports are resolved to their
+    /// absolute form so the resulting `import_statement` strings are valid in any
+    /// file, not just in the fixture's own package.
+    ///
+    /// Covers all four Python import styles:
+    ///
+    /// | Source statement                    | check_name  | import_statement               |
+    /// |-------------------------------------|-------------|-------------------------------|
+    /// | `import pathlib`                    | `"pathlib"` | `"import pathlib"`             |
+    /// | `import pathlib as pl`              | `"pl"`      | `"import pathlib as pl"`       |
+    /// | `from pathlib import Path`          | `"Path"`    | `"from pathlib import Path"`   |
+    /// | `from pathlib import Path as P`     | `"P"`       | `"from pathlib import Path as P"` |
+    pub(crate) fn build_name_to_import_map(
+        &self,
+        stmts: &[Stmt],
+        fixture_file: &Path,
+    ) -> HashMap<String, TypeImportSpec> {
+        let mut map = HashMap::new();
+
+        for stmt in stmts {
+            match stmt {
+                Stmt::Import(import_stmt) => {
+                    for alias in &import_stmt.names {
+                        let module = alias.name.to_string();
+                        let (check_name, import_statement) = if let Some(ref asname) = alias.asname
+                        {
+                            let asname_str = asname.to_string();
+                            (
+                                asname_str.clone(),
+                                format!("import {} as {}", module, asname_str),
+                            )
+                        } else {
+                            let top_level = module.split('.').next().unwrap_or(&module).to_string();
+                            (top_level, format!("import {}", module))
+                        };
+                        map.insert(
+                            check_name.clone(),
+                            TypeImportSpec {
+                                check_name,
+                                import_statement,
+                            },
+                        );
+                    }
+                }
+
+                Stmt::ImportFrom(import_from) => {
+                    let level = import_from
+                        .level
+                        .as_ref()
+                        .map(|l| l.to_usize())
+                        .unwrap_or(0);
+                    let raw_module = import_from
+                        .module
+                        .as_ref()
+                        .map(|m| m.to_string())
+                        .unwrap_or_default();
+
+                    // Resolve relative imports to absolute module paths.
+                    let abs_module = if level > 0 {
+                        match self.resolve_relative_module_to_string(
+                            &raw_module,
+                            level,
+                            fixture_file,
+                        ) {
+                            Some(m) => m,
+                            None => {
+                                debug!(
+                                    "Could not resolve relative import '.{}' from {:?}, skipping",
+                                    raw_module, fixture_file
+                                );
+                                continue;
+                            }
+                        }
+                    } else {
+                        raw_module
+                    };
+
+                    for alias in &import_from.names {
+                        if alias.name.as_str() == "*" {
+                            continue; // Star imports don't bind individual names here.
+                        }
+                        let name = alias.name.to_string();
+                        let (check_name, import_statement) = if let Some(ref asname) = alias.asname
+                        {
+                            let asname_str = asname.to_string();
+                            (
+                                asname_str.clone(),
+                                format!("from {} import {} as {}", abs_module, name, asname_str),
+                            )
+                        } else {
+                            (name.clone(), format!("from {} import {}", abs_module, name))
+                        };
+                        map.insert(
+                            check_name.clone(),
+                            TypeImportSpec {
+                                check_name,
+                                import_statement,
+                            },
+                        );
+                    }
+                }
+
+                _ => {}
+            }
+        }
+
+        map
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// Create a temp directory tree and return a guard that deletes it on drop.
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(name);
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    // ── find_venv_python ───────────────────────────────────────────────────
+
+    /// Write an empty file at `path`, creating parent directories as needed.
+    fn touch(path: &std::path::Path) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"").unwrap();
+    }
+
+    #[test]
+    fn test_find_venv_python_unix_python3() {
+        let dir = TempDir::new("fvp_unix_py3");
+        touch(&dir.path().join("bin/python3"));
+        let result = find_venv_python(dir.path());
+        assert_eq!(result, Some(dir.path().join("bin/python3")));
+    }
+
+    #[test]
+    fn test_find_venv_python_unix_python_fallback() {
+        // Only `python` present (no `python3`).
+        let dir = TempDir::new("fvp_unix_py");
+        touch(&dir.path().join("bin/python"));
+        let result = find_venv_python(dir.path());
+        assert_eq!(result, Some(dir.path().join("bin/python")));
+    }
+
+    #[test]
+    fn test_find_venv_python_unix_prefers_python3_over_python() {
+        let dir = TempDir::new("fvp_unix_prefer");
+        touch(&dir.path().join("bin/python3"));
+        touch(&dir.path().join("bin/python"));
+        let result = find_venv_python(dir.path());
+        assert_eq!(
+            result,
+            Some(dir.path().join("bin/python3")),
+            "python3 should be preferred over python"
+        );
+    }
+
+    #[test]
+    fn test_find_venv_python_windows_style() {
+        let dir = TempDir::new("fvp_win_py");
+        touch(&dir.path().join("Scripts/python.exe"));
+        let result = find_venv_python(dir.path());
+        assert_eq!(result, Some(dir.path().join("Scripts/python.exe")));
+    }
+
+    #[test]
+    fn test_find_venv_python_windows_prefers_python3_exe() {
+        let dir = TempDir::new("fvp_win_prefer");
+        touch(&dir.path().join("Scripts/python3.exe"));
+        touch(&dir.path().join("Scripts/python.exe"));
+        let result = find_venv_python(dir.path());
+        assert_eq!(
+            result,
+            Some(dir.path().join("Scripts/python3.exe")),
+            "python3.exe should be preferred over python.exe"
+        );
+    }
+
+    #[test]
+    fn test_find_venv_python_not_found() {
+        let dir = TempDir::new("fvp_empty");
+        assert_eq!(find_venv_python(dir.path()), None);
+    }
+
+    #[test]
+    fn test_find_venv_python_wrong_layout() {
+        // Python binary at the venv root — not in bin/ or Scripts/.
+        let dir = TempDir::new("fvp_wrong_layout");
+        touch(&dir.path().join("python3"));
+        assert_eq!(find_venv_python(dir.path()), None);
+    }
+
+    #[test]
+    fn test_try_init_stdlib_no_python_returns_false_or_already_set() {
+        // An empty venv directory has no Python binary → should return false
+        // without panicking.  If RUNTIME_STDLIB_MODULES was already populated
+        // by a prior test (OnceLock is set once per process) the function
+        // returns true; either way is_stdlib_module must remain correct.
+        let dir = TempDir::new("fvp_no_python");
+        let _ = try_init_stdlib_from_python(dir.path());
+        assert!(is_stdlib_module("os"), "os must always be stdlib");
+        assert!(is_stdlib_module("sys"), "sys must always be stdlib");
+        assert!(!is_stdlib_module("pytest"), "pytest is not stdlib");
+        assert!(!is_stdlib_module("flask"), "flask is not stdlib");
+    }
+
+    // ── file_path_to_module_path ────────────────────────────────────────────
+
+    #[test]
+    fn test_module_path_regular_file_no_package() {
+        // File in a plain directory (no __init__.py) → just the stem.
+        let dir = TempDir::new("fptmp_plain");
+        let file = dir.path().join("conftest.py");
+        fs::write(&file, "").unwrap();
+        // No __init__.py in the directory, so the result is just "conftest".
+        assert_eq!(
+            FixtureDatabase::file_path_to_module_path(&file),
+            Some("conftest".to_string())
+        );
+    }
+
+    #[test]
+    fn test_module_path_regular_file_in_package() {
+        // pkg/__init__.py exists → file inside pkg resolves to "pkg.module".
+        let dir = TempDir::new("fptmp_pkg");
+        let pkg = dir.path().join("pkg");
+        fs::create_dir_all(&pkg).unwrap();
+        fs::write(pkg.join("__init__.py"), "").unwrap();
+        let file = pkg.join("module.py");
+        fs::write(&file, "").unwrap();
+        assert_eq!(
+            FixtureDatabase::file_path_to_module_path(&file),
+            Some("pkg.module".to_string())
+        );
+    }
+
+    #[test]
+    fn test_module_path_init_file_is_package_root() {
+        // pkg/__init__.py itself → resolves to "pkg", NOT "pkg.__init__".
+        // This is the regression test for the `from . import X` bug fix.
+        let dir = TempDir::new("fptmp_init");
+        let pkg = dir.path().join("pkg");
+        fs::create_dir_all(&pkg).unwrap();
+        let init = pkg.join("__init__.py");
+        fs::write(&init, "").unwrap();
+        assert_eq!(
+            FixtureDatabase::file_path_to_module_path(&init),
+            Some("pkg".to_string())
+        );
+    }
+
+    #[test]
+    fn test_module_path_nested_init_file() {
+        // pkg/sub/__init__.py → resolves to "pkg.sub", NOT "pkg.sub.__init__".
+        let dir = TempDir::new("fptmp_nested_init");
+        let pkg = dir.path().join("pkg");
+        let sub = pkg.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(pkg.join("__init__.py"), "").unwrap();
+        let init = sub.join("__init__.py");
+        fs::write(&init, "").unwrap();
+        assert_eq!(
+            FixtureDatabase::file_path_to_module_path(&init),
+            Some("pkg.sub".to_string())
+        );
+    }
+
+    #[test]
+    fn test_module_path_nested_package() {
+        // pkg/sub/module.py with both __init__.py files → "pkg.sub.module".
+        let dir = TempDir::new("fptmp_nested");
+        let pkg = dir.path().join("pkg");
+        let sub = pkg.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(pkg.join("__init__.py"), "").unwrap();
+        fs::write(sub.join("__init__.py"), "").unwrap();
+        let file = sub.join("module.py");
+        fs::write(&file, "").unwrap();
+        assert_eq!(
+            FixtureDatabase::file_path_to_module_path(&file),
+            Some("pkg.sub.module".to_string())
+        );
+    }
+
+    #[test]
+    fn test_module_path_conftest_in_package() {
+        // pkg/conftest.py → "pkg.conftest".
+        let dir = TempDir::new("fptmp_conftest_pkg");
+        let pkg = dir.path().join("mypkg");
+        fs::create_dir_all(&pkg).unwrap();
+        fs::write(pkg.join("__init__.py"), "").unwrap();
+        let file = pkg.join("conftest.py");
+        fs::write(&file, "").unwrap();
+        assert_eq!(
+            FixtureDatabase::file_path_to_module_path(&file),
+            Some("mypkg.conftest".to_string())
+        );
+    }
+
+    // ── build_name_to_import_map / get_name_to_import_map ─────────────────
+    //
+    // These tests exercise the import-map key used for `import X.Y` (bare
+    // dotted imports without an alias).  Python binds only the top-level name
+    // in the local namespace (`import collections.abc` → name `collections`),
+    // so the map key must be the top-level component, not the full dotted path.
+
+    #[test]
+    fn test_build_map_dotted_import_keyed_by_top_level() {
+        // `import collections.abc` without alias: the bound name in Python is
+        // "collections", so the map key must be "collections" — NOT the full
+        // dotted path "collections.abc".  The import_statement must preserve
+        // the full dotted path for correct insertion in consumer files.
+        let db = FixtureDatabase::new();
+        let map = db.get_name_to_import_map(
+            &PathBuf::from("/tmp/test_bm_dotted.py"),
+            "import collections.abc\n",
+        );
+        let spec = map
+            .get("collections")
+            .expect("key 'collections' must be present");
+        assert_eq!(spec.check_name, "collections");
+        assert_eq!(spec.import_statement, "import collections.abc");
+        assert!(
+            !map.contains_key("collections.abc"),
+            "full dotted path must not be a key; only the top-level bound name is"
+        );
+    }
+
+    #[test]
+    fn test_build_map_two_level_dotted_import_keyed_by_top_level() {
+        // `import xml.etree.ElementTree` — three components; bound name is "xml".
+        // The map key must be "xml" and import_statement the full dotted path.
+        let db = FixtureDatabase::new();
+        let map = db.get_name_to_import_map(
+            &PathBuf::from("/tmp/test_bm_two_level.py"),
+            "import xml.etree.ElementTree\n",
+        );
+        let spec = map.get("xml").expect("key 'xml' must be present");
+        assert_eq!(spec.check_name, "xml");
+        assert_eq!(spec.import_statement, "import xml.etree.ElementTree");
+        assert!(
+            !map.contains_key("xml.etree.ElementTree"),
+            "full dotted path must not be a key"
+        );
+        assert!(
+            !map.contains_key("xml.etree"),
+            "partial dotted path must not be a key"
+        );
+    }
+
+    #[test]
+    fn test_build_map_simple_import_unaffected() {
+        // `import pathlib` — single component; fix must not change behaviour for
+        // module names that contain no dots.
+        let db = FixtureDatabase::new();
+        let map =
+            db.get_name_to_import_map(&PathBuf::from("/tmp/test_bm_simple.py"), "import pathlib\n");
+        let spec = map.get("pathlib").expect("key 'pathlib' must be present");
+        assert_eq!(spec.check_name, "pathlib");
+        assert_eq!(spec.import_statement, "import pathlib");
+    }
+
+    #[test]
+    fn test_build_map_aliased_dotted_import_unaffected() {
+        // `import collections.abc as abc_mod` — aliased: check_name is the alias,
+        // not the top-level module name.  The fix only touches the non-aliased branch.
+        let db = FixtureDatabase::new();
+        let map = db.get_name_to_import_map(
+            &PathBuf::from("/tmp/test_bm_aliased.py"),
+            "import collections.abc as abc_mod\n",
+        );
+        let spec = map.get("abc_mod").expect("key 'abc_mod' must be present");
+        assert_eq!(spec.check_name, "abc_mod");
+        assert_eq!(spec.import_statement, "import collections.abc as abc_mod");
+        assert!(
+            !map.contains_key("collections"),
+            "top-level name must not be keyed when alias present"
+        );
+        assert!(
+            !map.contains_key("collections.abc"),
+            "dotted path must not be keyed when alias present"
+        );
     }
 }

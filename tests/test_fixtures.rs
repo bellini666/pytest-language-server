@@ -8274,6 +8274,350 @@ def test_something():
 }
 
 // =============================================================================
+// is_parameter flag tests
+// =============================================================================
+
+#[test]
+#[timeout(30000)]
+fn test_is_parameter_true_for_test_function_args() {
+    // Function parameters must have is_parameter = true so that
+    // code actions and inlay hints can add type annotations to them.
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_db() -> str:
+    return "db"
+
+def test_uses_fixture(my_db):
+    pass
+"#;
+
+    let path = PathBuf::from("/tmp/test_is_param/test_param_true.py");
+    db.analyze_file(path.clone(), content);
+
+    let usages = db.usages.get(&path).unwrap();
+    let usage = usages
+        .iter()
+        .find(|u| u.name == "my_db")
+        .expect("my_db usage should be detected");
+
+    assert!(
+        usage.is_parameter,
+        "Test function parameter usages must have is_parameter = true"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_is_parameter_true_for_fixture_function_args() {
+    // Parameters of fixture functions (fixture-on-fixture dependencies) must
+    // also have is_parameter = true.
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def base_db() -> str:
+    return "db"
+
+@pytest.fixture
+def extended_db(base_db) -> str:
+    return base_db + "_ext"
+"#;
+
+    let path = PathBuf::from("/tmp/test_is_param/test_fixture_param_true.py");
+    db.analyze_file(path.clone(), content);
+
+    let usages = db.usages.get(&path).unwrap();
+    let usage = usages
+        .iter()
+        .find(|u| u.name == "base_db")
+        .expect("base_db usage in extended_db should be detected");
+
+    assert!(
+        usage.is_parameter,
+        "Fixture function parameter usages must have is_parameter = true"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_is_parameter_false_for_usefixtures_on_function() {
+    // Fixtures referenced as strings inside @pytest.mark.usefixtures(...)
+    // on a function must have is_parameter = false — they are not function
+    // parameters and cannot receive a type annotation.
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_db() -> str:
+    return "db"
+
+@pytest.mark.usefixtures("my_db")
+def test_with_usefixtures():
+    pass
+"#;
+
+    let path = PathBuf::from("/tmp/test_is_param/test_usefixtures_func.py");
+    db.analyze_file(path.clone(), content);
+
+    let usages = db.usages.get(&path).unwrap();
+    let usage = usages
+        .iter()
+        .find(|u| u.name == "my_db")
+        .expect("my_db usage from usefixtures should be detected");
+
+    assert!(
+        !usage.is_parameter,
+        "usefixtures string usages on functions must have is_parameter = false"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_is_parameter_false_for_usefixtures_multiple_args() {
+    // Multiple fixture names inside a single usefixtures decorator must all
+    // have is_parameter = false.
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def fix_a():
+    return "a"
+
+@pytest.fixture
+def fix_b():
+    return "b"
+
+@pytest.mark.usefixtures("fix_a", "fix_b")
+def test_multi_usefixtures():
+    pass
+"#;
+
+    let path = PathBuf::from("/tmp/test_is_param/test_usefixtures_multi.py");
+    db.analyze_file(path.clone(), content);
+
+    let usages = db.usages.get(&path).unwrap();
+
+    for name in &["fix_a", "fix_b"] {
+        let usage = usages
+            .iter()
+            .find(|u| u.name == *name)
+            .unwrap_or_else(|| panic!("{} usage should be detected", name));
+        assert!(
+            !usage.is_parameter,
+            "{} from usefixtures must have is_parameter = false",
+            name
+        );
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_is_parameter_false_for_usefixtures_on_class() {
+    // Fixtures referenced via @pytest.mark.usefixtures on a class must also
+    // have is_parameter = false.
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_db() -> str:
+    return "db"
+
+@pytest.mark.usefixtures("my_db")
+class TestSomething:
+    def test_method(self):
+        pass
+"#;
+
+    let path = PathBuf::from("/tmp/test_is_param/test_usefixtures_class.py");
+    db.analyze_file(path.clone(), content);
+
+    let usages = db.usages.get(&path).unwrap();
+    let usage = usages
+        .iter()
+        .find(|u| u.name == "my_db")
+        .expect("my_db usage from usefixtures on class should be detected");
+
+    assert!(
+        !usage.is_parameter,
+        "usefixtures string usages on classes must have is_parameter = false"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_is_parameter_false_for_pytestmark_usefixtures_assignment() {
+    // Fixtures referenced inside `pytestmark = pytest.mark.usefixtures(...)` must
+    // have is_parameter = false — they are strings in a module-level assignment.
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+pytestmark = pytest.mark.usefixtures("my_db")
+
+@pytest.fixture
+def my_db() -> str:
+    return "db"
+
+def test_something():
+    pass
+"#;
+
+    let path = PathBuf::from("/tmp/test_is_param/test_pytestmark_usefixtures.py");
+    db.analyze_file(path.clone(), content);
+
+    let usages = db.usages.get(&path).unwrap();
+    let usage = usages
+        .iter()
+        .find(|u| u.name == "my_db")
+        .expect("my_db usage from pytestmark should be detected");
+
+    assert!(
+        !usage.is_parameter,
+        "pytestmark usefixtures string usages must have is_parameter = false"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_is_parameter_false_for_pytestmark_usefixtures_list() {
+    // Fixtures in a list-style pytestmark must also have is_parameter = false.
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+pytestmark = [pytest.mark.usefixtures("fix_a", "fix_b")]
+
+@pytest.fixture
+def fix_a():
+    return "a"
+
+@pytest.fixture
+def fix_b():
+    return "b"
+
+def test_something():
+    pass
+"#;
+
+    let path = PathBuf::from("/tmp/test_is_param/test_pytestmark_list.py");
+    db.analyze_file(path.clone(), content);
+
+    let usages = db.usages.get(&path).unwrap();
+
+    for name in &["fix_a", "fix_b"] {
+        let usage = usages
+            .iter()
+            .find(|u| u.name == *name)
+            .unwrap_or_else(|| panic!("{} usage should be detected in pytestmark list", name));
+        assert!(
+            !usage.is_parameter,
+            "{} from pytestmark list must have is_parameter = false",
+            name
+        );
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_is_parameter_false_for_parametrize_indirect() {
+    // Fixtures referenced via @pytest.mark.parametrize(..., indirect=True) must
+    // have is_parameter = false — they are string identifiers, not parameters.
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_fixture(request):
+    return request.param
+
+@pytest.mark.parametrize("my_fixture", [1, 2], indirect=True)
+def test_indirect(my_fixture):
+    pass
+"#;
+
+    let path = PathBuf::from("/tmp/test_is_param/test_parametrize_indirect.py");
+    db.analyze_file(path.clone(), content);
+
+    let usages = db.usages.get(&path).unwrap();
+
+    // There should be two my_fixture usages: one from indirect parametrize
+    // (is_parameter = false) and one from the function parameter (is_parameter = true).
+    let indirect_usage = usages
+        .iter()
+        .find(|u| u.name == "my_fixture" && !u.is_parameter);
+    assert!(
+        indirect_usage.is_some(),
+        "my_fixture from parametrize indirect should have is_parameter = false"
+    );
+
+    let param_usage = usages
+        .iter()
+        .find(|u| u.name == "my_fixture" && u.is_parameter);
+    assert!(
+        param_usage.is_some(),
+        "my_fixture as a function parameter should have is_parameter = true"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_is_parameter_mixed_param_and_marker_usages_in_same_file() {
+    // A file can have the same fixture referenced both as a function parameter
+    // (is_parameter = true) and inside a usefixtures marker (is_parameter = false).
+    // The two usages must be distinguished correctly.
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def my_db() -> str:
+    return "db"
+
+# Marker usage — string, not a parameter.
+@pytest.mark.usefixtures("my_db")
+def test_marker_usage():
+    pass
+
+# Parameter usage — should receive a type annotation.
+def test_param_usage(my_db):
+    pass
+"#;
+
+    let path = PathBuf::from("/tmp/test_is_param/test_mixed.py");
+    db.analyze_file(path.clone(), content);
+
+    let usages = db.usages.get(&path).unwrap();
+
+    let marker_usage = usages
+        .iter()
+        .find(|u| u.name == "my_db" && !u.is_parameter)
+        .expect("marker usage of my_db should have is_parameter = false");
+    assert!(!marker_usage.is_parameter);
+
+    let param_usage = usages
+        .iter()
+        .find(|u| u.name == "my_db" && u.is_parameter)
+        .expect("parameter usage of my_db should have is_parameter = true");
+    assert!(param_usage.is_parameter);
+}
+
+// =============================================================================
 // pytest_plugins tests (basic detection)
 // =============================================================================
 
@@ -13087,13 +13431,9 @@ fn test_completion_third_party_fixture_has_flag() {
             start_char: 4,
             end_char: 14,
             docstring: Some("A third-party fixture".to_string()),
-            return_type: None,
             is_third_party: true,
-            is_plugin: false,
-            dependencies: vec![],
             scope: pytest_language_server::FixtureScope::Session,
-            yield_line: None,
-            autouse: false,
+            ..Default::default()
         }],
     );
 

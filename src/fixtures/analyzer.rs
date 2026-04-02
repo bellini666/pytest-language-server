@@ -5,11 +5,12 @@
 //! and undeclared fixture scanning is in `undeclared.rs`.
 
 use super::decorators;
-use super::types::{FixtureDefinition, FixtureUsage};
+use super::types::{FixtureDefinition, FixtureUsage, TypeImportSpec};
 use super::FixtureDatabase;
+use once_cell::sync::Lazy;
 use rustpython_parser::ast::{ArgWithDefault, Arguments, Expr, Stmt};
 use rustpython_parser::{parse, Mode};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
 
@@ -91,11 +92,34 @@ impl FixtureDatabase {
             for stmt in &module.body {
                 self.collect_module_level_names(stmt, &mut module_level_names);
             }
-            self.imports.insert(file_path.clone(), module_level_names);
+            // Insert into DashMap *before* the second pass: undeclared-fixture
+            // scanning (`scan_function_body_for_undeclared_fixtures`) reads
+            // `self.imports` during `visit_stmt`, so the data must be available.
+            // The clone is unavoidable because `resolve_return_type_imports`
+            // also needs a local reference to the set.
+            self.imports
+                .insert(file_path.clone(), module_level_names.clone());
+
+            // Build a name→TypeImportSpec map from every import statement in the file.
+            // Used during fixture analysis to resolve return-type annotation imports.
+            let import_map = self.build_name_to_import_map(&module.body, &file_path);
+
+            // Collect type aliases so that `-> MyType` can be expanded to the
+            // underlying type before import resolution.
+            let type_aliases = self.collect_type_aliases(&module.body, content);
 
             // Second pass: analyze fixtures and tests
             for stmt in &module.body {
-                self.visit_stmt(stmt, &file_path, is_conftest, content, &line_index);
+                self.visit_stmt(
+                    stmt,
+                    &file_path,
+                    is_conftest,
+                    content,
+                    &line_index,
+                    &import_map,
+                    &module_level_names,
+                    &type_aliases,
+                );
             }
         }
 
@@ -228,6 +252,7 @@ impl FixtureDatabase {
         line: usize,
         start_char: usize,
         end_char: usize,
+        is_parameter: bool,
     ) {
         let file_path_buf = file_path.to_path_buf();
         let usage = FixtureUsage {
@@ -236,6 +261,7 @@ impl FixtureDatabase {
             line,
             start_char,
             end_char,
+            is_parameter,
         };
 
         // Add to per-file usages map
@@ -274,6 +300,7 @@ impl FixtureDatabase {
     }
 
     /// Visit a statement and extract fixture definitions and usages
+    #[allow(clippy::too_many_arguments)]
     fn visit_stmt(
         &self,
         stmt: &Stmt,
@@ -281,6 +308,9 @@ impl FixtureDatabase {
         _is_conftest: bool,
         content: &str,
         line_index: &[usize],
+        import_map: &HashMap<String, TypeImportSpec>,
+        module_level_names: &HashSet<String>,
+        type_aliases: &HashMap<String, String>,
     ) {
         // First check for assignment-style fixtures: fixture_name = pytest.fixture()(func)
         if let Stmt::Assign(assign) = stmt {
@@ -335,12 +365,22 @@ impl FixtureDatabase {
                         usage_line,
                         start_char + 1,
                         end_char - 1,
+                        false, // usefixtures string — not a function parameter
                     );
                 }
             }
 
             for class_stmt in &class_def.body {
-                self.visit_stmt(class_stmt, file_path, _is_conftest, content, line_index);
+                self.visit_stmt(
+                    class_stmt,
+                    file_path,
+                    _is_conftest,
+                    content,
+                    line_index,
+                    import_map,
+                    module_level_names,
+                    type_aliases,
+                );
             }
             return;
         }
@@ -389,6 +429,7 @@ impl FixtureDatabase {
                     usage_line,
                     start_char + 1,
                     end_char - 1,
+                    false, // usefixtures string — not a function parameter
                 );
             }
         }
@@ -414,6 +455,7 @@ impl FixtureDatabase {
                     usage_line,
                     start_char + 1,
                     end_char - 1,
+                    false, // parametrize indirect string — not a function parameter
                 );
             }
         }
@@ -441,7 +483,27 @@ impl FixtureDatabase {
 
             let line = self.get_line_from_offset(range.start().to_usize(), line_index);
             let docstring = self.extract_docstring(body);
-            let return_type = self.extract_return_type(returns, body, content);
+            let raw_return_type = self.extract_return_type(returns, body, content);
+            let return_type = raw_return_type.map(|rt| {
+                if type_aliases.is_empty() {
+                    rt
+                } else {
+                    let expanded = Self::expand_type_aliases(&rt, type_aliases);
+                    if expanded != rt {
+                        info!(
+                            "Expanded type alias in fixture '{}': {} → {}",
+                            fixture_name, rt, expanded
+                        );
+                    }
+                    expanded
+                }
+            });
+            let return_type_imports = match &return_type {
+                Some(rt) => {
+                    self.resolve_return_type_imports(rt, import_map, module_level_names, file_path)
+                }
+                None => vec![],
+            };
 
             info!(
                 "Found fixture definition: {} (function: {}, scope: {:?}) at {:?}:{}",
@@ -482,6 +544,7 @@ impl FixtureDatabase {
                 end_char,
                 docstring,
                 return_type,
+                return_type_imports,
                 is_third_party,
                 is_plugin,
                 dependencies: dependencies.clone(),
@@ -517,6 +580,7 @@ impl FixtureDatabase {
                         arg_line,
                         start_char,
                         end_char,
+                        true, // actual function parameter — can receive a type annotation
                     );
                 }
             }
@@ -568,6 +632,7 @@ impl FixtureDatabase {
                         arg_line,
                         start_char,
                         end_char,
+                        true, // actual function parameter — can receive a type annotation
                     );
                 }
             }
@@ -628,6 +693,7 @@ impl FixtureDatabase {
                                 end_char,
                                 docstring: None,
                                 return_type: None,
+                                return_type_imports: vec![],
                                 is_third_party,
                                 is_plugin,
                                 dependencies: Vec::new(), // Assignment-style fixtures don't have explicit dependencies
@@ -680,13 +746,320 @@ impl FixtureDatabase {
                 usage_line,
                 start_char.saturating_add(1),
                 end_char.saturating_sub(1),
+                false, // pytestmark usefixtures string — not a function parameter
             );
         }
     }
 }
 
+/// Python builtin types that never require an import statement.
+/// Uses O(1) `HashSet` lookup, consistent with `is_standard_library_module()`.
+static BUILTINS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
+    [
+        "int",
+        "str",
+        "bool",
+        "float",
+        "bytes",
+        "bytearray",
+        "complex",
+        "list",
+        "dict",
+        "tuple",
+        "set",
+        "frozenset",
+        "type",
+        "object",
+        "None",
+        "range",
+        "slice",
+        "memoryview",
+        "property",
+        "classmethod",
+        "staticmethod",
+        "super",
+        "Exception",
+        "BaseException",
+        "ValueError",
+        "TypeError",
+        "RuntimeError",
+        "NotImplementedError",
+        "AttributeError",
+        "KeyError",
+        "IndexError",
+        "StopIteration",
+        "GeneratorExit",
+    ]
+    .into_iter()
+    .collect()
+});
+
 // Second impl block for additional analyzer methods
 impl FixtureDatabase {
+    // ============ Type alias resolution ============
+
+    /// Collect type aliases defined at module level.
+    ///
+    /// Recognises two forms:
+    ///
+    /// 1. **PEP 613** — `MyType: TypeAlias = Dict[str, int]`
+    ///    (`Stmt::AnnAssign` where the annotation mentions `TypeAlias`)
+    /// 2. **Old-style** — `MyType = Dict[str, int]`
+    ///    (`Stmt::Assign` where the target is a single `Expr::Name` whose
+    ///    first character is uppercase and the RHS looks like a type expression)
+    ///
+    /// Returns a mapping from alias name to the expanded type string.
+    pub(crate) fn collect_type_aliases(
+        &self,
+        stmts: &[Stmt],
+        content: &str,
+    ) -> HashMap<String, String> {
+        let mut aliases = HashMap::new();
+
+        for stmt in stmts {
+            match stmt {
+                // PEP 613: `X: TypeAlias = <type_expr>`
+                Stmt::AnnAssign(ann_assign) => {
+                    if !Self::annotation_is_type_alias(&ann_assign.annotation) {
+                        continue;
+                    }
+                    let Expr::Name(name) = ann_assign.target.as_ref() else {
+                        continue;
+                    };
+                    let Some(value) = &ann_assign.value else {
+                        continue;
+                    };
+                    let expanded = self.expr_to_string(value, content);
+                    // Skip aliases that expand to raw `Any`: if the fixture file
+                    // writes `MyType: TypeAlias = Any`, the alias name `MyType` is
+                    // still in `module_level_names`, so `resolve_return_type_imports`
+                    // will correctly generate `from <module> import MyType` for it.
+                    // Expanding to `Any` would instead require adding
+                    // `from typing import Any`, which misrepresents the intent.
+                    if expanded != "Any" {
+                        debug!("Type alias (PEP 613): {} = {}", name.id, expanded);
+                        aliases.insert(name.id.to_string(), expanded);
+                    }
+                }
+
+                // Old-style: `X = <type_expr>` where X starts with uppercase
+                Stmt::Assign(assign) => {
+                    if assign.targets.len() != 1 {
+                        continue;
+                    }
+                    let Expr::Name(name) = &assign.targets[0] else {
+                        continue;
+                    };
+                    // Heuristic: type alias names start with an uppercase letter.
+                    if !name.id.starts_with(|c: char| c.is_ascii_uppercase()) {
+                        continue;
+                    }
+                    if !Self::expr_looks_like_type(&assign.value) {
+                        continue;
+                    }
+                    let expanded = self.expr_to_string(&assign.value, content);
+                    // Same rationale as the PEP 613 branch above: skip `Any`-valued
+                    // aliases so the alias name keeps its locally-defined import path.
+                    if expanded != "Any" {
+                        debug!("Type alias (old-style): {} = {}", name.id, expanded);
+                        aliases.insert(name.id.to_string(), expanded);
+                    }
+                }
+
+                _ => {}
+            }
+        }
+
+        aliases
+    }
+
+    /// Check whether an annotation expression refers to `TypeAlias`.
+    ///
+    /// Matches `TypeAlias`, `typing.TypeAlias`, and `typing_extensions.TypeAlias`.
+    fn annotation_is_type_alias(expr: &Expr) -> bool {
+        match expr {
+            Expr::Name(name) => name.id.as_str() == "TypeAlias",
+            Expr::Attribute(attr) => {
+                attr.attr.as_str() == "TypeAlias"
+                    && matches!(
+                        attr.value.as_ref(),
+                        Expr::Name(n) if n.id.as_str() == "typing" || n.id.as_str() == "typing_extensions"
+                    )
+            }
+            _ => false,
+        }
+    }
+
+    /// Heuristic: does an expression look like a type annotation?
+    ///
+    /// Returns `true` for subscripts (`Dict[str, int]`), union operators
+    /// (`int | str`), names (`Path`), attributes (`pathlib.Path`), `None`,
+    /// and string literals (forward references like `"MyClass"`).
+    fn expr_looks_like_type(expr: &Expr) -> bool {
+        match expr {
+            // Subscript: Dict[str, int], Optional[Path], list[int], etc.
+            Expr::Subscript(_) => true,
+            // Union: int | str
+            Expr::BinOp(binop) => {
+                matches!(binop.op, rustpython_parser::ast::Operator::BitOr)
+                    && Self::expr_looks_like_type(&binop.left)
+                    && Self::expr_looks_like_type(&binop.right)
+            }
+            // Simple name: uppercase (Path, MyClass) or a known builtin (str, int, …)
+            Expr::Name(name) => {
+                name.id.starts_with(|c: char| c.is_ascii_uppercase())
+                    || BUILTINS.contains(name.id.as_str())
+            }
+            // Attribute: pathlib.Path
+            Expr::Attribute(_) => true,
+            // None literal or string literal (forward reference)
+            Expr::Constant(c) => matches!(
+                c.value,
+                rustpython_parser::ast::Constant::None | rustpython_parser::ast::Constant::Str(_)
+            ),
+            _ => false,
+        }
+    }
+
+    /// Expand type aliases in a return-type string.
+    ///
+    /// Performs a single pass of word-boundary-safe substitution. Each
+    /// standalone identifier that matches a key in `type_aliases` is replaced
+    /// with the expanded form.  A match is "standalone" when it is not
+    /// preceded or followed by an alphanumeric character, underscore, or dot
+    /// (preventing partial matches like `MyTypeExtra`).
+    ///
+    /// Expansion is applied at most `MAX_DEPTH` times to handle aliases that
+    /// reference other aliases (e.g. `A = B`, `B = Dict[str, int]`).
+    pub(crate) fn expand_type_aliases(
+        type_str: &str,
+        type_aliases: &HashMap<String, String>,
+    ) -> String {
+        const MAX_DEPTH: usize = 5;
+        let mut result = type_str.to_string();
+
+        for _ in 0..MAX_DEPTH {
+            let mut changed = false;
+            for (alias, expanded) in type_aliases {
+                let new = super::string_utils::replace_identifier(&result, alias, expanded);
+                if new != result {
+                    result = new;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        result
+    }
+
+    // ============ Return-type import resolution ============
+
+    /// Extract all distinct identifier tokens from a type annotation string.
+    ///
+    /// Walks the string collecting runs of `[a-zA-Z_][a-zA-Z0-9_]*` characters.
+    /// Dotted names like `pathlib.Path` produce two separate tokens (`pathlib`,
+    /// `Path`) — each is looked up independently in the import map, which is
+    /// correct because:
+    /// - `import pathlib` → `import_map["pathlib"]` matches `pathlib`
+    /// - `from pathlib import Path` → `import_map["Path"]` matches `Path`
+    ///
+    /// # Examples
+    /// - `"dict[str, Any]"` → `["dict", "str", "Any"]`
+    /// - `"Optional[Path]"` → `["Optional", "Path"]`
+    /// - `"pathlib.Path"` → `["pathlib", "Path"]`
+    /// - `"Path | None"` → `["Path", "None"]`
+    /// - `"list[dict[str, Any]]"` → `["list", "dict", "str", "Any"]`
+    fn extract_type_identifiers(type_str: &str) -> Vec<&str> {
+        let mut identifiers = Vec::new();
+        let mut seen = HashSet::new();
+        let bytes = type_str.as_bytes();
+        let len = bytes.len();
+        let mut i = 0;
+
+        while i < len {
+            let b = bytes[i];
+            // Start of an identifier: [a-zA-Z_]
+            if b.is_ascii_alphabetic() || b == b'_' {
+                let start = i;
+                i += 1;
+                while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                let ident = &type_str[start..i];
+                if seen.insert(ident) {
+                    identifiers.push(ident);
+                }
+            } else {
+                i += 1;
+            }
+        }
+
+        identifiers
+    }
+
+    /// Resolve the import spec(s) needed to use a fixture's return type
+    /// annotation in a consumer file (e.g. a test file).
+    ///
+    /// Handles simple types (`Path`), dotted names (`pathlib.Path`), generics
+    /// (`Optional[Path]`, `dict[str, Any]`), unions (`Path | None`), and any
+    /// nesting thereof.  Every identifier token in the type string is resolved
+    /// independently.
+    ///
+    /// Resolution order **per identifier**:
+    /// 1. Builtin types (`int`, `str`, …) — skip, no import needed.
+    /// 2. Look up in `import_map` (built from the fixture file's imports).
+    /// 3. If the name is locally defined in the fixture file (class,
+    ///    assignment, …) but not imported, build an import from
+    ///    `fixture_file`'s module path.
+    /// 4. Otherwise skip.
+    ///
+    /// Results are deduplicated by `check_name`.
+    fn resolve_return_type_imports(
+        &self,
+        return_type: &str,
+        import_map: &HashMap<String, TypeImportSpec>,
+        module_level_names: &HashSet<String>,
+        fixture_file: &Path,
+    ) -> Vec<TypeImportSpec> {
+        let identifiers = Self::extract_type_identifiers(return_type);
+        let mut specs: Vec<TypeImportSpec> = Vec::new();
+        let mut seen: HashSet<&str> = HashSet::new();
+
+        for ident in identifiers {
+            // Skip builtins — they never need an import.
+            if BUILTINS.contains(ident) {
+                continue;
+            }
+
+            // Avoid duplicates (e.g. `tuple[Path, Path]`).
+            if !seen.insert(ident) {
+                continue;
+            }
+
+            // Check the import map (covers `import X` and `from X import Y`).
+            if let Some(spec) = import_map.get(ident) {
+                specs.push(spec.clone());
+                continue;
+            }
+
+            // If the name is defined locally in the fixture file (e.g. a class
+            // in conftest.py), build an import from that file's module path.
+            if module_level_names.contains(ident) {
+                if let Some(module_path) = Self::file_path_to_module_path(fixture_file) {
+                    specs.push(TypeImportSpec {
+                        check_name: ident.to_string(),
+                        import_statement: format!("from {} import {}", module_path, ident),
+                    });
+                }
+            }
+        }
+
+        specs
+    }
+
     // ============ Module-level name collection ============
 
     /// Collect all module-level names (imports, assignments, function/class defs)

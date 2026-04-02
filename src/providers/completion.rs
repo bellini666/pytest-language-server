@@ -257,7 +257,7 @@ impl Backend {
 
     /// Create completion items for fixtures (for function signature context)
     /// Filters out already-declared parameters and scope-incompatible fixtures
-    pub fn create_fixture_completions(
+    pub(crate) fn create_fixture_completions(
         &self,
         file_path: &std::path::Path,
         declared_params: &[String],
@@ -294,7 +294,7 @@ impl Backend {
 
     /// Create completion items for fixtures with auto-add to function parameters.
     /// When a completion is confirmed, it also inserts the fixture as a parameter.
-    pub fn create_fixture_completions_with_auto_add(
+    pub(crate) fn create_fixture_completions_with_auto_add(
         &self,
         file_path: &std::path::Path,
         declared_params: &[String],
@@ -321,10 +321,25 @@ impl Backend {
 
                 // Create additional text edit to add the fixture as a parameter
                 let additional_text_edits = insertion_info.as_ref().map(|info| {
-                    let text = if info.needs_comma {
-                        format!(", {}", ef.fixture.name)
-                    } else {
-                        ef.fixture.name.clone()
+                    let text = match &info.multiline_indent {
+                        Some(indent) => {
+                            if info.needs_comma {
+                                // No trailing comma — append `,` after last arg,
+                                // then new param on a new indented line.
+                                format!(",\n{}{}", indent, ef.fixture.name)
+                            } else {
+                                // Trailing comma present — new param on a new
+                                // indented line, mirroring the trailing-comma style.
+                                format!("\n{}{},", indent, ef.fixture.name)
+                            }
+                        }
+                        None => {
+                            if info.needs_comma {
+                                format!(", {}", ef.fixture.name)
+                            } else {
+                                ef.fixture.name.clone()
+                            }
+                        }
                     };
                     let lsp_line = Self::internal_line_to_lsp(info.line);
                     vec![TextEdit {
@@ -353,7 +368,7 @@ impl Backend {
     /// Create completion items for fixture names as strings (for decorators)
     /// Used in @pytest.mark.usefixtures("...") and @pytest.mark.parametrize(..., indirect=["..."])
     /// No scope filtering applied here (decision #3).
-    pub fn create_string_fixture_completions(
+    pub(crate) fn create_string_fixture_completions(
         &self,
         file_path: &std::path::Path,
         workspace_root: Option<&PathBuf>,
@@ -410,6 +425,7 @@ mod tests {
             end_char: 10,
             docstring: None,
             return_type: None,
+            return_type_imports: vec![],
             is_third_party: false,
             is_plugin: false,
             dependencies: vec![],

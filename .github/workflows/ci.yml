@@ -44,6 +44,10 @@ jobs:
       - name: Build
         run: cargo build --release --verbose
 
+      - name: Build binary for tests
+        run: cargo build
+
+
       - name: Run tests
         run: cargo test --verbose
 
@@ -63,6 +67,10 @@ jobs:
 
       - name: Install tarpaulin
         run: cargo install cargo-tarpaulin
+
+      - name: Build binary for tests
+        run: cargo build
+
 
       - name: Generate coverage report
         run: cargo tarpaulin --out Xml --skip-clean

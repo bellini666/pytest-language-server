@@ -10,6 +10,7 @@ mod analyzer;
 pub(crate) mod cli;
 pub mod decorators; // Public for testing
 mod docstring;
+pub mod import_analysis;
 mod imports;
 mod resolver;
 mod scanner;
@@ -20,12 +21,12 @@ mod undeclared;
 #[allow(unused_imports)] // ParamInsertionInfo re-exported for public API via lib.rs
 pub use types::{
     CompletionContext, FixtureCycle, FixtureDefinition, FixtureScope, FixtureUsage,
-    ParamInsertionInfo, ScopeMismatch, UndeclaredFixture,
+    ParamInsertionInfo, ScopeMismatch, TypeImportSpec, UndeclaredFixture,
 };
 
 use dashmap::DashMap;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -60,6 +61,23 @@ type AvailableFixturesCacheEntry = (u64, Arc<Vec<FixtureDefinition>>);
 /// Cache entry for imported fixtures: (content_hash, definitions_version, imported_fixture_names).
 /// Invalidated when either the file content or fixture definitions change.
 type ImportedFixturesCacheEntry = (u64, u64, Arc<HashSet<String>>);
+
+/// Cache entry for the name→TypeImportSpec map: (content_hash, Arc<map>).
+/// Invalidated when the file content changes (same strategy as ast_cache).
+///
+/// The map is wrapped in `Arc` so a cache hit is an O(1) refcount bump rather
+/// than a full `HashMap` clone.
+///
+/// **Size bound**: this cache is only populated by `get_name_to_import_map`, which
+/// is called from code-action and inlay-hint providers — i.e. only for files that
+/// are already in `file_cache`.  Entries are evicted alongside `file_cache` entries
+/// in both `cleanup_file_cache` (per-file, on close/delete) and
+/// `evict_cache_if_needed` (bulk, when `file_cache` exceeds `MAX_FILE_CACHE_SIZE`).
+/// No independent size constant is needed.
+type NameImportMapCacheEntry = (
+    u64,
+    Arc<HashMap<String, crate::fixtures::types::TypeImportSpec>>,
+);
 
 /// Maximum number of files to keep in the file content cache.
 /// When exceeded, the oldest entries are evicted to prevent unbounded memory growth.
@@ -117,6 +135,12 @@ pub struct FixtureDatabase {
     /// Used to mark fixtures from these files as `is_plugin` so the resolver
     /// can find them even when they are not in conftest.py or site-packages.
     pub plugin_fixture_files: Arc<DashMap<PathBuf, ()>>,
+    /// Cache of the name→TypeImportSpec map per file.
+    /// Stores (content_hash, map) so the result of `build_name_to_import_map`
+    /// is reused across code-action and inlay-hint requests without re-parsing.
+    ///
+    /// Bounded implicitly: see [`NameImportMapCacheEntry`] for the eviction strategy.
+    pub name_import_map_cache: Arc<DashMap<PathBuf, NameImportMapCacheEntry>>,
 }
 
 impl Default for FixtureDatabase {
@@ -147,6 +171,7 @@ impl FixtureDatabase {
             editable_install_roots: Arc::new(std::sync::Mutex::new(Vec::new())),
             workspace_root: Arc::new(std::sync::Mutex::new(None)),
             plugin_fixture_files: Arc::new(DashMap::new()),
+            name_import_map_cache: Arc::new(DashMap::new()),
         }
     }
 
@@ -244,6 +269,46 @@ impl FixtureDatabase {
         Some(arc_ast)
     }
 
+    /// Get or compute the name→[`TypeImportSpec`] map for a file, with
+    /// content-hash-based caching.
+    ///
+    /// This is the preferred way for providers to obtain a consumer-file's
+    /// import map without re-parsing on every request.  The result is
+    /// recomputed only when the file content changes.
+    pub fn get_name_to_import_map(
+        &self,
+        file_path: &Path,
+        content: &str,
+    ) -> Arc<HashMap<String, crate::fixtures::types::TypeImportSpec>> {
+        let hash = Self::hash_content(content);
+
+        // Return cached value when content hasn't changed.
+        // Arc::clone is an O(1) refcount bump — no HashMap data is copied.
+        if let Some(entry) = self.name_import_map_cache.get(file_path) {
+            let (cached_hash, arc_map) = entry.value();
+            if *cached_hash == hash {
+                return Arc::clone(arc_map);
+            }
+        }
+
+        // Compute from AST (reuses ast_cache internally).
+        let map = match self.get_parsed_ast(file_path, content) {
+            Some(ast) => {
+                if let rustpython_parser::ast::Mod::Module(module) = ast.as_ref() {
+                    self.build_name_to_import_map(&module.body, file_path)
+                } else {
+                    HashMap::new()
+                }
+            }
+            None => HashMap::new(),
+        };
+
+        let arc_map = Arc::new(map);
+        self.name_import_map_cache
+            .insert(file_path.to_path_buf(), (hash, Arc::clone(&arc_map)));
+        arc_map
+    }
+
     /// Compute a hash of the content for cache invalidation.
     fn hash_content(content: &str) -> u64 {
         let mut hasher = DefaultHasher::new();
@@ -291,6 +356,9 @@ impl FixtureDatabase {
 
         // Remove from ast_cache
         self.ast_cache.remove(&canonical);
+
+        // Remove from name_import_map_cache
+        self.name_import_map_cache.remove(&canonical);
 
         // Remove from file_cache
         self.file_cache.remove(&canonical);
@@ -340,6 +408,7 @@ impl FixtureDatabase {
                 self.ast_cache.remove(&path);
                 self.available_fixtures_cache.remove(&path);
                 self.imported_fixtures_cache.remove(&path);
+                self.name_import_map_cache.remove(&path);
             }
 
             debug!(

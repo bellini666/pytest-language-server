@@ -1,4 +1,7 @@
 //! String and text manipulation utilities for fixture analysis.
+//!
+//! The [`replace_identifier`] function is shared between the type-alias expander
+//! in `analyzer.rs` and the `adapt_type_for_consumer` helper in `code_action.rs`.
 
 /// Format a docstring by removing leading/trailing empty lines and dedenting.
 pub(crate) fn format_docstring(docstring: String) -> String {
@@ -174,6 +177,58 @@ pub fn parameter_has_annotation(lines: &[&str], line: usize, end_char: usize) ->
     trimmed.starts_with(':')
 }
 
+/// Replace all standalone occurrences of `old` with `new` in `text`,
+/// respecting Python type-annotation identifier boundaries (alphanumeric,
+/// underscore, dot).
+///
+/// A match is "standalone" when it is **not** preceded by `[a-zA-Z0-9_.]` and
+/// **not** followed by `[a-zA-Z0-9_]`, so:
+///
+/// - `"Path"` in `"Optional[Path]"` → replaced ✓
+/// - `"Path"` in `"PathLike"` → **not** replaced ✓  (right-boundary guard)
+/// - `"Path"` in `"pathlib.Path"` → **not** replaced ✓  (left-boundary dot guard)
+///
+/// # Examples
+///
+/// ```text
+/// replace_identifier("Optional[Path]", "Path", "pathlib.Path")
+///   => "Optional[pathlib.Path]"
+///
+/// replace_identifier("PathLike", "Path", "pathlib.Path")
+///   => "PathLike"   // right-boundary guard prevents partial match
+/// ```
+pub(crate) fn replace_identifier(text: &str, old: &str, new: &str) -> String {
+    let bytes = text.as_bytes();
+    let old_bytes = old.as_bytes();
+    let len = bytes.len();
+    let old_len = old_bytes.len();
+    let mut result = String::with_capacity(len + new.len());
+    let mut i = 0;
+
+    while i < len {
+        if i + old_len <= len && &bytes[i..i + old_len] == old_bytes {
+            let left_ok = i == 0
+                || !(bytes[i - 1].is_ascii_alphanumeric()
+                    || bytes[i - 1] == b'_'
+                    || bytes[i - 1] == b'.');
+            let right_ok = i + old_len >= len
+                || !(bytes[i + old_len].is_ascii_alphanumeric() || bytes[i + old_len] == b'_');
+            if left_ok && right_ok {
+                result.push_str(new);
+                i += old_len;
+                continue;
+            }
+        }
+        // Advance by the full UTF-8 character to avoid splitting multi-byte
+        // sequences (e.g. non-ASCII identifiers or string-literal content).
+        let ch_len = text[i..].chars().next().map_or(1, |c| c.len_utf8());
+        result.push_str(&text[i..i + ch_len]);
+        i += ch_len;
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,5 +348,67 @@ mod tests {
     fn test_parameter_has_annotation_empty_lines() {
         let lines: Vec<&str> = vec![];
         assert!(!parameter_has_annotation(&lines, 1, 0));
+    }
+
+    // ── replace_identifier tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_replace_identifier_simple() {
+        assert_eq!(
+            replace_identifier("Path", "Path", "pathlib.Path"),
+            "pathlib.Path"
+        );
+    }
+
+    #[test]
+    fn test_replace_identifier_in_generic() {
+        assert_eq!(
+            replace_identifier("Optional[Path]", "Path", "pathlib.Path"),
+            "Optional[pathlib.Path]"
+        );
+    }
+
+    #[test]
+    fn test_replace_identifier_partial_no_match() {
+        // "PathLike" must not be touched when replacing "Path".
+        assert_eq!(
+            replace_identifier("PathLike", "Path", "pathlib.Path"),
+            "PathLike"
+        );
+    }
+
+    #[test]
+    fn test_replace_identifier_as_word_suffix() {
+        // "MyPath" must not be touched when replacing "Path".
+        assert_eq!(
+            replace_identifier("MyPath", "Path", "pathlib.Path"),
+            "MyPath"
+        );
+    }
+
+    #[test]
+    fn test_replace_identifier_repeated() {
+        assert_eq!(
+            replace_identifier("tuple[Path, Path]", "Path", "pathlib.Path"),
+            "tuple[pathlib.Path, pathlib.Path]"
+        );
+    }
+
+    #[test]
+    fn test_replace_identifier_union() {
+        assert_eq!(
+            replace_identifier("Path | None", "Path", "pathlib.Path"),
+            "pathlib.Path | None"
+        );
+    }
+
+    #[test]
+    fn test_replace_identifier_does_not_match_after_dot() {
+        // "pathlib.Path" — the "Path" is preceded by a dot, so it must not be
+        // replaced a second time (prevents infinite expansion loops).
+        assert_eq!(
+            replace_identifier("pathlib.Path", "Path", "xx.Path"),
+            "pathlib.Path"
+        );
     }
 }

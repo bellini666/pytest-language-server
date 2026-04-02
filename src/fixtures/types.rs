@@ -2,6 +2,28 @@
 
 use std::path::PathBuf;
 
+/// Specifies how to import a type referenced in a fixture's return annotation.
+///
+/// Resolved at analysis time from the fixture file's own imports, this struct
+/// encodes everything needed to add the correct import statement to a consumer
+/// file (e.g. a test file that declares the fixture as a parameter).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeImportSpec {
+    /// The name to look for in the target file's module-level names set.
+    ///
+    /// Matches exactly how `collect_module_level_names` stores names:
+    /// - `import pathlib`                  → `"pathlib"`
+    /// - `from pathlib import Path`        → `"Path"`
+    /// - `from pathlib import Path as P`   → `"P"`
+    pub check_name: String,
+    /// Complete import statement to insert (no trailing newline).
+    /// Always in absolute form — relative imports are resolved at analysis time.
+    ///
+    /// Examples: `"from pathlib import Path"`, `"import pathlib"`,
+    ///           `"from pathlib import Path as P"`
+    pub import_statement: String,
+}
+
 /// Pytest fixture scope, ordered from narrowest to broadest.
 /// A fixture with a broader scope cannot depend on a fixture with a narrower scope.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -45,7 +67,18 @@ impl FixtureScope {
 }
 
 /// A fixture definition extracted from a Python file.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// New fields may be added in future versions.  External crates constructing
+/// literals should use the struct-update syntax to stay forward-compatible:
+///
+/// ```rust,ignore
+/// let def = FixtureDefinition {
+///     name: "my_fixture".to_string(),
+///     file_path: PathBuf::from("/tmp/conftest.py"),
+///     ..Default::default()
+/// };
+/// ```
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct FixtureDefinition {
     pub name: String,
     pub file_path: PathBuf,
@@ -55,6 +88,7 @@ pub struct FixtureDefinition {
     pub end_char: usize, // Character position where the fixture name ends (on the line)
     pub docstring: Option<String>,
     pub return_type: Option<String>, // The return type annotation (for generators, the yielded type)
+    pub return_type_imports: Vec<TypeImportSpec>, // Import specs needed to use the return type in another file
     pub is_third_party: bool, // Whether this fixture is from a third-party package (site-packages)
     pub is_plugin: bool, // Whether this fixture was discovered via a pytest11 entry point plugin
     pub dependencies: Vec<String>, // Names of fixtures this fixture depends on (via parameters)
@@ -64,6 +98,10 @@ pub struct FixtureDefinition {
 }
 
 /// A fixture usage (reference) in a Python file.
+///
+/// This struct is `#[non_exhaustive]`: new fields may be added in future versions
+/// without a semver-major bump.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct FixtureUsage {
     pub name: String,
@@ -71,6 +109,10 @@ pub struct FixtureUsage {
     pub line: usize,
     pub start_char: usize, // Character position where this usage starts (on the line)
     pub end_char: usize,   // Character position where this usage ends (on the line)
+    /// `true` when this usage is a function parameter that can receive a type annotation.
+    /// `false` for string-based usages inside `@pytest.mark.usefixtures(...)`,
+    /// `pytestmark = pytest.mark.usefixtures(...)`, or `@pytest.mark.parametrize(..., indirect=...)`.
+    pub is_parameter: bool,
 }
 
 /// An undeclared fixture used in a function body without being declared as a parameter.
@@ -134,10 +176,28 @@ pub enum CompletionContext {
 /// Information about where to insert a new parameter in a function signature.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParamInsertionInfo {
-    /// Line number (1-indexed) where the function signature is.
+    /// Line number (1-indexed) where the new parameter should be inserted.
     pub line: usize,
     /// Character position where the new parameter should be inserted.
     pub char_pos: usize,
     /// Whether a comma needs to be added before the new parameter.
+    ///
+    /// For single-line signatures: prepend `, ` to the new parameter text.
+    /// For multiline signatures (`multiline_indent` is `Some`): if `true`, the
+    /// last argument has no trailing comma and one must be appended there; if
+    /// `false`, a trailing comma already exists and only the new-line + indent
+    /// prefix is needed.
     pub needs_comma: bool,
+    /// For multiline signatures where `)` sits on its own line: the indentation
+    /// string (spaces/tabs) to use for the new parameter.  The insertion point
+    /// (`line` / `char_pos`) is set to right after the last argument's content
+    /// rather than at the `)` itself.
+    ///
+    /// When `Some`, callers should produce:
+    ///   - `needs_comma=true`  → insert `,\n<indent><param>`  (adds trailing comma to prev arg)
+    ///   - `needs_comma=false` → insert `\n<indent><param>,`  (mirrors trailing-comma style)
+    ///
+    /// When `None` this is a single-line (or inline-paren) signature and the
+    /// classic `, <param>` / `<param>` text applies.
+    pub multiline_indent: Option<String>,
 }

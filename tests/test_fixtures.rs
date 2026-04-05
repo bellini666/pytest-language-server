@@ -3866,7 +3866,7 @@ def my_fixture(request, tmp_path):
 #[timeout(30000)]
 fn test_request_completion_available() {
     // `request` must appear in the list of available fixtures for a test file
-    // once the venv has been scanned (simulated here by direct registration).
+    // once scan_workspace discovers the venv's `_pytest` package.
     use tempfile::tempdir;
 
     let temp = tempdir().unwrap();

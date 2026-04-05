@@ -782,10 +782,10 @@ impl FixtureDatabase {
             pytest_internal.join("_pytest_request_builtin.py")
         };
 
-        // Guard: skip registration if an identical synthetic definition
-        // (same file_path) is already present.  This prevents duplicate
-        // entries when scan_venv_fixtures / scan_pytest_internal_fixtures
-        // is called more than once (e.g. on workspace reload).
+        // Guard: skip if we'd register an identical entry again (same path).
+        // Otherwise drop any stale synthetic entry first so a second scan that
+        // finds the real fixtures.py after a sentinel-path registration doesn't
+        // accumulate two entries.
         if let Some(existing) = self.definitions.get("request") {
             if existing.iter().any(|d| d.file_path == file_path) {
                 debug!(
@@ -795,6 +795,7 @@ impl FixtureDatabase {
                 return;
             }
         }
+        drop(self.definitions.remove("request"));
 
         let docstring = concat!(
             "Special fixture providing information about the requesting test context.\n",

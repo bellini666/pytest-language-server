@@ -555,7 +555,8 @@ impl FixtureDatabase {
 
             self.record_fixture_definition(definition);
 
-            // Record each dependency as a usage
+            // Record each parameter as a usage (dependencies + special builtins like
+            // `request` that are not fixture dependencies but need inlay hints / code actions)
             for arg in Self::all_args(args) {
                 let arg_name = arg.def.arg.as_str();
 
@@ -573,7 +574,7 @@ impl FixtureDatabase {
                     let end_char = start_char + arg_name.len();
 
                     info!(
-                        "Found fixture dependency: {} at {:?}:{}:{}",
+                        "Found fixture parameter usage: {} at {:?}:{}:{}",
                         arg_name, file_path, arg_line, start_char
                     );
 

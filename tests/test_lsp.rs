@@ -7295,3 +7295,402 @@ def test_something():
         }
     }
 }
+
+// =============================================================================
+// request builtin fixture — LSP-level tests
+// =============================================================================
+
+#[test]
+#[timeout(30000)]
+fn test_request_usage_tracked_in_test_function() {
+    // `request` declared as a parameter in a test function must be recorded
+    // as a usage with is_parameter = true so inlay hints can show its type.
+    use pytest_language_server::FixtureDatabase;
+    use std::path::PathBuf;
+
+    let db = FixtureDatabase::new();
+    let test_path = PathBuf::from("/tmp/test_req_lsp/test_req.py");
+
+    db.analyze_file(
+        test_path.clone(),
+        r#"
+def test_parametrized(request):
+    assert request.param is not None
+"#,
+    );
+
+    let usages = db.usages.get(&test_path).expect("usages should be tracked");
+    let req = usages
+        .iter()
+        .find(|u| u.name == "request")
+        .expect("request usage should be tracked in test function");
+
+    assert!(
+        req.is_parameter,
+        "request in a test function parameter must have is_parameter = true"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_request_usage_tracked_in_fixture_function() {
+    // `request` declared as a parameter in a fixture function must be
+    // recorded as a usage with is_parameter = true.
+    use pytest_language_server::FixtureDatabase;
+    use std::path::PathBuf;
+
+    let db = FixtureDatabase::new();
+    let path = PathBuf::from("/tmp/test_req_lsp_fix/conftest.py");
+
+    db.analyze_file(
+        path.clone(),
+        r#"
+import pytest
+
+@pytest.fixture(params=[1, 2, 3])
+def my_fixture(request):
+    return request.param
+"#,
+    );
+
+    let usages = db.usages.get(&path).expect("usages should be tracked");
+    let req = usages
+        .iter()
+        .find(|u| u.name == "request")
+        .expect("request usage should be tracked in fixture function");
+
+    assert!(
+        req.is_parameter,
+        "request in a fixture function parameter must have is_parameter = true"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_request_not_in_fixture_dependencies() {
+    // The `request` parameter must not appear as a fixture dependency even
+    // though it is now tracked as a usage.
+    use pytest_language_server::FixtureDatabase;
+    use std::path::PathBuf;
+
+    let db = FixtureDatabase::new();
+    let path = PathBuf::from("/tmp/test_req_dep_lsp/conftest.py");
+
+    db.analyze_file(
+        path.clone(),
+        r#"
+import pytest
+
+@pytest.fixture(params=["a", "b"])
+def my_fixture(request, tmp_path):
+    return (request.param, tmp_path)
+"#,
+    );
+
+    let defs = db
+        .definitions
+        .get("my_fixture")
+        .expect("my_fixture must be defined");
+    let def = &defs[0];
+
+    assert!(
+        !def.dependencies.contains(&"request".to_string()),
+        "request must not be a fixture dependency, got: {:?}",
+        def.dependencies
+    );
+    assert!(
+        def.dependencies.contains(&"tmp_path".to_string()),
+        "tmp_path must still be a dependency"
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_request_never_undeclared() {
+    // `request` must not appear in the undeclared-fixture diagnostic list
+    // regardless of where it is used.
+    use pytest_language_server::FixtureDatabase;
+    use std::path::PathBuf;
+
+    let db = FixtureDatabase::new();
+    let path = PathBuf::from("/tmp/test_req_undecl_lsp/test_req.py");
+
+    // Use `request` inside a test body without declaring it as a parameter.
+    db.analyze_file(
+        path.clone(),
+        r#"
+def test_something():
+    val = request.param
+"#,
+    );
+
+    let undeclared = db.get_undeclared_fixtures(&path);
+    assert!(
+        !undeclared.iter().any(|u| u.name == "request"),
+        "request must never be reported as undeclared, got: {:?}",
+        undeclared.iter().map(|u| &u.name).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn test_request_inlay_hint_shown_when_definition_available() {
+    // When the `request` fixture has a definition with return_type (injected
+    // via scan_pytest_internal_fixtures), the inlay hint provider must emit
+    // a `: FixtureRequest` hint for a test function's `request` parameter.
+    use pytest_language_server::FixtureDatabase;
+    use std::path::PathBuf;
+
+    let db = Arc::new(FixtureDatabase::new());
+
+    // Manually register the synthetic request definition to simulate what
+    // scan_pytest_internal_fixtures injects from a real venv.
+    let request_def = pytest_language_server::FixtureDefinition {
+        name: "request".to_string(),
+        file_path: PathBuf::from("_pytest/fixtures.py"),
+        line: 1,
+        end_line: 1,
+        start_char: 0,
+        end_char: 7,
+        docstring: Some("Special pytest fixture providing test context.".to_string()),
+        return_type: Some("FixtureRequest".to_string()),
+        return_type_imports: vec![pytest_language_server::TypeImportSpec {
+            check_name: "FixtureRequest".to_string(),
+            import_statement: "from pytest import FixtureRequest".to_string(),
+        }],
+        is_third_party: true,
+        is_plugin: true,
+        dependencies: vec![],
+        scope: pytest_language_server::FixtureScope::Function,
+        yield_line: None,
+        autouse: false,
+    };
+    db.definitions
+        .entry("request".to_string())
+        .or_default()
+        .push(request_def);
+
+    let test_path = std::env::temp_dir()
+        .join("test_req_hint")
+        .join("test_example.py");
+    let test_content = r#"
+def test_uses_request(request):
+    assert request.param is not None
+"#;
+    db.analyze_file(test_path.clone(), test_content);
+
+    // Verify the usage is tracked and marked as a parameter.
+    let usages = db.usages.get(&test_path).expect("usages should exist");
+    let req_usage = usages
+        .iter()
+        .find(|u| u.name == "request")
+        .expect("request usage must be tracked");
+    assert!(
+        req_usage.is_parameter,
+        "request must be is_parameter = true"
+    );
+
+    // Check that the request return type is reachable via get_available_fixtures.
+    let available = db.get_available_fixtures(&test_path);
+    let req_def = available.iter().find(|f| f.name == "request");
+    assert!(
+        req_def.is_some(),
+        "request must appear in available fixtures"
+    );
+    assert_eq!(
+        req_def.unwrap().return_type.as_deref(),
+        Some("FixtureRequest"),
+        "request return type must be FixtureRequest"
+    );
+}
+
+#[tokio::test]
+async fn test_request_code_action_fix_all_annotates_request_param() {
+    // source.fixAll.pytest-ls must include `request: FixtureRequest` when
+    // the `request` fixture definition is available with a return type.
+    use pytest_language_server::FixtureDatabase;
+    use std::path::PathBuf;
+
+    let db = Arc::new(FixtureDatabase::new());
+
+    // Register the synthetic request definition (normally from venv scan).
+    let request_def = pytest_language_server::FixtureDefinition {
+        name: "request".to_string(),
+        file_path: PathBuf::from("_pytest/fixtures.py"),
+        line: 1,
+        end_line: 1,
+        start_char: 0,
+        end_char: 7,
+        docstring: None,
+        return_type: Some("FixtureRequest".to_string()),
+        return_type_imports: vec![pytest_language_server::TypeImportSpec {
+            check_name: "FixtureRequest".to_string(),
+            import_statement: "from pytest import FixtureRequest".to_string(),
+        }],
+        is_third_party: true,
+        is_plugin: true,
+        dependencies: vec![],
+        scope: pytest_language_server::FixtureScope::Function,
+        yield_line: None,
+        autouse: false,
+    };
+    db.definitions
+        .entry("request".to_string())
+        .or_default()
+        .push(request_def);
+
+    let test_path = std::env::temp_dir()
+        .join("test_req_fixall")
+        .join("test_example.py");
+    let test_content = r#"
+def test_parametrized(request):
+    assert request.param > 0
+"#;
+    db.analyze_file(test_path.clone(), test_content);
+
+    let backend = make_backend_with_db(db);
+    let uri = Uri::from_file_path(&test_path).unwrap();
+
+    let params = CodeActionParams {
+        text_document: TextDocumentIdentifier { uri: uri.clone() },
+        range: Range {
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 3,
+                character: 0,
+            },
+        },
+        context: CodeActionContext {
+            diagnostics: vec![],
+            only: Some(vec![CodeActionKind::from("source.fixAll.pytest-ls")]),
+            trigger_kind: None,
+        },
+        work_done_progress_params: WorkDoneProgressParams {
+            work_done_token: None,
+        },
+        partial_result_params: PartialResultParams {
+            partial_result_token: None,
+        },
+    };
+
+    let response = backend.handle_code_action(params).await.unwrap();
+    let actions = response.expect("Should have a fix-all action for request parameter");
+
+    let fix_all = actions
+        .iter()
+        .find_map(|a| match a {
+            CodeActionOrCommand::CodeAction(ca)
+                if ca.kind == Some(CodeActionKind::from("source.fixAll.pytest-ls")) =>
+            {
+                Some(ca)
+            }
+            _ => None,
+        })
+        .expect("Should have a source.fixAll.pytest-ls action");
+
+    // Exactly 1 fixture (request) should be annotated.
+    assert!(
+        fix_all.title.contains("1 fixture"),
+        "fix-all should annotate 1 fixture (request), got: {}",
+        fix_all.title
+    );
+
+    // The workspace edit must contain `: FixtureRequest`.
+    let ws_edit = fix_all.edit.as_ref().expect("Should have workspace edit");
+    let changes = ws_edit.changes.as_ref().expect("Should have changes");
+    let edits: Vec<&TextEdit> = changes.values().flat_map(|v| v.iter()).collect();
+
+    let has_annotation = edits
+        .iter()
+        .any(|e| e.new_text.contains(": FixtureRequest"));
+    assert!(
+        has_annotation,
+        "fix-all edit must insert ': FixtureRequest', edits: {:?}",
+        edits.iter().map(|e| &e.new_text).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn test_request_hover_returns_fixture_request_type() {
+    // Hovering over `request` in a test function parameter must show
+    // the FixtureRequest return type in the hover content.
+    use pytest_language_server::FixtureDatabase;
+    use std::path::PathBuf;
+
+    let db = Arc::new(FixtureDatabase::new());
+
+    // Register synthetic request definition.
+    let request_def = pytest_language_server::FixtureDefinition {
+        name: "request".to_string(),
+        file_path: PathBuf::from("_pytest/fixtures.py"),
+        line: 1,
+        end_line: 1,
+        start_char: 0,
+        end_char: 7,
+        docstring: Some(
+            "Special pytest fixture providing test context.\n\n.param contains the current parameter."
+                .to_string(),
+        ),
+        return_type: Some("FixtureRequest".to_string()),
+        return_type_imports: vec![pytest_language_server::TypeImportSpec {
+            check_name: "FixtureRequest".to_string(),
+            import_statement: "from pytest import FixtureRequest".to_string(),
+        }],
+        is_third_party: true,
+        is_plugin: true,
+        dependencies: vec![],
+        scope: pytest_language_server::FixtureScope::Function,
+        yield_line: None,
+        autouse: false,
+    };
+    db.definitions
+        .entry("request".to_string())
+        .or_default()
+        .push(request_def);
+
+    let test_path = std::env::temp_dir()
+        .join("test_req_hover")
+        .join("test_example.py");
+    // "request" starts at character 22, line 1 (0-indexed).
+    db.analyze_file(
+        test_path.clone(),
+        r#"
+def test_parametrized(request):
+    pass
+"#,
+    );
+
+    let backend = make_backend_with_db(db);
+    let uri = Uri::from_file_path(&test_path).unwrap();
+
+    // Hover on `request` — line 1 (0-indexed), char 22.
+    let params = HoverParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 1,
+                character: 22,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams {
+            work_done_token: None,
+        },
+    };
+
+    let result = backend.handle_hover(params).await.unwrap();
+    let hover = result.expect("Hover must return content for request fixture");
+
+    let content = match &hover.contents {
+        HoverContents::Markup(markup) => markup.value.clone(),
+        HoverContents::Scalar(MarkedString::String(s)) => s.clone(),
+        _ => String::new(),
+    };
+
+    assert!(
+        content.contains("request") || content.contains("FixtureRequest"),
+        "Hover content must mention 'request' or 'FixtureRequest', got: {:?}",
+        content
+    );
+}

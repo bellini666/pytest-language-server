@@ -149,3 +149,125 @@ impl FixtureDatabase {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Analyze a Python snippet defining a single fixture and return its
+    /// recorded `return_type`.
+    fn fixture_return_type(source: &str) -> Option<String> {
+        let db = FixtureDatabase::new();
+        let path = std::env::temp_dir()
+            .join("pls_docstring_unit")
+            .join("conftest.py");
+        db.analyze_file(path, source);
+        db.definitions
+            .get("fx")
+            .and_then(|defs| defs.value().first().cloned())
+            .and_then(|d| d.return_type)
+    }
+
+    #[test]
+    fn test_return_type_simple_name() {
+        assert_eq!(
+            fixture_return_type("import pytest\n@pytest.fixture\ndef fx() -> int:\n    return 1\n"),
+            Some("int".to_string())
+        );
+    }
+
+    #[test]
+    fn test_return_type_attribute() {
+        // Attribute → `pathlib.Path`
+        assert_eq!(
+            fixture_return_type(
+                "import pytest\nimport pathlib\n@pytest.fixture\ndef fx() -> pathlib.Path:\n    return pathlib.Path()\n"
+            ),
+            Some("pathlib.Path".to_string())
+        );
+    }
+
+    #[test]
+    fn test_return_type_subscript() {
+        // `list[int]` → "list[int]"
+        assert_eq!(
+            fixture_return_type(
+                "import pytest\n@pytest.fixture\ndef fx() -> list[int]:\n    return []\n"
+            ),
+            Some("list[int]".to_string())
+        );
+    }
+
+    #[test]
+    fn test_return_type_nested_subscript() {
+        assert_eq!(
+            fixture_return_type(
+                "import pytest\n@pytest.fixture\ndef fx() -> dict[str, list[int]]:\n    return {}\n"
+            ),
+            Some("dict[str, list[int]]".to_string())
+        );
+    }
+
+    #[test]
+    fn test_return_type_bitor_union() {
+        // `int | str` → "int | str" (covers the BinOp BitOr branch).
+        assert_eq!(
+            fixture_return_type(
+                "import pytest\n@pytest.fixture\ndef fx() -> int | str:\n    return 1\n"
+            ),
+            Some("int | str".to_string())
+        );
+    }
+
+    #[test]
+    fn test_return_type_generator_tuple_slice_extracts_first_arg() {
+        // `Generator[int, None, None]` with yield → extract `int`.
+        let ret = fixture_return_type(
+            "import pytest\nfrom typing import Generator\n@pytest.fixture\ndef fx() -> Generator[int, None, None]:\n    yield 1\n",
+        );
+        assert_eq!(ret, Some("int".to_string()));
+    }
+
+    #[test]
+    fn test_return_type_iterator_single_slice() {
+        // `Iterator[str]` with yield → extract `str` (non-Tuple slice branch).
+        let ret = fixture_return_type(
+            "import pytest\nfrom typing import Iterator\n@pytest.fixture\ndef fx() -> Iterator[str]:\n    yield \"x\"\n",
+        );
+        assert_eq!(ret, Some("str".to_string()));
+    }
+
+    #[test]
+    fn test_return_type_non_subscript_generator_falls_through() {
+        // Plain `Generator` without subscript → falls through to expr_to_string.
+        let ret = fixture_return_type(
+            "import pytest\nfrom typing import Generator\n@pytest.fixture\ndef fx() -> Generator:\n    yield 1\n",
+        );
+        assert_eq!(ret, Some("Generator".to_string()));
+    }
+
+    #[test]
+    fn test_extract_docstring_picks_up_first_string() {
+        let db = FixtureDatabase::new();
+        let path = std::env::temp_dir()
+            .join("pls_docstring_unit")
+            .join("conftest_doc.py");
+        db.analyze_file(
+            path,
+            "import pytest\n@pytest.fixture\ndef fx():\n    \"\"\"The docstring.\"\"\"\n    return 1\n",
+        );
+        let doc = db
+            .definitions
+            .get("fx")
+            .and_then(|defs| defs.value().first().cloned())
+            .and_then(|d| d.docstring);
+        assert!(doc.is_some(), "docstring should be captured");
+        assert!(doc.unwrap().contains("The docstring"));
+    }
+
+    #[test]
+    fn test_no_return_type_when_annotation_missing() {
+        let ret = fixture_return_type("import pytest\n@pytest.fixture\ndef fx():\n    return 1\n");
+        assert!(ret.is_none());
+    }
+}

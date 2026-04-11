@@ -740,6 +740,122 @@ async fn test_goto_implementation_returns_ok_on_empty_db() {
     assert!(result.unwrap().is_none());
 }
 
+/// Helper: unwrap a `GotoImplementationResponse::Scalar` to a `Location`.
+fn scalar_location(
+    resp: tower_lsp_server::ls_types::request::GotoImplementationResponse,
+) -> Location {
+    use tower_lsp_server::ls_types::request::GotoImplementationResponse;
+    match resp {
+        GotoImplementationResponse::Scalar(loc) => loc,
+        _ => panic!(
+            "expected GotoImplementationResponse::Scalar, got {:?}",
+            resp
+        ),
+    }
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_goto_implementation_generator_fixture_returns_yield_line() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    // Generator fixture with `yield value` on line 6 (1-indexed),
+    // which is LSP line 5 (0-indexed).
+    let conftest_path = tfile("test_ls_impl_yield", "conftest.py");
+    db.analyze_file(
+        conftest_path.clone(),
+        "import pytest\n\n@pytest.fixture\ndef gen_fixture():\n    value = 1\n    yield value\n",
+    );
+    let conftest_uri = turi("test_ls_impl_yield", "conftest.py");
+    backend
+        .uri_cache
+        .insert(conftest_path, conftest_uri.clone());
+
+    // Click on the fixture name (line 3).
+    let result = backend
+        .goto_implementation(GotoImplementationParams {
+            text_document_position_params: tdp(conftest_uri.clone(), 3, 6),
+            work_done_progress_params: wdp(),
+            partial_result_params: prp(),
+        })
+        .await
+        .unwrap()
+        .expect("should resolve");
+
+    let loc = scalar_location(result);
+    assert_eq!(loc.uri, conftest_uri);
+    // `yield value` is on line index 5 (0-indexed).
+    assert_eq!(loc.range.start.line, 5);
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_goto_implementation_non_generator_falls_back_to_definition() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    let conftest_path = tfile("test_ls_impl_return", "conftest.py");
+    db.analyze_file(
+        conftest_path.clone(),
+        "import pytest\n\n@pytest.fixture\ndef ret_fixture():\n    return 1\n",
+    );
+    let conftest_uri = turi("test_ls_impl_return", "conftest.py");
+    backend
+        .uri_cache
+        .insert(conftest_path, conftest_uri.clone());
+
+    let result = backend
+        .goto_implementation(GotoImplementationParams {
+            text_document_position_params: tdp(conftest_uri.clone(), 3, 6),
+            work_done_progress_params: wdp(),
+            partial_result_params: prp(),
+        })
+        .await
+        .unwrap()
+        .expect("should resolve");
+    let loc = scalar_location(result);
+    assert_eq!(loc.uri, conftest_uri);
+    // Returns the definition line (line 3 0-indexed).
+    assert_eq!(loc.range.start.line, 3);
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_goto_implementation_from_usage_resolves_to_yield() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    let conftest_path = tfile("test_ls_impl_from_usage", "conftest.py");
+    db.analyze_file(
+        conftest_path.clone(),
+        "import pytest\n\n@pytest.fixture\ndef gen_fixture():\n    yield 42\n",
+    );
+    let conftest_uri = turi("test_ls_impl_from_usage", "conftest.py");
+    backend
+        .uri_cache
+        .insert(conftest_path, conftest_uri.clone());
+
+    let test_path = tfile("test_ls_impl_from_usage", "test_example.py");
+    db.analyze_file(test_path.clone(), "def test_one(gen_fixture):\n    pass\n");
+    let test_uri = turi("test_ls_impl_from_usage", "test_example.py");
+    backend.uri_cache.insert(test_path, test_uri.clone());
+
+    let result = backend
+        .goto_implementation(GotoImplementationParams {
+            text_document_position_params: tdp(test_uri, 0, 13),
+            work_done_progress_params: wdp(),
+            partial_result_params: prp(),
+        })
+        .await
+        .unwrap()
+        .expect("should resolve");
+    let loc = scalar_location(result);
+    assert_eq!(loc.uri, conftest_uri);
+    // yield 42 is on line 4 (0-indexed).
+    assert_eq!(loc.range.start.line, 4);
+}
+
 // ── hover ─────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -801,6 +917,183 @@ async fn test_references_returns_ok_on_empty_db() {
         })
         .await;
     assert!(result.is_ok());
+}
+
+/// Helper: call references and unwrap the double-Option into Vec<Location>.
+async fn get_refs(backend: &Backend, uri: Uri, line: u32, character: u32) -> Vec<Location> {
+    let result = backend
+        .references(ReferenceParams {
+            text_document_position: tdp(uri, line, character),
+            context: ReferenceContext {
+                include_declaration: true,
+            },
+            work_done_progress_params: wdp(),
+            partial_result_params: prp(),
+        })
+        .await;
+    assert!(result.is_ok(), "references must not return error");
+    result.unwrap().unwrap_or_default()
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_references_returns_definition_and_usages() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    // Seed conftest with a fixture definition
+    let conftest_path = tfile("test_ls_refs_happy", "conftest.py");
+    db.analyze_file(
+        conftest_path.clone(),
+        "import pytest\n\n@pytest.fixture\ndef my_fixture():\n    return 1\n",
+    );
+    let conftest_uri = turi("test_ls_refs_happy", "conftest.py");
+    backend
+        .uri_cache
+        .insert(conftest_path.clone(), conftest_uri.clone());
+
+    // Seed a test file with two usages
+    let test_path = tfile("test_ls_refs_happy", "test_example.py");
+    db.analyze_file(
+        test_path.clone(),
+        "def test_one(my_fixture):\n    pass\n\ndef test_two(my_fixture):\n    pass\n",
+    );
+    let test_uri = turi("test_ls_refs_happy", "test_example.py");
+    backend.uri_cache.insert(test_path, test_uri.clone());
+
+    // Click on the fixture name in test_one (line 0, char 13)
+    let locations = get_refs(&backend, test_uri.clone(), 0, 13).await;
+
+    // Should include the definition + both usages
+    assert_eq!(
+        locations.len(),
+        3,
+        "expected definition + 2 usages, got {:?}",
+        locations
+    );
+    // First location is the definition, in the conftest file
+    assert_eq!(locations[0].uri, conftest_uri);
+    // The remaining locations are the usages in the test file
+    let usage_uris: Vec<&Uri> = locations.iter().skip(1).map(|l| &l.uri).collect();
+    assert!(usage_uris.iter().all(|u| **u == test_uri));
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_references_from_definition_line() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    let conftest_path = tfile("test_ls_refs_def_line", "conftest.py");
+    db.analyze_file(
+        conftest_path.clone(),
+        "import pytest\n\n@pytest.fixture\ndef my_fixture():\n    return 1\n",
+    );
+    let conftest_uri = turi("test_ls_refs_def_line", "conftest.py");
+    backend
+        .uri_cache
+        .insert(conftest_path.clone(), conftest_uri.clone());
+
+    let test_path = tfile("test_ls_refs_def_line", "test_example.py");
+    db.analyze_file(test_path.clone(), "def test_one(my_fixture):\n    pass\n");
+    let test_uri = turi("test_ls_refs_def_line", "test_example.py");
+    backend.uri_cache.insert(test_path, test_uri.clone());
+
+    // Click directly on the `def my_fixture` line (line 3 in conftest, 0-indexed)
+    // exercises the `get_definition_at_line` fallback branch.
+    let locations = get_refs(&backend, conftest_uri.clone(), 3, 6).await;
+
+    assert!(
+        !locations.is_empty(),
+        "should return references when clicking on definition line"
+    );
+    // The first location is the definition itself (from conftest).
+    assert_eq!(locations[0].uri, conftest_uri);
+    // The remaining locations should include the usage in the test file.
+    assert!(
+        locations.iter().any(|l| l.uri == test_uri),
+        "should include usage in test file"
+    );
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_references_self_referencing_fixture_skips_def_line() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    // Parent conftest defines `cli_runner`
+    let parent_path = tfile("test_ls_refs_self", "conftest.py");
+    db.analyze_file(
+        parent_path.clone(),
+        "import pytest\n\n@pytest.fixture\ndef cli_runner():\n    return \"parent\"\n",
+    );
+    let parent_uri = turi("test_ls_refs_self", "conftest.py");
+    backend
+        .uri_cache
+        .insert(parent_path.clone(), parent_uri.clone());
+
+    // Child conftest overrides with self-referencing fixture
+    let child_path = tfile("test_ls_refs_self/tests", "conftest.py");
+    db.analyze_file(
+        child_path.clone(),
+        "import pytest\n\n@pytest.fixture\ndef cli_runner(cli_runner):\n    return cli_runner\n",
+    );
+    let child_uri = turi("test_ls_refs_self/tests", "conftest.py");
+    backend
+        .uri_cache
+        .insert(child_path.clone(), child_uri.clone());
+
+    // Click on the child `cli_runner` definition (line 3 in child conftest).
+    // The child's own parameter `cli_runner` sits on that same line, so the
+    // returned locations must not contain a duplicate entry for the def line.
+    let locations = get_refs(&backend, child_uri.clone(), 3, 6).await;
+
+    // Should return at least the definition; the parameter reference on the
+    // same line as the child definition should be filtered out to avoid
+    // a duplicate with the definition entry.
+    assert!(!locations.is_empty());
+    assert_eq!(locations[0].uri, child_uri);
+    // No duplicate: only one location should have the same uri+line as the def.
+    let def_line = locations[0].range.start.line;
+    let same_line_count = locations
+        .iter()
+        .filter(|l| l.uri == child_uri && l.range.start.line == def_line)
+        .count();
+    assert_eq!(
+        same_line_count, 1,
+        "def-line duplicate should be filtered; got {:?}",
+        locations
+    );
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_references_no_fixture_at_position_returns_none() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    let test_path = tfile("test_ls_refs_no_fixture", "test_example.py");
+    db.analyze_file(test_path.clone(), "def test_one():\n    pass\n");
+    let test_uri = turi("test_ls_refs_no_fixture", "test_example.py");
+    backend.uri_cache.insert(test_path, test_uri.clone());
+
+    // Click on the `def` keyword - no fixture there.
+    let result = backend
+        .references(ReferenceParams {
+            text_document_position: tdp(test_uri, 0, 1),
+            context: ReferenceContext {
+                include_declaration: true,
+            },
+            work_done_progress_params: wdp(),
+            partial_result_params: prp(),
+        })
+        .await;
+    assert!(result.is_ok());
+    assert!(
+        result.unwrap().is_none(),
+        "no fixture at cursor should return None"
+    );
 }
 
 // ── completion ────────────────────────────────────────────────────────────
@@ -944,6 +1237,127 @@ async fn test_code_lens_returns_ok() {
         })
         .await;
     assert!(result.is_ok());
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_code_lens_returns_usage_count_per_fixture() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    // Two fixtures in conftest.
+    let conftest_path = tfile("test_ls_lens_count", "conftest.py");
+    db.analyze_file(
+        conftest_path.clone(),
+        "import pytest\n\n@pytest.fixture\ndef fixture_a():\n    return 1\n\n@pytest.fixture\ndef fixture_b():\n    return 2\n",
+    );
+    let conftest_uri = turi("test_ls_lens_count", "conftest.py");
+    backend
+        .uri_cache
+        .insert(conftest_path, conftest_uri.clone());
+
+    // Three usages of fixture_a and one of fixture_b.
+    let test_path = tfile("test_ls_lens_count", "test_example.py");
+    db.analyze_file(
+        test_path.clone(),
+        "def test_one(fixture_a):\n    pass\n\ndef test_two(fixture_a):\n    pass\n\ndef test_three(fixture_a):\n    pass\n\ndef test_four(fixture_b):\n    pass\n",
+    );
+    let test_uri = turi("test_ls_lens_count", "test_example.py");
+    backend.uri_cache.insert(test_path, test_uri);
+
+    let lenses = backend
+        .code_lens(CodeLensParams {
+            text_document: TextDocumentIdentifier { uri: conftest_uri },
+            work_done_progress_params: wdp(),
+            partial_result_params: prp(),
+        })
+        .await
+        .unwrap()
+        .expect("should return lenses");
+
+    assert_eq!(lenses.len(), 2);
+    let titles: Vec<String> = lenses
+        .iter()
+        .filter_map(|l| l.command.as_ref().map(|c| c.title.clone()))
+        .collect();
+    assert!(titles.iter().any(|t| t == "3 usages"));
+    assert!(titles.iter().any(|t| t == "1 usage"));
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_code_lens_skips_fixtures_from_other_files() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    // Fixture in one conftest
+    let other_path = tfile("test_ls_lens_other", "other_conftest.py");
+    db.analyze_file(
+        other_path.clone(),
+        "import pytest\n\n@pytest.fixture\ndef only_here():\n    return 1\n",
+    );
+    backend
+        .uri_cache
+        .insert(other_path, turi("test_ls_lens_other", "other_conftest.py"));
+
+    // Request code lenses on a different file — should return none.
+    let empty_path = tfile("test_ls_lens_other", "empty_conftest.py");
+    db.analyze_file(empty_path.clone(), "import pytest\n");
+    let empty_uri = turi("test_ls_lens_other", "empty_conftest.py");
+    backend.uri_cache.insert(empty_path, empty_uri.clone());
+
+    let result = backend
+        .code_lens(CodeLensParams {
+            text_document: TextDocumentIdentifier { uri: empty_uri },
+            work_done_progress_params: wdp(),
+            partial_result_params: prp(),
+        })
+        .await
+        .unwrap();
+    assert!(result.is_none(), "no fixtures in this file → None");
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_code_lens_skips_third_party_fixtures() {
+    use pytest_language_server::FixtureDefinition;
+
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    let conftest_path = tfile("test_ls_lens_3p", "conftest.py");
+    // Manually insert a third-party fixture definition so we can assert it is skipped.
+    db.definitions.insert(
+        "third_party_fx".to_string(),
+        vec![FixtureDefinition {
+            name: "third_party_fx".to_string(),
+            file_path: conftest_path.clone(),
+            line: 4,
+            end_line: 5,
+            start_char: 4,
+            end_char: 18,
+            is_third_party: true,
+            ..Default::default()
+        }],
+    );
+    let conftest_uri = turi("test_ls_lens_3p", "conftest.py");
+    backend
+        .uri_cache
+        .insert(conftest_path, conftest_uri.clone());
+
+    let result = backend
+        .code_lens(CodeLensParams {
+            text_document: TextDocumentIdentifier { uri: conftest_uri },
+            work_done_progress_params: wdp(),
+            partial_result_params: prp(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        result.is_none(),
+        "third-party fixtures should be filtered out, got {:?}",
+        result
+    );
 }
 
 // ── inlay_hint ────────────────────────────────────────────────────────────
@@ -1365,6 +1779,237 @@ async fn test_outgoing_calls_returns_none_for_unknown_fixture() {
     assert!(result.is_ok());
 }
 
+// ── call_hierarchy: real data ─────────────────────────────────────────────
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_prepare_call_hierarchy_returns_item_for_fixture() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    let conftest_path = tfile("test_ls_callh_item", "conftest.py");
+    db.analyze_file(
+        conftest_path.clone(),
+        "import pytest\n\n@pytest.fixture\ndef my_fixture():\n    return 1\n",
+    );
+    let conftest_uri = turi("test_ls_callh_item", "conftest.py");
+    backend
+        .uri_cache
+        .insert(conftest_path, conftest_uri.clone());
+
+    // Cursor on the fixture name on line 3 (0-indexed).
+    let result = backend
+        .prepare_call_hierarchy(CallHierarchyPrepareParams {
+            text_document_position_params: tdp(conftest_uri.clone(), 3, 6),
+            work_done_progress_params: wdp(),
+        })
+        .await;
+
+    let items = result.unwrap().expect("should return items");
+    assert_eq!(items.len(), 1);
+    let item = &items[0];
+    assert_eq!(item.name, "my_fixture");
+    assert_eq!(item.kind, SymbolKind::FUNCTION);
+    assert_eq!(item.uri, conftest_uri);
+    // Function-scoped fixture → detail is bare "@pytest.fixture".
+    assert_eq!(item.detail.as_deref(), Some("@pytest.fixture"));
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_prepare_call_hierarchy_scoped_fixture_detail() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    let conftest_path = tfile("test_ls_callh_scope", "conftest.py");
+    db.analyze_file(
+        conftest_path.clone(),
+        "import pytest\n\n@pytest.fixture(scope=\"session\")\ndef my_fixture():\n    return 1\n",
+    );
+    let conftest_uri = turi("test_ls_callh_scope", "conftest.py");
+    backend
+        .uri_cache
+        .insert(conftest_path, conftest_uri.clone());
+
+    let items = backend
+        .prepare_call_hierarchy(CallHierarchyPrepareParams {
+            text_document_position_params: tdp(conftest_uri, 3, 6),
+            work_done_progress_params: wdp(),
+        })
+        .await
+        .unwrap()
+        .expect("items");
+    assert!(items[0]
+        .detail
+        .as_deref()
+        .unwrap_or_default()
+        .contains("scope=\"session\""));
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_prepare_call_hierarchy_from_usage_resolves_to_definition() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    let conftest_path = tfile("test_ls_callh_usage", "conftest.py");
+    db.analyze_file(
+        conftest_path.clone(),
+        "import pytest\n\n@pytest.fixture\ndef my_fixture():\n    return 1\n",
+    );
+    let conftest_uri = turi("test_ls_callh_usage", "conftest.py");
+    backend
+        .uri_cache
+        .insert(conftest_path.clone(), conftest_uri.clone());
+
+    let test_path = tfile("test_ls_callh_usage", "test_example.py");
+    db.analyze_file(test_path.clone(), "def test_one(my_fixture):\n    pass\n");
+    let test_uri = turi("test_ls_callh_usage", "test_example.py");
+    backend.uri_cache.insert(test_path, test_uri.clone());
+
+    // Cursor on the fixture parameter in test file (line 0, char 13).
+    let items = backend
+        .prepare_call_hierarchy(CallHierarchyPrepareParams {
+            text_document_position_params: tdp(test_uri, 0, 13),
+            work_done_progress_params: wdp(),
+        })
+        .await
+        .unwrap()
+        .expect("items");
+    // The item should point at the conftest definition.
+    assert_eq!(items[0].uri, conftest_uri);
+    assert_eq!(items[0].name, "my_fixture");
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_incoming_calls_returns_callers() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    // Fixture `db` used by a test
+    let conftest_path = tfile("test_ls_callh_in", "conftest.py");
+    db.analyze_file(
+        conftest_path.clone(),
+        "import pytest\n\n@pytest.fixture\ndef db_fixture():\n    return 1\n",
+    );
+    let conftest_uri = turi("test_ls_callh_in", "conftest.py");
+    backend
+        .uri_cache
+        .insert(conftest_path.clone(), conftest_uri.clone());
+
+    let test_path = tfile("test_ls_callh_in", "test_example.py");
+    db.analyze_file(test_path.clone(), "def test_one(db_fixture):\n    pass\n");
+    let test_uri = turi("test_ls_callh_in", "test_example.py");
+    backend.uri_cache.insert(test_path, test_uri.clone());
+
+    // Ask for incoming calls to db_fixture defined in conftest.
+    let calls = backend
+        .incoming_calls(CallHierarchyIncomingCallsParams {
+            item: CallHierarchyItem {
+                name: "db_fixture".to_string(),
+                kind: SymbolKind::FUNCTION,
+                tags: None,
+                detail: None,
+                uri: conftest_uri,
+                range: rng(3, 0, 3, 0),
+                selection_range: rng(3, 4, 3, 14),
+                data: None,
+            },
+            work_done_progress_params: wdp(),
+            partial_result_params: prp(),
+        })
+        .await
+        .unwrap()
+        .expect("some calls");
+
+    assert!(!calls.is_empty(), "expected at least one incoming call");
+    // The caller should be the test function `test_one`.
+    assert!(calls.iter().any(|c| c.from.name == "test_one"));
+    assert!(calls.iter().any(|c| c.from.uri == test_uri));
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_outgoing_calls_returns_dependencies() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    // A fixture `consumer` that depends on `db_fixture`
+    let conftest_path = tfile("test_ls_callh_out", "conftest.py");
+    db.analyze_file(
+        conftest_path.clone(),
+        "import pytest\n\n@pytest.fixture\ndef db_fixture():\n    return 1\n\n@pytest.fixture\ndef consumer(db_fixture):\n    return db_fixture\n",
+    );
+    let conftest_uri = turi("test_ls_callh_out", "conftest.py");
+    backend
+        .uri_cache
+        .insert(conftest_path.clone(), conftest_uri.clone());
+
+    let calls = backend
+        .outgoing_calls(CallHierarchyOutgoingCallsParams {
+            item: CallHierarchyItem {
+                name: "consumer".to_string(),
+                kind: SymbolKind::FUNCTION,
+                tags: None,
+                detail: None,
+                uri: conftest_uri.clone(),
+                range: rng(7, 0, 7, 0),
+                selection_range: rng(7, 4, 7, 12),
+                data: None,
+            },
+            work_done_progress_params: wdp(),
+            partial_result_params: prp(),
+        })
+        .await
+        .unwrap()
+        .expect("some calls");
+
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].to.name, "db_fixture");
+    assert_eq!(calls[0].to.uri, conftest_uri);
+    // from_ranges should point at the parameter in the signature of `consumer`.
+    assert!(!calls[0].from_ranges.is_empty());
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_outgoing_calls_skips_unresolvable_dependency() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    // Fixture depending on a name that has no definition
+    let conftest_path = tfile("test_ls_callh_out_missing", "conftest.py");
+    db.analyze_file(
+        conftest_path.clone(),
+        "import pytest\n\n@pytest.fixture\ndef consumer(unknown_dep):\n    return unknown_dep\n",
+    );
+    let conftest_uri = turi("test_ls_callh_out_missing", "conftest.py");
+    backend
+        .uri_cache
+        .insert(conftest_path, conftest_uri.clone());
+
+    let calls = backend
+        .outgoing_calls(CallHierarchyOutgoingCallsParams {
+            item: CallHierarchyItem {
+                name: "consumer".to_string(),
+                kind: SymbolKind::FUNCTION,
+                tags: None,
+                detail: None,
+                uri: conftest_uri,
+                range: rng(3, 0, 3, 0),
+                selection_range: rng(3, 4, 3, 12),
+                data: None,
+            },
+            work_done_progress_params: wdp(),
+            partial_result_params: prp(),
+        })
+        .await
+        .unwrap()
+        .expect("Some");
+    assert!(calls.is_empty(), "unresolved deps should be filtered out");
+}
+
 // ── shutdown ──────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -1468,4 +2113,164 @@ async fn test_full_file_lifecycle_open_change_close() {
         backend.uri_cache.is_empty(),
         "URI cache should be empty after close"
     );
+}
+
+// ── publish_diagnostics_for_file ─────────────────────────────────────────
+//
+// `publish_diagnostics_for_file` pushes diagnostics to the LSP client. With
+// the dummy client we can't intercept the wire call, but we can exercise the
+// *construction* paths (lines 17–96 in `providers/diagnostics.rs`) and assert
+// they don't panic + that the underlying detection methods agree about
+// whether a diagnostic would have been produced.
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_publish_diagnostics_reports_undeclared_fixture() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    // Define `parent_fixture` in conftest.py so it is an *available* fixture
+    // for the sibling test file. Using it in a test body without declaring
+    // it as a parameter is an "undeclared fixture" usage.
+    let conftest_path = tfile("test_ls_diag_undecl", "conftest.py");
+    db.analyze_file(
+        conftest_path.clone(),
+        "import pytest\n\n@pytest.fixture\ndef parent_fixture():\n    return 1\n",
+    );
+    let conftest_uri = turi("test_ls_diag_undecl", "conftest.py");
+    backend.uri_cache.insert(conftest_path, conftest_uri);
+
+    let test_path = tfile("test_ls_diag_undecl", "test_example.py");
+    db.analyze_file(
+        test_path.clone(),
+        "def test_something():\n    result = parent_fixture\n",
+    );
+    let test_uri = turi("test_ls_diag_undecl", "test_example.py");
+    backend
+        .uri_cache
+        .insert(test_path.clone(), test_uri.clone());
+
+    let undeclared = db.get_undeclared_fixtures(&test_path);
+    assert!(
+        !undeclared.is_empty(),
+        "detection should find 'parent_fixture' as undeclared"
+    );
+
+    backend
+        .publish_diagnostics_for_file(&test_uri, &test_path)
+        .await;
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_publish_diagnostics_reports_circular_dependency() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    let conftest_path = tfile("test_ls_diag_cycle", "conftest.py");
+    db.analyze_file(
+        conftest_path.clone(),
+        "import pytest\n\n@pytest.fixture\ndef a(b):\n    return b\n\n@pytest.fixture\ndef b(a):\n    return a\n",
+    );
+    let conftest_uri = turi("test_ls_diag_cycle", "conftest.py");
+    backend
+        .uri_cache
+        .insert(conftest_path.clone(), conftest_uri.clone());
+
+    // Detection method agrees there's a cycle in this file.
+    let cycles = db.detect_fixture_cycles_in_file(&conftest_path);
+    assert!(!cycles.is_empty(), "should detect a-b cycle");
+
+    backend
+        .publish_diagnostics_for_file(&conftest_uri, &conftest_path)
+        .await;
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_publish_diagnostics_reports_scope_mismatch() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    // session-scoped fixture that depends on a function-scoped fixture
+    let conftest_path = tfile("test_ls_diag_scope", "conftest.py");
+    db.analyze_file(
+        conftest_path.clone(),
+        "import pytest\n\n@pytest.fixture\ndef narrow():\n    return 1\n\n@pytest.fixture(scope=\"session\")\ndef broad(narrow):\n    return narrow\n",
+    );
+    let conftest_uri = turi("test_ls_diag_scope", "conftest.py");
+    backend
+        .uri_cache
+        .insert(conftest_path.clone(), conftest_uri.clone());
+
+    let mismatches = db.detect_scope_mismatches_in_file(&conftest_path);
+    assert!(
+        !mismatches.is_empty(),
+        "should detect session-depends-on-function mismatch"
+    );
+
+    backend
+        .publish_diagnostics_for_file(&conftest_uri, &conftest_path)
+        .await;
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_publish_diagnostics_respects_disabled_diagnostics() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    // All three diagnostic sources present in one file.
+    let conftest_path = tfile("test_ls_diag_disabled", "conftest.py");
+    db.analyze_file(
+        conftest_path.clone(),
+        "import pytest\n\n@pytest.fixture\ndef narrow():\n    return 1\n\n@pytest.fixture(scope=\"session\")\ndef broad(narrow):\n    return narrow\n\n@pytest.fixture\ndef a(b):\n    return b\n\n@pytest.fixture\ndef b(a):\n    return a\n\ndef test_something():\n    missing_fx\n",
+    );
+    let conftest_uri = turi("test_ls_diag_disabled", "conftest.py");
+    backend
+        .uri_cache
+        .insert(conftest_path.clone(), conftest_uri.clone());
+
+    // Disable all three diagnostic kinds.
+    {
+        let mut config = backend.config.write().await;
+        config.disabled_diagnostics = vec![
+            "undeclared-fixture".to_string(),
+            "circular-dependency".to_string(),
+            "scope-mismatch".to_string(),
+        ];
+    }
+
+    // Must still run cleanly (exercises the three `is_diagnostic_disabled` branches).
+    backend
+        .publish_diagnostics_for_file(&conftest_uri, &conftest_path)
+        .await;
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_publish_diagnostics_clean_file_publishes_nothing() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    let conftest_path = tfile("test_ls_diag_clean", "conftest.py");
+    db.analyze_file(
+        conftest_path.clone(),
+        "import pytest\n\n@pytest.fixture\ndef clean_fixture():\n    return 1\n",
+    );
+    let conftest_uri = turi("test_ls_diag_clean", "conftest.py");
+    backend
+        .uri_cache
+        .insert(conftest_path.clone(), conftest_uri.clone());
+
+    // No undeclared/cycle/mismatch.
+    assert!(db.get_undeclared_fixtures(&conftest_path).is_empty());
+    assert!(db.detect_fixture_cycles_in_file(&conftest_path).is_empty());
+    assert!(db
+        .detect_scope_mismatches_in_file(&conftest_path)
+        .is_empty());
+
+    backend
+        .publish_diagnostics_for_file(&conftest_uri, &conftest_path)
+        .await;
 }

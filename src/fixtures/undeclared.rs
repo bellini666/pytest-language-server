@@ -364,3 +364,161 @@ impl FixtureDatabase {
         false
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// Seed a conftest with a single fixture and analyze a test file that
+    /// references it in some shape. Returns the undeclared fixtures detected
+    /// in the test file.
+    fn analyze_with_conftest(test_body: &str) -> Vec<UndeclaredFixture> {
+        let db = FixtureDatabase::new();
+        let base = std::env::temp_dir().join("pls_undeclared_unit");
+
+        let conftest_path = base.join("conftest.py");
+        db.analyze_file(
+            conftest_path,
+            "import pytest\n\n@pytest.fixture\ndef my_fixture():\n    return 1\n",
+        );
+
+        let test_path = base.join("test_example.py");
+        let content = format!("def test_one():\n{}\n", test_body);
+        db.analyze_file(test_path.clone(), &content);
+
+        db.get_undeclared_fixtures(&test_path)
+    }
+
+    #[test]
+    fn test_with_statement_binding_shadows_outer_name() {
+        // `my_fixture` is bound by the `with ... as my_fixture:` statement,
+        // so a later read of it is a local variable, not an undeclared fixture.
+        let undeclared =
+            analyze_with_conftest("    with open(\"x\") as my_fixture:\n        _ = my_fixture\n");
+        assert!(
+            undeclared.iter().all(|u| u.name != "my_fixture") || undeclared.is_empty(),
+            "with-binding should suppress undeclared flag, got {:?}",
+            undeclared
+        );
+    }
+
+    #[test]
+    fn test_for_loop_tuple_unpacking_captured_as_local() {
+        // `my_fixture` is the loop variable → local, not undeclared.
+        let undeclared =
+            analyze_with_conftest("    for my_fixture in []:\n        _ = my_fixture\n");
+        assert!(
+            undeclared.iter().all(|u| u.name != "my_fixture"),
+            "for-loop target should be a local, got {:?}",
+            undeclared
+        );
+    }
+
+    #[test]
+    fn test_imported_name_not_flagged_as_undeclared_fixture() {
+        // Imports are tracked per file: if `my_fixture` is imported in the
+        // test file, it should *not* be flagged even though it is also a
+        // fixture defined in conftest.
+        let db = FixtureDatabase::new();
+        let base = std::env::temp_dir().join("pls_undeclared_unit_imported");
+
+        let conftest_path = base.join("conftest.py");
+        db.analyze_file(
+            conftest_path,
+            "import pytest\n\n@pytest.fixture\ndef my_fixture():\n    return 1\n",
+        );
+
+        let test_path = base.join("test_example.py");
+        db.analyze_file(
+            test_path.clone(),
+            "from helpers import my_fixture\n\ndef test_one():\n    _ = my_fixture\n",
+        );
+
+        let undeclared = db.get_undeclared_fixtures(&test_path);
+        assert!(
+            undeclared.iter().all(|u| u.name != "my_fixture"),
+            "imported name should not be flagged, got {:?}",
+            undeclared
+        );
+    }
+
+    #[test]
+    fn test_undeclared_flagged_in_assignment_rhs() {
+        // Baseline: referencing `my_fixture` on the RHS of an assignment
+        // without declaring it as a parameter *is* flagged.
+        let undeclared = analyze_with_conftest("    x = my_fixture\n");
+        assert!(
+            undeclared.iter().any(|u| u.name == "my_fixture"),
+            "baseline undeclared detection failed, got {:?}",
+            undeclared
+        );
+    }
+
+    #[test]
+    fn test_undeclared_flagged_inside_dict_value() {
+        // Dict literal value should still be walked.
+        let undeclared = analyze_with_conftest("    x = {\"k\": my_fixture}\n");
+        assert!(
+            undeclared.iter().any(|u| u.name == "my_fixture"),
+            "fixture inside dict value should be flagged, got {:?}",
+            undeclared
+        );
+    }
+
+    #[test]
+    fn test_declared_parameter_suppresses_flag() {
+        // If the fixture is declared as a parameter, it's not undeclared.
+        let db = FixtureDatabase::new();
+        let base = std::env::temp_dir().join("pls_undeclared_unit_declared");
+
+        let conftest_path = base.join("conftest.py");
+        db.analyze_file(
+            conftest_path,
+            "import pytest\n\n@pytest.fixture\ndef my_fixture():\n    return 1\n",
+        );
+
+        let test_path = base.join("test_example.py");
+        db.analyze_file(
+            test_path.clone(),
+            "def test_one(my_fixture):\n    _ = my_fixture\n",
+        );
+        let undeclared = db.get_undeclared_fixtures(&test_path);
+        assert!(
+            undeclared.iter().all(|u| u.name != "my_fixture"),
+            "declared parameter should suppress flag, got {:?}",
+            undeclared
+        );
+    }
+
+    #[test]
+    fn test_is_available_fixture_same_file() {
+        let db = FixtureDatabase::new();
+        let conftest_path = PathBuf::from("/tmp/pls_avail/conftest.py");
+        db.analyze_file(
+            conftest_path.clone(),
+            "import pytest\n\n@pytest.fixture\ndef same_file_fixture():\n    return 1\n",
+        );
+        assert!(db.is_available_fixture(&conftest_path, "same_file_fixture"));
+        assert!(!db.is_available_fixture(&conftest_path, "nonexistent_fixture"));
+    }
+
+    #[test]
+    fn test_is_available_fixture_third_party() {
+        use crate::fixtures::types::FixtureDefinition;
+
+        let db = FixtureDatabase::new();
+        db.definitions.insert(
+            "third_party_fixture".to_string(),
+            vec![FixtureDefinition {
+                name: "third_party_fixture".to_string(),
+                file_path: PathBuf::from("/site-packages/pkg/fixtures.py"),
+                is_third_party: true,
+                ..Default::default()
+            }],
+        );
+        // Not in same file nor conftest parent, but flagged third_party → available.
+        let consumer = PathBuf::from("/tmp/pls_avail/test_foo.py");
+        assert!(db.is_available_fixture(&consumer, "third_party_fixture"));
+    }
+}

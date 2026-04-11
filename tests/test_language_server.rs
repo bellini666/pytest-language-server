@@ -760,7 +760,8 @@ async fn test_goto_implementation_generator_fixture_returns_yield_line() {
     let db = Arc::new(FixtureDatabase::new());
     let backend = make_backend_with_db(Arc::clone(&db));
 
-    // Generator fixture with yield on line 5 (1-indexed).
+    // Generator fixture with `yield value` on line 6 (1-indexed),
+    // which is LSP line 5 (0-indexed).
     let conftest_path = tfile("test_ls_impl_yield", "conftest.py");
     db.analyze_file(
         conftest_path.clone(),
@@ -1043,11 +1044,9 @@ async fn test_references_self_referencing_fixture_skips_def_line() {
         .uri_cache
         .insert(child_path.clone(), child_uri.clone());
 
-    // Click on the parent `cli_runner` definition (line 3 in parent conftest).
-    // The child's parameter `cli_runner` on the def line of the child's own
-    // fixture is a reference to the parent, but sits on the child def line —
-    // this exercises the "skip same-line-as-def" branch only when clicking
-    // on the child definition. Click on child def line 3:
+    // Click on the child `cli_runner` definition (line 3 in child conftest).
+    // The child's own parameter `cli_runner` sits on that same line, so the
+    // returned locations must not contain a duplicate entry for the def line.
     let locations = get_refs(&backend, child_uri.clone(), 3, 6).await;
 
     // Should return at least the definition; the parameter reference on the
@@ -1064,73 +1063,6 @@ async fn test_references_self_referencing_fixture_skips_def_line() {
     assert_eq!(
         same_line_count, 1,
         "def-line duplicate should be filtered; got {:?}",
-        locations
-    );
-}
-
-#[tokio::test]
-#[timeout(30000)]
-async fn test_references_skips_usage_on_definition_line() {
-    let db = Arc::new(FixtureDatabase::new());
-    let backend = make_backend_with_db(Arc::clone(&db));
-
-    // Seed with a natural usage first so we can clone a real FixtureUsage.
-    let conftest_path = tfile("test_ls_refs_skip_same", "conftest.py");
-    db.analyze_file(
-        conftest_path.clone(),
-        "import pytest\n\n@pytest.fixture\ndef my_fixture():\n    return 1\n",
-    );
-    let test_path = tfile("test_ls_refs_skip_same", "test_example.py");
-    db.analyze_file(test_path.clone(), "def test_one(my_fixture):\n    pass\n");
-
-    let conftest_uri = turi("test_ls_refs_skip_same", "conftest.py");
-    backend
-        .uri_cache
-        .insert(conftest_path.clone(), conftest_uri.clone());
-    backend
-        .uri_cache
-        .insert(test_path, turi("test_ls_refs_skip_same", "test_example.py"));
-
-    // Clone the existing usage and rewrite it to sit on the definition line
-    // of the conftest file (internal line 4). The cloned usage preserves
-    // non-exhaustive fields so the struct stays constructible.
-    let cloned_same_line_usage = {
-        let entries = db
-            .usage_by_fixture
-            .get("my_fixture")
-            .expect("seed usage should exist");
-        let (_, existing) = entries.first().expect("at least one usage").clone();
-        let mut u = existing;
-        u.file_path = conftest_path.clone();
-        u.line = 4;
-        u.start_char = 4;
-        u.end_char = 14;
-        u
-    };
-    db.usage_by_fixture
-        .entry("my_fixture".to_string())
-        .or_default()
-        .push((conftest_path.clone(), cloned_same_line_usage));
-
-    // Click on the definition name → cursor on line 3 (0-indexed), char 6.
-    // `definition_to_include` will be the conftest def at internal line 4,
-    // and the injected same-line usage must be filtered out.
-    let locations = get_refs(&backend, conftest_uri.clone(), 3, 6).await;
-
-    // The returned locations should include the definition, plus the test
-    // usage, but NOT the injected same-line usage.
-    assert!(!locations.is_empty());
-    // Count locations on the conftest file at the def line. There should be
-    // exactly one (the definition itself); the cloned same-line usage is
-    // filtered out by the "skip" branch.
-    let def_line_lsp = 3;
-    let conftest_def_line_count = locations
-        .iter()
-        .filter(|l| l.uri == conftest_uri && l.range.start.line == def_line_lsp)
-        .count();
-    assert_eq!(
-        conftest_def_line_count, 1,
-        "injected same-line usage should be filtered, got {:?}",
         locations
     );
 }

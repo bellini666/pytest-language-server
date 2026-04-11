@@ -397,14 +397,14 @@ mod tests {
         let undeclared =
             analyze_with_conftest("    with open(\"x\") as my_fixture:\n        _ = my_fixture\n");
         assert!(
-            undeclared.iter().all(|u| u.name != "my_fixture") || undeclared.is_empty(),
+            undeclared.iter().all(|u| u.name != "my_fixture"),
             "with-binding should suppress undeclared flag, got {:?}",
             undeclared
         );
     }
 
     #[test]
-    fn test_for_loop_tuple_unpacking_captured_as_local() {
+    fn test_for_loop_target_captured_as_local() {
         // `my_fixture` is the loop variable → local, not undeclared.
         let undeclared =
             analyze_with_conftest("    for my_fixture in []:\n        _ = my_fixture\n");

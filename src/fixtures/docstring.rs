@@ -153,13 +153,14 @@ impl FixtureDatabase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     /// Analyze a Python snippet defining a single fixture and return its
     /// recorded `return_type`.
     fn fixture_return_type(source: &str) -> Option<String> {
         let db = FixtureDatabase::new();
-        let path = std::env::temp_dir().join("pls_docstring_unit/conftest.py");
+        let path = std::env::temp_dir()
+            .join("pls_docstring_unit")
+            .join("conftest.py");
         db.analyze_file(path, source);
         db.definitions
             .get("fx")
@@ -248,7 +249,9 @@ mod tests {
     #[test]
     fn test_extract_docstring_picks_up_first_string() {
         let db = FixtureDatabase::new();
-        let path = PathBuf::from("/tmp/pls_docstring_unit/conftest_doc.py");
+        let path = std::env::temp_dir()
+            .join("pls_docstring_unit")
+            .join("conftest_doc.py");
         db.analyze_file(
             path,
             "import pytest\n@pytest.fixture\ndef fx():\n    \"\"\"The docstring.\"\"\"\n    return 1\n",

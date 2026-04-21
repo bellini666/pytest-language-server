@@ -368,7 +368,7 @@ After installing the extension, you need to enable the language server for Pytho
 
 **The extension includes pre-built binaries - no separate installation required!**
 
-Install from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=bellini666.pytest-language-server):
+Install from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=bellini666.pytest-language-server) or the [Open VSX Registry](https://open-vsx.org/extension/bellini666/pytest-language-server) (for VSCodium, Cursor, Windsurf, etc.):
 
 1. Open VS Code
 2. Go to Extensions (Cmd+Shift+X / Ctrl+Shift+X)

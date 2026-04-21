@@ -403,6 +403,42 @@ jobs:
           cd extensions/vscode-extension
           vsce publish -p ${{ secrets.VSCE_TOKEN }}
 
+  publish-openvsx:
+    name: Publish to Open VSX Registry
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build-binaries]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+      - name: Download all binaries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: binary-*
+          path: extensions/vscode-extension/bin
+      - name: Flatten binaries
+        run: |
+          cd extensions/vscode-extension/bin
+          find . -type f -name "pytest-language-server*" -exec mv {} . \;
+          find . -type d -empty -delete
+          chmod +x pytest-language-server-* || true
+          ls -lh
+      - name: Install dependencies
+        run: |
+          cd extensions/vscode-extension
+          npm install
+          npm install -g @vscode/vsce ovsx
+      - name: Package extension
+        run: |
+          cd extensions/vscode-extension
+          vsce package
+      - name: Publish to Open VSX Registry
+        run: |
+          cd extensions/vscode-extension
+          ovsx publish -p ${{ secrets.OVSX_TOKEN }}
+
   publish-intellij:
     name: Publish IntelliJ/PyCharm plugin
     runs-on: ubuntu-latest

@@ -50,36 +50,33 @@ impl FixtureDatabase {
                         return true;
                     }
                 }
-                Stmt::If(if_stmt) => {
-                    if self.contains_yield(&if_stmt.body) || self.contains_yield(&if_stmt.orelse) {
-                        return true;
-                    }
+                Stmt::If(if_stmt)
+                    if self.contains_yield(&if_stmt.body)
+                        || self.contains_yield(&if_stmt.orelse) =>
+                {
+                    return true;
                 }
-                Stmt::For(for_stmt) => {
-                    if self.contains_yield(&for_stmt.body) || self.contains_yield(&for_stmt.orelse)
-                    {
-                        return true;
-                    }
+                Stmt::For(for_stmt)
+                    if self.contains_yield(&for_stmt.body)
+                        || self.contains_yield(&for_stmt.orelse) =>
+                {
+                    return true;
                 }
-                Stmt::While(while_stmt) => {
+                Stmt::While(while_stmt)
                     if self.contains_yield(&while_stmt.body)
-                        || self.contains_yield(&while_stmt.orelse)
-                    {
-                        return true;
-                    }
+                        || self.contains_yield(&while_stmt.orelse) =>
+                {
+                    return true;
                 }
-                Stmt::With(with_stmt) => {
-                    if self.contains_yield(&with_stmt.body) {
-                        return true;
-                    }
+                Stmt::With(with_stmt) if self.contains_yield(&with_stmt.body) => {
+                    return true;
                 }
-                Stmt::Try(try_stmt) => {
+                Stmt::Try(try_stmt)
                     if self.contains_yield(&try_stmt.body)
                         || self.contains_yield(&try_stmt.orelse)
-                        || self.contains_yield(&try_stmt.finalbody)
-                    {
-                        return true;
-                    }
+                        || self.contains_yield(&try_stmt.finalbody) =>
+                {
+                    return true;
                 }
                 _ => {}
             }

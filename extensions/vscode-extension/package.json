@@ -16,7 +16,7 @@
   "homepage": "https://github.com/bellini666/pytest-language-server#readme",
   "icon": "icon.png",
   "engines": {
-    "vscode": "^1.115.0"
+    "vscode": "^1.116.0"
   },
   "categories": [
     "Programming Languages",
@@ -94,12 +94,12 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^25.6.0",
-    "@types/vscode": "^1.115.0",
-    "eslint": "^10.2.0",
+    "@types/vscode": "^1.116.0",
+    "eslint": "^10.2.1",
     "ts-loader": "^9.5.7",
-    "typescript": "^6.0.2",
-    "typescript-eslint": "^8.58.1",
-    "webpack": "^5.106.1",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.59.0",
+    "webpack": "^5.106.2",
     "webpack-cli": "^7.0.2"
   },
   "dependencies": {

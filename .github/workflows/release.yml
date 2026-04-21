@@ -279,7 +279,7 @@ jobs:
           ls -lh binaries-dist/
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/*.whl
@@ -432,7 +432,7 @@ jobs:
           chmod +x build.sh gradlew
           ./build.sh
       - name: Upload plugin to GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: extensions/intellij-plugin/build/distributions/pytest-language-server-*.zip
       - name: Verify plugin compatibility

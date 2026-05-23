@@ -93,13 +93,13 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@types/node": "^25.6.0",
-    "@types/vscode": "^1.112.0",
-    "eslint": "^10.2.1",
+    "@types/node": "^25.9.1",
+    "@types/vscode": "^1.120.0",
+    "eslint": "^10.4.0",
     "ts-loader": "^9.5.7",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.59.0",
-    "webpack": "^5.106.2",
+    "typescript-eslint": "^8.59.4",
+    "webpack": "^5.107.1",
     "webpack-cli": "^7.0.2"
   },
   "dependencies": {

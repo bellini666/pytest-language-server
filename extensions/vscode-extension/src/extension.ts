@@ -59,7 +59,11 @@ export async function activate(context: vscode.ExtensionContext) {
     }
     // Make sure it's executable on Unix-like systems
     if (process.platform !== 'win32') {
-      fs.chmodSync(command, 0o755);
+      try {
+        fs.accessSync(command, fs.constants.X_OK);
+      } catch {
+        fs.chmodSync(command, 0o755);
+      }
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

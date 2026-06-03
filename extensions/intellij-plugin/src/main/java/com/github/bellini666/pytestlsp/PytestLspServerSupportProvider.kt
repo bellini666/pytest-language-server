@@ -80,9 +80,9 @@ class PytestLspServerSupportProviderFallback : LspServerSupportProvider {
         private fun isLspModuleAvailable(): Boolean {
             return try {
                 val lspModuleId = PluginId.getId("com.intellij.modules.lsp")
-                // Use non-deprecated API: check if plugin exists and is not disabled
-                val plugin = PluginManagerCore.getPlugin(lspModuleId)
-                val isAvailable = plugin != null && !PluginManagerCore.isDisabled(lspModuleId)
+                // Use only non-internal PluginManagerCore APIs (getPlugin is now @Internal)
+                val isAvailable = PluginManagerCore.isPluginInstalled(lspModuleId) &&
+                    !PluginManagerCore.isDisabled(lspModuleId)
                 if (isAvailable) {
                     LOG.info("com.intellij.modules.lsp is available, fallback provider will not be registered")
                 }

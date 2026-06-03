@@ -1,9 +1,8 @@
 package com.github.bellini666.pytestlsp
 
-import com.intellij.ide.plugins.PluginManagerCore
+import com.intellij.ide.plugins.cl.PluginAwareClassLoader
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.diagnostic.Logger
-import com.intellij.openapi.extensions.PluginId
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.SystemInfo
 import com.intellij.util.system.CpuArch
@@ -105,9 +104,9 @@ class PytestLanguageServerService(private val project: Project) {
             }
         }
 
-        // Get plugin directory using IntelliJ's plugin API
-        val pluginId = PluginId.getId("com.github.bellini666.pytest-language-server")
-        val pluginDescriptor = PluginManagerCore.getPlugin(pluginId)
+        // Resolve the plugin directory via this plugin's own classloader, which exposes a
+        // stable PluginDescriptor without the now-internal PluginManagerCore.getPlugin().
+        val pluginDescriptor = (javaClass.classLoader as? PluginAwareClassLoader)?.pluginDescriptor
         if (pluginDescriptor == null) {
             LOG.error("Failed to find plugin descriptor")
             return null

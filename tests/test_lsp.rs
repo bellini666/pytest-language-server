@@ -8092,6 +8092,37 @@ def test_something(baz):
 
 #[tokio::test]
 #[timeout(30000)]
+async fn test_rename_triggered_from_inside_nested_closure() {
+    // Invoking rename on the parameter from inside a nested closure (whose own def has no
+    // parametrize decorator) must still resolve to the enclosing parametrized test and rewrite
+    // the decorator string, signature, and all references.
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize("foo", [1])
+def test_something(foo):
+    def closure():
+        return foo
+    return closure()
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize("baz", [1])
+def test_something(baz):
+    def closure():
+        return baz
+    return closure()
+"#;
+    // `foo` occurrences: decorator string (0), signature (1), closure body (2).
+    let got = run_parametrize_rename(content, "foo", 2, "baz", "test_rename_from_closure")
+        .await
+        .expect("rename from a closure reference should produce edits");
+    assert_eq!(got, expected);
+}
+
+#[tokio::test]
+#[timeout(30000)]
 async fn test_rename_async_test_and_nested_async_function() {
     // An async test and a nested async closure that references the param.
     let content = r#"import pytest

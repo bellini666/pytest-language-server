@@ -306,12 +306,19 @@ impl Backend {
         let line_index = FixtureDatabase::build_line_index(content);
         let cursor_offset = *line_index.get(position.line as usize)? + position.character as usize;
 
-        // Innermost function whose decorators or body contain the cursor.
+        // Innermost *parametrized* function whose decorators or body contain the cursor. Filtering
+        // to parametrized functions means a cursor inside a nested closure that references the
+        // parameter still resolves to the enclosing parametrized test rather than the closure.
         let mut functions = Vec::new();
         collect_functions(&module.body, &mut functions);
         let func = functions
             .into_iter()
             .filter(|f| f.contains(cursor_offset))
+            .filter(|f| {
+                f.decorators
+                    .iter()
+                    .any(|d| !decorators::extract_parametrize_argnames(d, content).is_empty())
+            })
             .min_by_key(FuncCtx::span)?;
 
         // Parametrize names declared across all decorators, excluding indirect ones (those route

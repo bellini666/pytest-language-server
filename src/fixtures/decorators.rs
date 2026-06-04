@@ -132,8 +132,8 @@ pub fn is_parametrize_decorator(expr: &Expr) -> bool {
 /// concatenated string literals, so a rename never corrupts the file.
 fn is_plain_identifier(name: &str) -> bool {
     let mut chars = name.chars();
-    matches!(chars.next(), Some(c) if c == '_' || c.is_alphabetic())
-        && chars.all(|c| c == '_' || c.is_alphanumeric())
+    matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
 /// Splits the *source text* of a string literal into argnames, each paired with the precise

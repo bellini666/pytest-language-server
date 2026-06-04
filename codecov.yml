@@ -1,0 +1,21 @@
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+
+flags:
+  os-Linux:
+    paths:
+      - src/
+  os-macOS:
+    paths:
+      - src/
+  os-Windows:
+    paths:
+      - src/
+
+codecov:
+  notify:
+    after_n_builds: 3

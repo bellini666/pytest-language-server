@@ -7699,21 +7699,29 @@ def test_parametrized(request):
 // Rename: @pytest.mark.parametrize parameters (issue #165)
 // ============================================================================
 
-/// Byte-offset position of the `occurrence`-th match of `needle` in `content`.
-/// `character` is a byte column, matching the server's position convention.
+/// Byte-offset position of the `occurrence`-th *whole-word* match of `needle` in `content`.
+/// `character` is a byte column, matching the server's position convention. Matches that are part
+/// of a larger identifier are skipped so a test never silently triggers on the wrong token.
 fn position_of(content: &str, needle: &str, occurrence: usize) -> Position {
+    let is_word = |b: u8| b == b'_' || b.is_ascii_alphanumeric();
     let mut count = 0;
     for (line_idx, line) in content.lines().enumerate() {
+        let bytes = line.as_bytes();
         let mut start = 0;
         while let Some(rel) = line[start..].find(needle) {
             let col = start + rel;
-            if count == occurrence {
-                return Position {
-                    line: line_idx as u32,
-                    character: col as u32,
-                };
+            let end = col + needle.len();
+            let whole_word = (col == 0 || !is_word(bytes[col - 1]))
+                && (end >= bytes.len() || !is_word(bytes[end]));
+            if whole_word {
+                if count == occurrence {
+                    return Position {
+                        line: line_idx as u32,
+                        character: col as u32,
+                    };
+                }
+                count += 1;
             }
-            count += 1;
             start = col + needle.len();
         }
     }
@@ -7935,7 +7943,7 @@ def test_something(foo, renamed):
 #[timeout(30000)]
 async fn test_rename_parametrize_body_attribute_and_string_untouched() {
     // The name must not be renamed where it appears as an attribute, a string, or a keyword-arg
-    // name in the body — only as a bare local reference.
+    // name in the body, nor inside a larger identifier (foobar) — only as a bare local reference.
     let content = r#"import pytest
 
 
@@ -7943,7 +7951,8 @@ async fn test_rename_parametrize_body_attribute_and_string_untouched() {
 def test_something(foo):
     obj.foo = foo
     helper(foo="literal")
-    print("foo", foo)
+    foobar = foo
+    print("foo", foo, foobar)
 "#;
     let expected = r#"import pytest
 
@@ -7952,7 +7961,8 @@ def test_something(foo):
 def test_something(baz):
     obj.foo = baz
     helper(foo="literal")
-    print("foo", baz)
+    foobar = baz
+    print("foo", baz, foobar)
 "#;
     let got = run_parametrize_rename(content, "foo", 1, "baz", "test_rename_body")
         .await

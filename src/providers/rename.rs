@@ -74,8 +74,9 @@ impl FuncCtx<'_> {
 /// are not collected. Parts evaluated in the enclosing scope (decorators, parameter defaults and
 /// annotations, the first comprehension iterable) are still visited.
 ///
-/// Limitation: a nested function that rebinds the name by assignment (rather than by parameter) is
-/// not detected; that case over-collects. It does not occur in practice in test bodies.
+/// Limitation: a nested function that rebinds the name by assignment, `global`, or `nonlocal`
+/// (rather than by parameter) is not detected; that case over-collects. It does not occur in
+/// practice in test bodies.
 struct NameUsageCollector {
     target: String,
     ranges: Vec<TextRange>,

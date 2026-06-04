@@ -1,0 +1,14 @@
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+
+flags:
+  os-Linux:
+    carryforward: true
+  os-macOS:
+    carryforward: true
+  os-Windows:
+    carryforward: true

@@ -250,7 +250,7 @@ fn argnames_with_slices(code: &str) -> Vec<(String, String)> {
     func_def
         .decorator_list
         .iter()
-        .flat_map(decorators::extract_parametrize_argnames)
+        .flat_map(|dec| decorators::extract_parametrize_argnames(dec, code))
         .map(|(name, range)| {
             let slice = code[range.start().to_usize()..range.end().to_usize()].to_string();
             (name, slice)
@@ -353,4 +353,80 @@ fn test_extract_parametrize_argnames_stacked() {
 fn test_extract_parametrize_argnames_not_parametrize() {
     let got = argnames_with_slices("@pytest.mark.usefixtures('x')\ndef test_x(): pass");
     assert!(got.is_empty());
+}
+
+#[test]
+#[timeout(30000)]
+fn test_extract_parametrize_argnames_triple_quoted() {
+    // The range must skip all three opening quotes and land on the identifier.
+    let got = argnames_with_slices(
+        "@pytest.mark.parametrize('''a, b''', [(1, 2)])\ndef test_x(a, b): pass",
+    );
+    assert_eq!(
+        got,
+        vec![
+            ("a".to_string(), "a".to_string()),
+            ("b".to_string(), "b".to_string())
+        ]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_extract_parametrize_argnames_raw_string_prefix() {
+    // The `r` prefix must be skipped along with the quote.
+    let got =
+        argnames_with_slices("@pytest.mark.parametrize(r\"foo\", [1])\ndef test_x(foo): pass");
+    assert_eq!(got, vec![("foo".to_string(), "foo".to_string())]);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_extract_parametrize_argnames_rejects_non_identifier() {
+    // Implicitly concatenated literals can't be cleanly located, so nothing is returned rather
+    // than a corrupting range.
+    let got = argnames_with_slices("@pytest.mark.parametrize('a' 'b', [1])\ndef test_x(ab): pass");
+    assert!(got.is_empty());
+}
+
+#[test]
+#[timeout(30000)]
+fn test_indirect_names_keyword_argnames() {
+    let code = "@pytest.mark.parametrize(argnames='a,b', argvalues=[(1, 2)], indirect=True)\ndef test_x(a, b): pass";
+    let parsed = parse(code, Mode::Module, "").unwrap();
+    let rustpython_parser::ast::Mod::Module(module) = parsed else {
+        panic!("expected module");
+    };
+    let rustpython_parser::ast::Stmt::FunctionDef(func_def) = &module.body[0] else {
+        panic!("expected function def");
+    };
+    let dec = &func_def.decorator_list[0];
+    let names: Vec<String> = decorators::extract_parametrize_argnames(dec, code)
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    let indirect = decorators::extract_parametrize_indirect_names(dec, &names);
+    assert!(indirect.contains("a"));
+    assert!(indirect.contains("b"));
+}
+
+#[test]
+#[timeout(30000)]
+fn test_indirect_names_partial_list() {
+    let code = "@pytest.mark.parametrize('a,b', [(1, 2)], indirect=['a'])\ndef test_x(a, b): pass";
+    let parsed = parse(code, Mode::Module, "").unwrap();
+    let rustpython_parser::ast::Mod::Module(module) = parsed else {
+        panic!("expected module");
+    };
+    let rustpython_parser::ast::Stmt::FunctionDef(func_def) = &module.body[0] else {
+        panic!("expected function def");
+    };
+    let dec = &func_def.decorator_list[0];
+    let names: Vec<String> = decorators::extract_parametrize_argnames(dec, code)
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    let indirect = decorators::extract_parametrize_indirect_names(dec, &names);
+    assert!(indirect.contains("a"));
+    assert!(!indirect.contains("b"));
 }

@@ -7959,6 +7959,55 @@ def test_something(baz):
 
 #[tokio::test]
 #[timeout(30000)]
+async fn test_rename_respects_nested_scope_shadowing() {
+    // A comprehension loop var and a lambda param that reuse the name are different bindings and
+    // must not be renamed; a direct reference in the test body must be renamed.
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize("foo", [[1, 2]])
+def test_something(foo):
+    squared = [foo for foo in range(3)]
+    fn = lambda foo: foo + 1
+    assert foo
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize("baz", [[1, 2]])
+def test_something(baz):
+    squared = [foo for foo in range(3)]
+    fn = lambda foo: foo + 1
+    assert baz
+"#;
+    // Trigger from the signature parameter (occ 1; occ 0 is the decorator string).
+    let got = run_parametrize_rename(content, "foo", 1, "baz", "test_rename_shadow")
+        .await
+        .expect("rename should produce edits");
+    assert_eq!(got, expected);
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_indirect_list_form_declined() {
+    // `indirect=["foo"]` with list argnames must be detected and declined (review finding 3).
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize(["foo", "bar"], [(1, 2)], indirect=["foo"])
+def test_something(foo, bar):
+    print(foo, bar)
+"#;
+    let got =
+        run_parametrize_rename(content, "foo", 1, "renamed", "test_rename_indirect_list").await;
+    assert!(
+        got.is_none(),
+        "indirect param via list argnames should be declined"
+    );
+}
+
+#[tokio::test]
+#[timeout(30000)]
 async fn test_rename_declines_indirect_parameter() {
     let content = r#"import pytest
 

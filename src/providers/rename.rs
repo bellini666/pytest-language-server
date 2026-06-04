@@ -10,7 +10,10 @@
 
 use super::Backend;
 use crate::fixtures::{decorators, FixtureDatabase};
-use rustpython_parser::ast::{Arguments, Expr, ExprName, Ranged, Stmt, Visitor};
+use rustpython_parser::ast::{
+    Arguments, Expr, ExprDictComp, ExprGeneratorExp, ExprLambda, ExprListComp, ExprName,
+    ExprSetComp, Ranged, Stmt, StmtAsyncFunctionDef, StmtFunctionDef, Visitor,
+};
 use rustpython_parser::text_size::TextRange;
 use rustpython_parser::{parse, Mode};
 use std::collections::{HashMap, HashSet};
@@ -63,11 +66,75 @@ impl FuncCtx<'_> {
     }
 }
 
-/// Collects the ranges of every `Name` expression matching a target identifier, recursing through
-/// the whole subtree via the generated `Visitor` default traversal.
+/// Collects the ranges of every `Name` expression that refers to a target parameter, walking the
+/// function body via the generated `Visitor`.
+///
+/// It is scope-aware: a nested function/lambda whose parameters shadow the target, and a
+/// comprehension whose loop target shadows it, bind a *different* variable, so their inner bodies
+/// are not collected. Parts evaluated in the enclosing scope (decorators, parameter defaults and
+/// annotations, the first comprehension iterable) are still visited.
+///
+/// Limitation: a nested function that rebinds the name by assignment (rather than by parameter) is
+/// not detected; that case over-collects. It does not occur in practice in test bodies.
 struct NameUsageCollector {
     target: String,
     ranges: Vec<TextRange>,
+}
+
+impl NameUsageCollector {
+    /// Visit parameter defaults and annotations, which are evaluated in the enclosing scope.
+    fn visit_arg_context(&mut self, args: &Arguments) {
+        for arg in args
+            .posonlyargs
+            .iter()
+            .chain(&args.args)
+            .chain(&args.kwonlyargs)
+        {
+            if let Some(default) = &arg.default {
+                self.visit_expr((**default).clone());
+            }
+            if let Some(annotation) = &arg.def.annotation {
+                self.visit_expr((**annotation).clone());
+            }
+        }
+        if let Some(va) = &args.vararg {
+            if let Some(annotation) = &va.annotation {
+                self.visit_expr((**annotation).clone());
+            }
+        }
+        if let Some(kw) = &args.kwarg {
+            if let Some(annotation) = &kw.annotation {
+                self.visit_expr((**annotation).clone());
+            }
+        }
+    }
+
+    fn visit_comprehension(
+        &mut self,
+        elements: Vec<Expr>,
+        generators: Vec<rustpython_parser::ast::Comprehension>,
+    ) {
+        let shadows = generators
+            .iter()
+            .any(|g| expr_binds_name(&g.target, &self.target));
+
+        for (i, generator) in generators.into_iter().enumerate() {
+            // The first generator's iterable is evaluated in the enclosing scope.
+            if i == 0 || !shadows {
+                self.visit_expr(generator.iter);
+            }
+            if !shadows {
+                for cond in generator.ifs {
+                    self.visit_expr(cond);
+                }
+            }
+        }
+        if !shadows {
+            for element in elements {
+                self.visit_expr(element);
+            }
+        }
+    }
 }
 
 impl Visitor for NameUsageCollector {
@@ -75,6 +142,87 @@ impl Visitor for NameUsageCollector {
         if node.id.as_str() == self.target {
             self.ranges.push(node.range);
         }
+    }
+
+    fn visit_stmt_function_def(&mut self, node: StmtFunctionDef) {
+        for decorator in node.decorator_list {
+            self.visit_expr(decorator);
+        }
+        self.visit_arg_context(&node.args);
+        if let Some(returns) = node.returns {
+            self.visit_expr(*returns);
+        }
+        if !args_bind(&node.args, &self.target) {
+            for stmt in node.body {
+                self.visit_stmt(stmt);
+            }
+        }
+    }
+
+    fn visit_stmt_async_function_def(&mut self, node: StmtAsyncFunctionDef) {
+        for decorator in node.decorator_list {
+            self.visit_expr(decorator);
+        }
+        self.visit_arg_context(&node.args);
+        if let Some(returns) = node.returns {
+            self.visit_expr(*returns);
+        }
+        if !args_bind(&node.args, &self.target) {
+            for stmt in node.body {
+                self.visit_stmt(stmt);
+            }
+        }
+    }
+
+    fn visit_expr_lambda(&mut self, node: ExprLambda) {
+        self.visit_arg_context(&node.args);
+        if !args_bind(&node.args, &self.target) {
+            self.visit_expr(*node.body);
+        }
+    }
+
+    fn visit_expr_list_comp(&mut self, node: ExprListComp) {
+        self.visit_comprehension(vec![*node.elt], node.generators);
+    }
+
+    fn visit_expr_set_comp(&mut self, node: ExprSetComp) {
+        self.visit_comprehension(vec![*node.elt], node.generators);
+    }
+
+    fn visit_expr_generator_exp(&mut self, node: ExprGeneratorExp) {
+        self.visit_comprehension(vec![*node.elt], node.generators);
+    }
+
+    fn visit_expr_dict_comp(&mut self, node: ExprDictComp) {
+        self.visit_comprehension(vec![*node.key, *node.value], node.generators);
+    }
+}
+
+/// Whether any parameter of `args` is named `target`.
+fn args_bind(args: &Arguments, target: &str) -> bool {
+    args.posonlyargs
+        .iter()
+        .chain(&args.args)
+        .chain(&args.kwonlyargs)
+        .any(|arg| arg.def.arg.as_str() == target)
+        || args
+            .vararg
+            .as_ref()
+            .is_some_and(|a| a.arg.as_str() == target)
+        || args
+            .kwarg
+            .as_ref()
+            .is_some_and(|a| a.arg.as_str() == target)
+}
+
+/// Whether an assignment/comprehension target binds `name` (handles tuple/list/star unpacking).
+fn expr_binds_name(target: &Expr, name: &str) -> bool {
+    match target {
+        Expr::Name(n) => n.id.as_str() == name,
+        Expr::Tuple(t) => t.elts.iter().any(|e| expr_binds_name(e, name)),
+        Expr::List(l) => l.elts.iter().any(|e| expr_binds_name(e, name)),
+        Expr::Starred(s) => expr_binds_name(&s.value, name),
+        _ => false,
     }
 }
 
@@ -168,14 +316,11 @@ impl Backend {
         // Parametrize names declared across all decorators, excluding indirect ones (those route
         // to a fixture, so a local-only rename would silently break the test).
         let mut name_to_decorator_ranges: HashMap<String, Vec<TextRange>> = HashMap::new();
-        let mut indirect: HashSet<String> = HashSet::new();
         for dec in func.decorators {
-            for (name, _) in decorators::extract_parametrize_indirect_fixtures(dec) {
-                indirect.insert(name);
-            }
-        }
-        for dec in func.decorators {
-            for (name, range) in decorators::extract_parametrize_argnames(dec) {
+            let argnames = decorators::extract_parametrize_argnames(dec, content);
+            let names: Vec<String> = argnames.iter().map(|(name, _)| name.clone()).collect();
+            let indirect = decorators::extract_parametrize_indirect_names(dec, &names);
+            for (name, range) in argnames {
                 if indirect.contains(&name) {
                     continue;
                 }

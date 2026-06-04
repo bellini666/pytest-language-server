@@ -7,15 +7,8 @@ coverage:
 
 flags:
   os-Linux:
-    paths:
-      - src/
+    carryforward: true
   os-macOS:
-    paths:
-      - src/
+    carryforward: true
   os-Windows:
-    paths:
-      - src/
-
-codecov:
-  notify:
-    after_n_builds: 3
+    carryforward: true

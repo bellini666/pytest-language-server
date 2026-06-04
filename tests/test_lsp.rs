@@ -7761,9 +7761,12 @@ async fn run_parametrize_rename(
     let backend = make_backend_with_db(db);
     let uri = Uri::from_file_path(&path).unwrap();
 
+    // Drive the public LSP trait method so the request wiring is exercised too.
+    use tower_lsp_server::LanguageServer;
+
     let position = position_of(content, trigger, occurrence);
     let ws = backend
-        .handle_rename(RenameParams {
+        .rename(RenameParams {
             text_document_position: TextDocumentPositionParams {
                 text_document: TextDocumentIdentifier { uri },
                 position,
@@ -7774,7 +7777,7 @@ async fn run_parametrize_rename(
             },
         })
         .await
-        .expect("handle_rename should not error")?;
+        .expect("rename should not error")?;
 
     let edits = ws.changes.expect("rename should produce changes");
     let edits = edits.into_values().next().expect("one file of edits");
@@ -7960,15 +7963,25 @@ def test_something(baz):
 #[tokio::test]
 #[timeout(30000)]
 async fn test_rename_respects_nested_scope_shadowing() {
-    // A comprehension loop var and a lambda param that reuse the name are different bindings and
-    // must not be renamed; a direct reference in the test body must be renamed.
+    // Nested scopes that rebind the name (comprehension loop vars across all comprehension forms,
+    // a lambda param, a nested function param, and *args/**kwargs) bind a different variable and
+    // must not be renamed; a direct reference in the test body must be.
     let content = r#"import pytest
 
 
 @pytest.mark.parametrize("foo", [[1, 2]])
 def test_something(foo):
-    squared = [foo for foo in range(3)]
+    a = [foo for foo in range(3)]
+    b = {foo for foo in range(3)}
+    c = {foo: foo for foo in range(3)}
+    d = (foo for foo in range(3))
     fn = lambda foo: foo + 1
+    def inner(foo):
+        return foo
+    def variadic(*foo):
+        return foo
+    def kw_only(**foo):
+        return foo
     assert foo
 "#;
     let expected = r#"import pytest
@@ -7976,8 +7989,17 @@ def test_something(foo):
 
 @pytest.mark.parametrize("baz", [[1, 2]])
 def test_something(baz):
-    squared = [foo for foo in range(3)]
+    a = [foo for foo in range(3)]
+    b = {foo for foo in range(3)}
+    c = {foo: foo for foo in range(3)}
+    d = (foo for foo in range(3))
     fn = lambda foo: foo + 1
+    def inner(foo):
+        return foo
+    def variadic(*foo):
+        return foo
+    def kw_only(**foo):
+        return foo
     assert baz
 "#;
     // Trigger from the signature parameter (occ 1; occ 0 is the decorator string).
@@ -7985,6 +8007,186 @@ def test_something(baz):
         .await
         .expect("rename should produce edits");
     assert_eq!(got, expected);
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_renames_closures_and_nonshadowing_scopes() {
+    // Scopes that do NOT rebind the name reference the parametrize param: comprehension bodies,
+    // lambda bodies, and nested-function defaults and closures must all be renamed.
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize("foo", [1])
+def test_something(foo):
+    e = [x + foo for x in range(3)]
+    g = lambda y: y + foo
+    def closure(y=foo):
+        return y + foo
+    assert foo
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize("baz", [1])
+def test_something(baz):
+    e = [x + baz for x in range(3)]
+    g = lambda y: y + baz
+    def closure(y=baz):
+        return y + baz
+    assert baz
+"#;
+    let got = run_parametrize_rename(content, "foo", 1, "baz", "test_rename_closures")
+        .await
+        .expect("rename should produce edits");
+    assert_eq!(got, expected);
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_enclosing_scope_references_in_nested_signature() {
+    // Parts of a nested function evaluated in the enclosing scope (decorator, parameter
+    // annotations/defaults, return annotation) and a comprehension `if` condition reference the
+    // parametrize param and must be renamed, even though the nested body is its own scope.
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize("foo", [1])
+def test_something(foo):
+    filtered = [x for x in items if x == foo]
+
+    @register(foo)
+    def helper(y: foo = foo, *args: foo) -> foo:
+        return y
+
+    assert foo
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize("baz", [1])
+def test_something(baz):
+    filtered = [x for x in items if x == baz]
+
+    @register(baz)
+    def helper(y: baz = baz, *args: baz) -> baz:
+        return y
+
+    assert baz
+"#;
+    let got = run_parametrize_rename(content, "foo", 1, "baz", "test_rename_nested_sig")
+        .await
+        .expect("rename should produce edits");
+    assert_eq!(got, expected);
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_async_test_and_nested_async_function() {
+    // An async test and a nested async closure that references the param.
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize("foo", [1])
+async def test_something(foo):
+    async def inner():
+        return foo
+    assert foo
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize("baz", [1])
+async def test_something(baz):
+    async def inner():
+        return baz
+    assert baz
+"#;
+    let got = run_parametrize_rename(content, "foo", 1, "baz", "test_rename_async")
+        .await
+        .expect("rename should produce edits");
+    assert_eq!(got, expected);
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_comprehension_unpacking_targets_shadow() {
+    // Tuple and starred unpacking comprehension targets that bind the name must be left alone.
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize("foo", [1])
+def test_something(foo):
+    a = [foo for foo, x in pairs]
+    b = [x for *foo, in chunks]
+    assert foo
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize("baz", [1])
+def test_something(baz):
+    a = [foo for foo, x in pairs]
+    b = [x for *foo, in chunks]
+    assert baz
+"#;
+    let got = run_parametrize_rename(content, "foo", 1, "baz", "test_rename_unpack")
+        .await
+        .expect("rename should produce edits");
+    assert_eq!(got, expected);
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_triggered_at_end_of_identifier() {
+    // A caret resting just past the last character of the parameter must still resolve (the cursor
+    // position editors commonly use for rename).
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize("foo", [1])
+def test_something(foo):
+    print(foo)
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize("baz", [1])
+def test_something(baz):
+    print(baz)
+"#;
+    // Position the caret immediately after `foo` in the signature.
+    let after_foo = {
+        let p = position_of(content, "foo", 1);
+        Position {
+            line: p.line,
+            character: p.character + 3,
+        }
+    };
+    use pytest_language_server::FixtureDatabase;
+    let db = Arc::new(FixtureDatabase::new());
+    let path = std::env::temp_dir()
+        .join("test_rename_caret_end")
+        .join("test_parametrize.py");
+    db.analyze_file(path.clone(), content);
+    let backend = make_backend_with_db(db);
+    let uri = Uri::from_file_path(&path).unwrap();
+    let ws = backend
+        .handle_rename(RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: after_foo,
+            },
+            new_name: "baz".to_string(),
+            work_done_progress_params: WorkDoneProgressParams {
+                work_done_token: None,
+            },
+        })
+        .await
+        .expect("handle_rename should not error")
+        .expect("caret at end of identifier should still rename");
+    let edits = ws.changes.unwrap().into_values().next().unwrap();
+    assert_eq!(apply_text_edits(content, &edits), expected);
 }
 
 #[tokio::test]
@@ -8004,6 +8206,45 @@ def test_something(foo, bar):
         got.is_none(),
         "indirect param via list argnames should be declined"
     );
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_declines_outside_function_and_on_syntax_error() {
+    use pytest_language_server::FixtureDatabase;
+    use tower_lsp_server::LanguageServer;
+
+    // Cursor at module level (not inside any function) is declined.
+    let module_level = "import pytest\n\nx = 1\n";
+    let got = run_parametrize_rename(module_level, "x", 0, "y", "test_rename_module_level").await;
+    assert!(got.is_none(), "module-level position should be declined");
+
+    // A file with a syntax error cannot be parsed, so rename is declined rather than erroring.
+    let broken = "import pytest\n\n@pytest.mark.parametrize(\"foo\", [1]\ndef test_x(foo):\n    print(foo)\n";
+    let got = run_parametrize_rename(broken, "foo", 1, "baz", "test_rename_broken").await;
+    assert!(got.is_none(), "unparseable file should be declined");
+
+    // A document the server has never analyzed has no cached content, so rename returns None.
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(db);
+    let uri = Uri::from_file_path(std::env::temp_dir().join("never_opened.py")).unwrap();
+    let result = backend
+        .rename(RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: 0,
+                    character: 0,
+                },
+            },
+            new_name: "baz".to_string(),
+            work_done_progress_params: WorkDoneProgressParams {
+                work_done_token: None,
+            },
+        })
+        .await
+        .expect("rename should not error");
+    assert!(result.is_none(), "unanalyzed document should be declined");
 }
 
 #[tokio::test]
@@ -8106,12 +8347,14 @@ def test_something(my_fixture, foo):
     let backend = make_backend_with_db(db);
     let uri = Uri::from_file_path(&path).unwrap();
 
+    use tower_lsp_server::LanguageServer;
+
     let prepare = |pos: Position| {
         let backend = &backend;
         let uri = uri.clone();
         async move {
             backend
-                .handle_prepare_rename(TextDocumentPositionParams {
+                .prepare_rename(TextDocumentPositionParams {
                     text_document: TextDocumentIdentifier { uri },
                     position: pos,
                 })

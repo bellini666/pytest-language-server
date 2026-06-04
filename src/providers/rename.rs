@@ -345,10 +345,7 @@ impl Backend {
             .find(|(_, ranges)| ranges.iter().any(|r| range_contains(r, cursor_offset)))
             .map(|(name, _)| name.clone())
             .or_else(|| {
-                let line_content = content.lines().nth(position.line as usize)?;
-                let word = self
-                    .fixture_db
-                    .extract_word_at_position(line_content, position.character as usize)?;
+                let word = identifier_at(content, cursor_offset)?;
                 (name_to_decorator_ranges.contains_key(&word)
                     && signature_params.contains(word.as_str()))
                 .then_some(word)
@@ -427,6 +424,32 @@ impl Backend {
 
 fn range_contains(range: &TextRange, offset: usize) -> bool {
     range.start().to_usize() <= offset && offset <= range.end().to_usize()
+}
+
+/// Returns the ASCII identifier spanning `offset` in `content`, treating `offset` inclusively so
+/// a caret resting just past the last character (a common rename position) still resolves.
+///
+/// Works in byte offsets to stay consistent with the rest of this provider; identifiers are ASCII
+/// so this never splits a multi-byte character.
+fn identifier_at(content: &str, offset: usize) -> Option<String> {
+    let bytes = content.as_bytes();
+    if offset > bytes.len() {
+        return None;
+    }
+    let is_word = |b: u8| b == b'_' || b.is_ascii_alphanumeric();
+
+    let mut start = offset;
+    while start > 0 && is_word(bytes[start - 1]) {
+        start -= 1;
+    }
+    let mut end = offset;
+    while end < bytes.len() && is_word(bytes[end]) {
+        end += 1;
+    }
+    if start == end {
+        return None;
+    }
+    Some(content[start..end].to_string())
 }
 
 /// Recursively collect every function definition, descending into classes and nested functions.

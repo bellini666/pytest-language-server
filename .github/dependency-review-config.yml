@@ -22,4 +22,9 @@ allow_licenses:
   - Unicode-DFS-2016
   - BSL-1.0
 
+# rustpython-ast is published under MIT (see its Cargo.toml), but GitHub's
+# dependency graph reports its license as unknown, so exempt it explicitly.
+allow_dependencies_licenses:
+  - pkg:cargo/rustpython-ast
+
 comment_summary_in_pr: always

@@ -430,3 +430,77 @@ fn test_indirect_names_partial_list() {
     assert!(indirect.contains("a"));
     assert!(!indirect.contains("b"));
 }
+
+/// Returns the indirect-name set for the first decorator of a single decorated function.
+fn indirect_names(code: &str) -> std::collections::HashSet<String> {
+    let parsed = parse(code, Mode::Module, "").unwrap();
+    let rustpython_parser::ast::Mod::Module(module) = parsed else {
+        panic!("expected module");
+    };
+    let dec = match &module.body[0] {
+        rustpython_parser::ast::Stmt::FunctionDef(f) => &f.decorator_list[0],
+        rustpython_parser::ast::Stmt::AsyncFunctionDef(f) => &f.decorator_list[0],
+        _ => panic!("expected function def"),
+    };
+    let names: Vec<String> = decorators::extract_parametrize_argnames(dec, code)
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    decorators::extract_parametrize_indirect_names(dec, &names)
+}
+
+#[test]
+#[timeout(30000)]
+fn test_indirect_names_tuple_form() {
+    let names = indirect_names(
+        "@pytest.mark.parametrize('a,b', [(1, 2)], indirect=('a', 'b'))\ndef test_x(a, b): pass",
+    );
+    assert!(names.contains("a"));
+    assert!(names.contains("b"));
+}
+
+#[test]
+#[timeout(30000)]
+fn test_indirect_names_positional() {
+    // indirect passed as the third positional argument.
+    let names = indirect_names("@pytest.mark.parametrize('a', [1], True)\ndef test_x(a): pass");
+    assert!(names.contains("a"));
+}
+
+#[test]
+#[timeout(30000)]
+fn test_indirect_names_absent_or_false() {
+    assert!(indirect_names("@pytest.mark.parametrize('a', [1])\ndef test_x(a): pass").is_empty());
+    assert!(indirect_names(
+        "@pytest.mark.parametrize('a', [1], indirect=False)\ndef test_x(a): pass"
+    )
+    .is_empty());
+}
+
+#[test]
+#[timeout(30000)]
+fn test_argnames_non_string_forms_ignored() {
+    // A non-string/list/tuple argnames expression (e.g. a variable) yields nothing.
+    assert!(
+        argnames_with_slices("@pytest.mark.parametrize(NAMES, [1])\ndef test_x(a): pass")
+            .is_empty()
+    );
+    // List elements that are not string literals are skipped, whether they are non-constant
+    // expressions or non-string constants.
+    let got =
+        argnames_with_slices("@pytest.mark.parametrize([NAME, 'b'], [1])\ndef test_x(a, b): pass");
+    assert_eq!(got, vec![("b".to_string(), "b".to_string())]);
+    let got =
+        argnames_with_slices("@pytest.mark.parametrize([1, 'b'], [1])\ndef test_x(a, b): pass");
+    assert_eq!(got, vec![("b".to_string(), "b".to_string())]);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_indirect_names_ignores_non_string_list_elements() {
+    // Non-string entries in an indirect list are ignored.
+    let names = indirect_names(
+        "@pytest.mark.parametrize('a,b', [(1, 2)], indirect=[1, other])\ndef test_x(a, b): pass",
+    );
+    assert!(names.is_empty());
+}

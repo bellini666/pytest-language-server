@@ -17,6 +17,7 @@ A blazingly fast Language Server Protocol implementation for pytest fixtures, wr
 - **Call Hierarchy**: Explore fixture dependencies (incoming/outgoing calls)
 - **Code Completion**: Smart auto-completion for pytest fixtures with context-aware suggestions
 - **Find References**: Find all usages of a fixture
+- **Rename**: Rename a `@pytest.mark.parametrize` parameter and update the decorator string, signature, and body together
 - **Hover Documentation**: View fixture signatures and docstrings
 - **Document Symbols**: Navigate fixtures within a file using the outline view
 - **Workspace Symbols**: Search for fixtures across your entire workspace

@@ -9,6 +9,7 @@ This is a [Zed](https://zed.dev) extension that provides support for the [pytest
 - **Call Hierarchy**: Explore fixture dependencies (incoming/outgoing calls)
 - **Code Completion**: Smart auto-completion for pytest fixtures with context-aware suggestions
 - **Find References**: Find all usages of a fixture across your entire test suite
+- **Rename**: Rename a `@pytest.mark.parametrize` parameter and update the decorator string, signature, and body together
 - **Hover Documentation**: View fixture information including signature, location, and docstring
 - **Document Symbols**: Navigate fixtures within a file using the outline view
 - **Workspace Symbols**: Search for fixtures across your entire workspace

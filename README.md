@@ -22,6 +22,7 @@ documentation, diagnostics, and more!
   - [Call Hierarchy](#-call-hierarchy)
   - [Code Completion](#-code-completion)
   - [Find References](#-find-references)
+  - [Rename](#-rename)
   - [Hover Documentation](#-hover-documentation)
   - [Document Symbols](#-document-symbols)
   - [Workspace Symbols](#-workspace-symbols)
@@ -109,6 +110,14 @@ Find all usages of a fixture across your entire test suite:
 - Shows references in all test files
 - Correctly handles fixture overriding and hierarchies
 - **LSP spec compliant**: Always includes the current position in results
+
+### ✏️ Rename
+Rename a `@pytest.mark.parametrize` parameter and update every occurrence at once:
+- Rewrites the name in the parametrize decorator string, the test signature, and the test body
+- Triggers from any of those three sites
+- Supports all argname forms: single name, comma-separated string, list, tuple, and `argnames=`
+- Works across stacked parametrize decorators
+- Indirect parameters (`indirect=True`) are left to your Python language server, since they map to fixtures
 
 ### 📚 Hover Documentation
 View fixture information on hover:

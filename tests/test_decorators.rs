@@ -235,3 +235,122 @@ fn test_extract_parametrize_indirect() {
         }
     }
 }
+
+/// Parse a single decorated function and return `(name, source_slice)` pairs from
+/// `extract_parametrize_argnames`, where `source_slice` is the exact substring the returned
+/// range points at — so tests can confirm ranges land on the identifier, not quotes/whitespace.
+fn argnames_with_slices(code: &str) -> Vec<(String, String)> {
+    let parsed = parse(code, Mode::Module, "").unwrap();
+    let rustpython_parser::ast::Mod::Module(module) = parsed else {
+        panic!("expected module");
+    };
+    let rustpython_parser::ast::Stmt::FunctionDef(func_def) = &module.body[0] else {
+        panic!("expected function def");
+    };
+    func_def
+        .decorator_list
+        .iter()
+        .flat_map(decorators::extract_parametrize_argnames)
+        .map(|(name, range)| {
+            let slice = code[range.start().to_usize()..range.end().to_usize()].to_string();
+            (name, slice)
+        })
+        .collect()
+}
+
+#[test]
+#[timeout(30000)]
+fn test_extract_parametrize_argnames_single() {
+    let got = argnames_with_slices("@pytest.mark.parametrize('x', [1])\ndef test_x(x): pass");
+    assert_eq!(got, vec![("x".to_string(), "x".to_string())]);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_extract_parametrize_argnames_comma_no_space() {
+    let got =
+        argnames_with_slices("@pytest.mark.parametrize('a,b', [(1, 2)])\ndef test_x(a, b): pass");
+    assert_eq!(
+        got,
+        vec![
+            ("a".to_string(), "a".to_string()),
+            ("b".to_string(), "b".to_string())
+        ]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_extract_parametrize_argnames_comma_with_spaces() {
+    // The ranges must skip the surrounding whitespace and land on the identifiers.
+    let got = argnames_with_slices(
+        "@pytest.mark.parametrize('a,  b ', [(1, 2)])\ndef test_x(a, b): pass",
+    );
+    assert_eq!(
+        got,
+        vec![
+            ("a".to_string(), "a".to_string()),
+            ("b".to_string(), "b".to_string())
+        ]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_extract_parametrize_argnames_list() {
+    let got = argnames_with_slices(
+        "@pytest.mark.parametrize(['a', 'b'], [(1, 2)])\ndef test_x(a, b): pass",
+    );
+    assert_eq!(
+        got,
+        vec![
+            ("a".to_string(), "a".to_string()),
+            ("b".to_string(), "b".to_string())
+        ]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_extract_parametrize_argnames_tuple() {
+    let got = argnames_with_slices(
+        "@pytest.mark.parametrize(('a', 'b'), [(1, 2)])\ndef test_x(a, b): pass",
+    );
+    assert_eq!(
+        got,
+        vec![
+            ("a".to_string(), "a".to_string()),
+            ("b".to_string(), "b".to_string())
+        ]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_extract_parametrize_argnames_keyword() {
+    let got = argnames_with_slices(
+        "@pytest.mark.parametrize(argnames='x', argvalues=[1])\ndef test_x(x): pass",
+    );
+    assert_eq!(got, vec![("x".to_string(), "x".to_string())]);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_extract_parametrize_argnames_stacked() {
+    let code = "@pytest.mark.parametrize('a', [1])\n@pytest.mark.parametrize('b', [2])\ndef test_x(a, b): pass";
+    let got = argnames_with_slices(code);
+    assert_eq!(
+        got,
+        vec![
+            ("a".to_string(), "a".to_string()),
+            ("b".to_string(), "b".to_string())
+        ]
+    );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_extract_parametrize_argnames_not_parametrize() {
+    let got = argnames_with_slices("@pytest.mark.usefixtures('x')\ndef test_x(): pass");
+    assert!(got.is_empty());
+}

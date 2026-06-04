@@ -7694,3 +7694,394 @@ def test_parametrized(request):
         content
     );
 }
+
+// ============================================================================
+// Rename: @pytest.mark.parametrize parameters (issue #165)
+// ============================================================================
+
+/// Byte-offset position of the `occurrence`-th match of `needle` in `content`.
+/// `character` is a byte column, matching the server's position convention.
+fn position_of(content: &str, needle: &str, occurrence: usize) -> Position {
+    let mut count = 0;
+    for (line_idx, line) in content.lines().enumerate() {
+        let mut start = 0;
+        while let Some(rel) = line[start..].find(needle) {
+            let col = start + rel;
+            if count == occurrence {
+                return Position {
+                    line: line_idx as u32,
+                    character: col as u32,
+                };
+            }
+            count += 1;
+            start = col + needle.len();
+        }
+    }
+    panic!("needle {needle:?} occurrence {occurrence} not found in content");
+}
+
+/// Apply LSP `TextEdit`s (single file, non-overlapping) to `content`.
+fn apply_text_edits(content: &str, edits: &[TextEdit]) -> String {
+    let mut line_starts = vec![0usize];
+    for (i, b) in content.bytes().enumerate() {
+        if b == b'\n' {
+            line_starts.push(i + 1);
+        }
+    }
+    let to_offset = |p: &Position| line_starts[p.line as usize] + p.character as usize;
+
+    let mut sorted: Vec<&TextEdit> = edits.iter().collect();
+    sorted.sort_by_key(|e| (e.range.start.line, e.range.start.character));
+
+    let mut result = content.to_string();
+    for e in sorted.iter().rev() {
+        let start = to_offset(&e.range.start);
+        let end = to_offset(&e.range.end);
+        result.replace_range(start..end, &e.new_text);
+    }
+    result
+}
+
+/// Run a rename at `(trigger, occurrence)` and return the rewritten file text, or `None` if the
+/// server declined the rename.
+async fn run_parametrize_rename(
+    content: &str,
+    trigger: &str,
+    occurrence: usize,
+    new_name: &str,
+    subdir: &str,
+) -> Option<String> {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = Arc::new(FixtureDatabase::new());
+    let path = std::env::temp_dir()
+        .join(subdir)
+        .join("test_parametrize.py");
+    db.analyze_file(path.clone(), content);
+    let backend = make_backend_with_db(db);
+    let uri = Uri::from_file_path(&path).unwrap();
+
+    let position = position_of(content, trigger, occurrence);
+    let ws = backend
+        .handle_rename(RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position,
+            },
+            new_name: new_name.to_string(),
+            work_done_progress_params: WorkDoneProgressParams {
+                work_done_token: None,
+            },
+        })
+        .await
+        .expect("handle_rename should not error")?;
+
+    let edits = ws.changes.expect("rename should produce changes");
+    let edits = edits.into_values().next().expect("one file of edits");
+    Some(apply_text_edits(content, &edits))
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_parametrize_single_from_all_three_sites() {
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize("foo", ["a", "b"])
+def test_something(foo):
+    print(foo)
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize("renamed", ["a", "b"])
+def test_something(renamed):
+    print(renamed)
+"#;
+
+    // Trigger from the decorator string (occ 0), the signature (occ 1), and the body (occ 2).
+    for (occ, where_) in [(0, "string"), (1, "signature"), (2, "body")] {
+        let got = run_parametrize_rename(content, "foo", occ, "renamed", "test_rename_single")
+            .await
+            .unwrap_or_else(|| panic!("rename from {where_} should produce edits"));
+        assert_eq!(got, expected, "rename triggered from {where_}");
+    }
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_parametrize_comma_renames_only_target() {
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize("foo, bar", [(1, 2)])
+def test_something(foo, bar):
+    print(foo, bar)
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize("baz, bar", [(1, 2)])
+def test_something(baz, bar):
+    print(baz, bar)
+"#;
+    // Trigger on the signature `foo` (occ 1); `bar` must stay untouched.
+    let got = run_parametrize_rename(content, "foo", 1, "baz", "test_rename_comma")
+        .await
+        .expect("rename should produce edits");
+    assert_eq!(got, expected);
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_parametrize_list_form() {
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize(["foo", "bar"], [(1, 2)])
+def test_something(foo, bar):
+    print(foo)
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize(["baz", "bar"], [(1, 2)])
+def test_something(baz, bar):
+    print(baz)
+"#;
+    let got = run_parametrize_rename(content, "foo", 1, "baz", "test_rename_list")
+        .await
+        .expect("rename should produce edits");
+    assert_eq!(got, expected);
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_parametrize_tuple_form() {
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize(("foo", "bar"), [(1, 2)])
+def test_something(foo, bar):
+    print(bar)
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize(("foo", "baz"), [(1, 2)])
+def test_something(foo, baz):
+    print(baz)
+"#;
+    // Rename `bar` from its body usage (occ 1; occ 0 is the decorator string).
+    let got = run_parametrize_rename(content, "bar", 1, "baz", "test_rename_tuple")
+        .await
+        .expect("rename should produce edits");
+    assert_eq!(got, expected);
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_parametrize_argnames_keyword() {
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize(argnames="foo", argvalues=[1, 2])
+def test_something(foo):
+    print(foo)
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize(argnames="renamed", argvalues=[1, 2])
+def test_something(renamed):
+    print(renamed)
+"#;
+    let got = run_parametrize_rename(content, "foo", 1, "renamed", "test_rename_kwarg")
+        .await
+        .expect("rename should produce edits");
+    assert_eq!(got, expected);
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_parametrize_stacked_decorators() {
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize("foo", [1])
+@pytest.mark.parametrize("bar", [2])
+def test_something(foo, bar):
+    print(foo, bar)
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize("foo", [1])
+@pytest.mark.parametrize("renamed", [2])
+def test_something(foo, renamed):
+    print(foo, renamed)
+"#;
+    // Rename `bar` (declared in the second decorator) from its signature occurrence (occ 1).
+    let got = run_parametrize_rename(content, "bar", 1, "renamed", "test_rename_stacked")
+        .await
+        .expect("rename should produce edits");
+    assert_eq!(got, expected);
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_parametrize_body_attribute_and_string_untouched() {
+    // The name must not be renamed where it appears as an attribute, a string, or a keyword-arg
+    // name in the body — only as a bare local reference.
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize("foo", [1])
+def test_something(foo):
+    obj.foo = foo
+    helper(foo="literal")
+    print("foo", foo)
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize("baz", [1])
+def test_something(baz):
+    obj.foo = baz
+    helper(foo="literal")
+    print("foo", baz)
+"#;
+    let got = run_parametrize_rename(content, "foo", 1, "baz", "test_rename_body")
+        .await
+        .expect("rename should produce edits");
+    assert_eq!(got, expected);
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_declines_indirect_parameter() {
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize("foo", ["a"], indirect=True)
+def test_something(foo):
+    print(foo)
+"#;
+    let got = run_parametrize_rename(content, "foo", 1, "renamed", "test_rename_indirect").await;
+    assert!(
+        got.is_none(),
+        "indirect parametrize param should not be renamed"
+    );
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_declines_fixture_parameter() {
+    let content = r#"import pytest
+
+
+@pytest.fixture
+def my_fixture():
+    return 1
+
+
+def test_something(my_fixture):
+    print(my_fixture)
+"#;
+    let got =
+        run_parametrize_rename(content, "my_fixture", 1, "renamed", "test_rename_fixture").await;
+    assert!(
+        got.is_none(),
+        "fixture parameters are out of scope for this provider"
+    );
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_rejects_invalid_identifier() {
+    use pytest_language_server::FixtureDatabase;
+
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize("foo", [1])
+def test_something(foo):
+    print(foo)
+"#;
+    let db = Arc::new(FixtureDatabase::new());
+    let path = std::env::temp_dir()
+        .join("test_rename_invalid")
+        .join("test_parametrize.py");
+    db.analyze_file(path.clone(), content);
+    let backend = make_backend_with_db(db);
+    let uri = Uri::from_file_path(&path).unwrap();
+
+    let result = backend
+        .handle_rename(RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: position_of(content, "foo", 1),
+            },
+            new_name: "1invalid".to_string(),
+            work_done_progress_params: WorkDoneProgressParams {
+                work_done_token: None,
+            },
+        })
+        .await;
+
+    assert!(result.is_err(), "invalid identifier should be rejected");
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_prepare_rename_parametrize_vs_fixture() {
+    use pytest_language_server::FixtureDatabase;
+
+    let content = r#"import pytest
+
+
+@pytest.fixture
+def my_fixture():
+    return 1
+
+
+@pytest.mark.parametrize("foo", [1])
+def test_something(my_fixture, foo):
+    print(my_fixture, foo)
+"#;
+    let db = Arc::new(FixtureDatabase::new());
+    let path = std::env::temp_dir()
+        .join("test_prepare_rename")
+        .join("test_parametrize.py");
+    db.analyze_file(path.clone(), content);
+    let backend = make_backend_with_db(db);
+    let uri = Uri::from_file_path(&path).unwrap();
+
+    let prepare = |pos: Position| {
+        let backend = &backend;
+        let uri = uri.clone();
+        async move {
+            backend
+                .handle_prepare_rename(TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri },
+                    position: pos,
+                })
+                .await
+                .unwrap()
+        }
+    };
+
+    // On the parametrize param: returns a range.
+    let on_param = prepare(position_of(content, "foo", 1)).await;
+    assert!(
+        matches!(on_param, Some(PrepareRenameResponse::Range(_))),
+        "prepare_rename on a parametrize param should return a range, got {on_param:?}"
+    );
+
+    // On a plain fixture param: declined.
+    let on_fixture = prepare(position_of(content, "my_fixture", 1)).await;
+    assert!(
+        on_fixture.is_none(),
+        "prepare_rename on a fixture param should be declined"
+    );
+}

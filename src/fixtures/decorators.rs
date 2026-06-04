@@ -127,6 +127,98 @@ pub fn is_parametrize_decorator(expr: &Expr) -> bool {
     is_pytest_mark_decorator(expr, "parametrize")
 }
 
+/// Splits a comma-separated argnames string value into individual names, each paired with a
+/// precise [`TextRange`] covering just the identifier (no quotes, no surrounding whitespace).
+///
+/// `content_start` is the source offset of the first character of the string's content (i.e.
+/// immediately after the opening quote).
+fn split_argnames_with_ranges(
+    value: &str,
+    content_start: rustpython_parser::text_size::TextSize,
+) -> Vec<(String, rustpython_parser::text_size::TextRange)> {
+    use rustpython_parser::text_size::{TextRange, TextSize};
+
+    let mut result = Vec::new();
+    let mut offset = 0usize; // byte offset within `value`
+    for segment in value.split(',') {
+        let leading_ws = segment.len() - segment.trim_start().len();
+        let trimmed = segment.trim();
+        if !trimmed.is_empty() {
+            let start = content_start + TextSize::from((offset + leading_ws) as u32);
+            let end = start + TextSize::from(trimmed.len() as u32);
+            result.push((trimmed.to_string(), TextRange::new(start, end)));
+        }
+        offset += segment.len() + 1; // +1 for the comma separator
+    }
+    result
+}
+
+/// Extracts the declared parameter names from a `@pytest.mark.parametrize(...)` decorator, each
+/// paired with the precise [`TextRange`] of its name token.
+///
+/// Handles every argnames form pytest accepts: a single name, a comma-separated string
+/// (`"a,b"` / `"a, b"`), a list or tuple of strings, and `argnames=` passed as a keyword.
+pub fn extract_parametrize_argnames(
+    expr: &Expr,
+) -> Vec<(String, rustpython_parser::text_size::TextRange)> {
+    use rustpython_parser::text_size::TextSize;
+
+    let Expr::Call(call) = expr else {
+        return vec![];
+    };
+    if !is_parametrize_decorator(&call.func) {
+        return vec![];
+    }
+
+    let argnames = call.args.first().or_else(|| {
+        call.keywords
+            .iter()
+            .find(|kw| kw.arg.as_ref().is_some_and(|a| a.as_str() == "argnames"))
+            .map(|kw| &kw.value)
+    });
+
+    let Some(argnames) = argnames else {
+        return vec![];
+    };
+
+    match argnames {
+        Expr::Constant(c) => {
+            if let rustpython_parser::ast::Constant::Str(s) = &c.value {
+                // Skip the opening quote to reach the string content.
+                let content_start = c.range.start() + TextSize::from(1);
+                return split_argnames_with_ranges(s, content_start);
+            }
+            vec![]
+        }
+        Expr::List(list) => list
+            .elts
+            .iter()
+            .flat_map(parametrize_name_element_ranges)
+            .collect(),
+        Expr::Tuple(tuple) => tuple
+            .elts
+            .iter()
+            .flat_map(parametrize_name_element_ranges)
+            .collect(),
+        _ => vec![],
+    }
+}
+
+/// Extracts name/range pairs from a single element of a list/tuple argnames spec.
+fn parametrize_name_element_ranges(
+    elt: &Expr,
+) -> Vec<(String, rustpython_parser::text_size::TextRange)> {
+    use rustpython_parser::text_size::TextSize;
+
+    if let Expr::Constant(c) = elt {
+        if let rustpython_parser::ast::Constant::Str(s) = &c.value {
+            let content_start = c.range.start() + TextSize::from(1);
+            return split_argnames_with_ranges(s, content_start);
+        }
+    }
+    vec![]
+}
+
 /// Extracts fixture names from @pytest.mark.parametrize when indirect=True.
 pub fn extract_parametrize_indirect_fixtures(
     expr: &Expr,

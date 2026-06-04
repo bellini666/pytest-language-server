@@ -7694,3 +7694,727 @@ def test_parametrized(request):
         content
     );
 }
+
+// ============================================================================
+// Rename: @pytest.mark.parametrize parameters (issue #165)
+// ============================================================================
+
+/// Byte-offset position of the `occurrence`-th *whole-word* match of `needle` in `content`.
+/// `character` is a byte column, matching the server's position convention. Matches that are part
+/// of a larger identifier are skipped so a test never silently triggers on the wrong token.
+fn position_of(content: &str, needle: &str, occurrence: usize) -> Position {
+    let is_word = |b: u8| b == b'_' || b.is_ascii_alphanumeric();
+    let mut count = 0;
+    for (line_idx, line) in content.lines().enumerate() {
+        let bytes = line.as_bytes();
+        let mut start = 0;
+        while let Some(rel) = line[start..].find(needle) {
+            let col = start + rel;
+            let end = col + needle.len();
+            let whole_word = (col == 0 || !is_word(bytes[col - 1]))
+                && (end >= bytes.len() || !is_word(bytes[end]));
+            if whole_word {
+                if count == occurrence {
+                    return Position {
+                        line: line_idx as u32,
+                        character: col as u32,
+                    };
+                }
+                count += 1;
+            }
+            start = col + needle.len();
+        }
+    }
+    panic!("needle {needle:?} occurrence {occurrence} not found in content");
+}
+
+/// Apply LSP `TextEdit`s (single file, non-overlapping) to `content`.
+fn apply_text_edits(content: &str, edits: &[TextEdit]) -> String {
+    let mut line_starts = vec![0usize];
+    for (i, b) in content.bytes().enumerate() {
+        if b == b'\n' {
+            line_starts.push(i + 1);
+        }
+    }
+    let to_offset = |p: &Position| line_starts[p.line as usize] + p.character as usize;
+
+    let mut sorted: Vec<&TextEdit> = edits.iter().collect();
+    sorted.sort_by_key(|e| (e.range.start.line, e.range.start.character));
+
+    let mut result = content.to_string();
+    for e in sorted.iter().rev() {
+        let start = to_offset(&e.range.start);
+        let end = to_offset(&e.range.end);
+        result.replace_range(start..end, &e.new_text);
+    }
+    result
+}
+
+/// Run a rename at `(trigger, occurrence)` and return the rewritten file text, or `None` if the
+/// server declined the rename.
+async fn run_parametrize_rename(
+    content: &str,
+    trigger: &str,
+    occurrence: usize,
+    new_name: &str,
+    subdir: &str,
+) -> Option<String> {
+    use pytest_language_server::FixtureDatabase;
+
+    let db = Arc::new(FixtureDatabase::new());
+    let path = std::env::temp_dir()
+        .join(subdir)
+        .join("test_parametrize.py");
+    db.analyze_file(path.clone(), content);
+    let backend = make_backend_with_db(db);
+    let uri = Uri::from_file_path(&path).unwrap();
+
+    // Drive the public LSP trait method so the request wiring is exercised too.
+    use tower_lsp_server::LanguageServer;
+
+    let position = position_of(content, trigger, occurrence);
+    let ws = backend
+        .rename(RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position,
+            },
+            new_name: new_name.to_string(),
+            work_done_progress_params: WorkDoneProgressParams {
+                work_done_token: None,
+            },
+        })
+        .await
+        .expect("rename should not error")?;
+
+    let edits = ws.changes.expect("rename should produce changes");
+    let edits = edits.into_values().next().expect("one file of edits");
+    Some(apply_text_edits(content, &edits))
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_parametrize_single_from_all_three_sites() {
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize("foo", ["a", "b"])
+def test_something(foo):
+    print(foo)
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize("renamed", ["a", "b"])
+def test_something(renamed):
+    print(renamed)
+"#;
+
+    // Trigger from the decorator string (occ 0), the signature (occ 1), and the body (occ 2).
+    for (occ, where_) in [(0, "string"), (1, "signature"), (2, "body")] {
+        let got = run_parametrize_rename(content, "foo", occ, "renamed", "test_rename_single")
+            .await
+            .unwrap_or_else(|| panic!("rename from {where_} should produce edits"));
+        assert_eq!(got, expected, "rename triggered from {where_}");
+    }
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_parametrize_comma_renames_only_target() {
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize("foo, bar", [(1, 2)])
+def test_something(foo, bar):
+    print(foo, bar)
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize("baz, bar", [(1, 2)])
+def test_something(baz, bar):
+    print(baz, bar)
+"#;
+    // Trigger on the signature `foo` (occ 1); `bar` must stay untouched.
+    let got = run_parametrize_rename(content, "foo", 1, "baz", "test_rename_comma")
+        .await
+        .expect("rename should produce edits");
+    assert_eq!(got, expected);
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_parametrize_list_form() {
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize(["foo", "bar"], [(1, 2)])
+def test_something(foo, bar):
+    print(foo)
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize(["baz", "bar"], [(1, 2)])
+def test_something(baz, bar):
+    print(baz)
+"#;
+    let got = run_parametrize_rename(content, "foo", 1, "baz", "test_rename_list")
+        .await
+        .expect("rename should produce edits");
+    assert_eq!(got, expected);
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_parametrize_tuple_form() {
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize(("foo", "bar"), [(1, 2)])
+def test_something(foo, bar):
+    print(bar)
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize(("foo", "baz"), [(1, 2)])
+def test_something(foo, baz):
+    print(baz)
+"#;
+    // Rename `bar` from its body usage (occ 1; occ 0 is the decorator string).
+    let got = run_parametrize_rename(content, "bar", 1, "baz", "test_rename_tuple")
+        .await
+        .expect("rename should produce edits");
+    assert_eq!(got, expected);
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_parametrize_argnames_keyword() {
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize(argnames="foo", argvalues=[1, 2])
+def test_something(foo):
+    print(foo)
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize(argnames="renamed", argvalues=[1, 2])
+def test_something(renamed):
+    print(renamed)
+"#;
+    let got = run_parametrize_rename(content, "foo", 1, "renamed", "test_rename_kwarg")
+        .await
+        .expect("rename should produce edits");
+    assert_eq!(got, expected);
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_parametrize_stacked_decorators() {
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize("foo", [1])
+@pytest.mark.parametrize("bar", [2])
+def test_something(foo, bar):
+    print(foo, bar)
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize("foo", [1])
+@pytest.mark.parametrize("renamed", [2])
+def test_something(foo, renamed):
+    print(foo, renamed)
+"#;
+    // Rename `bar` (declared in the second decorator) from its signature occurrence (occ 1).
+    let got = run_parametrize_rename(content, "bar", 1, "renamed", "test_rename_stacked")
+        .await
+        .expect("rename should produce edits");
+    assert_eq!(got, expected);
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_parametrize_body_attribute_and_string_untouched() {
+    // The name must not be renamed where it appears as an attribute, a string, or a keyword-arg
+    // name in the body, nor inside a larger identifier (foobar) — only as a bare local reference.
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize("foo", [1])
+def test_something(foo):
+    obj.foo = foo
+    helper(foo="literal")
+    foobar = foo
+    print("foo", foo, foobar)
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize("baz", [1])
+def test_something(baz):
+    obj.foo = baz
+    helper(foo="literal")
+    foobar = baz
+    print("foo", baz, foobar)
+"#;
+    let got = run_parametrize_rename(content, "foo", 1, "baz", "test_rename_body")
+        .await
+        .expect("rename should produce edits");
+    assert_eq!(got, expected);
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_respects_nested_scope_shadowing() {
+    // Nested scopes that rebind the name (comprehension loop vars across all comprehension forms,
+    // a lambda param, a nested function param, and *args/**kwargs) bind a different variable and
+    // must not be renamed; a direct reference in the test body must be.
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize("foo", [[1, 2]])
+def test_something(foo):
+    a = [foo for foo in range(3)]
+    b = {foo for foo in range(3)}
+    c = {foo: foo for foo in range(3)}
+    d = (foo for foo in range(3))
+    fn = lambda foo: foo + 1
+    def inner(foo):
+        return foo
+    def variadic(*foo):
+        return foo
+    def kw_only(**foo):
+        return foo
+    assert foo
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize("baz", [[1, 2]])
+def test_something(baz):
+    a = [foo for foo in range(3)]
+    b = {foo for foo in range(3)}
+    c = {foo: foo for foo in range(3)}
+    d = (foo for foo in range(3))
+    fn = lambda foo: foo + 1
+    def inner(foo):
+        return foo
+    def variadic(*foo):
+        return foo
+    def kw_only(**foo):
+        return foo
+    assert baz
+"#;
+    // Trigger from the signature parameter (occ 1; occ 0 is the decorator string).
+    let got = run_parametrize_rename(content, "foo", 1, "baz", "test_rename_shadow")
+        .await
+        .expect("rename should produce edits");
+    assert_eq!(got, expected);
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_renames_closures_and_nonshadowing_scopes() {
+    // Scopes that do NOT rebind the name reference the parametrize param: comprehension bodies,
+    // lambda bodies, and nested-function defaults and closures must all be renamed.
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize("foo", [1])
+def test_something(foo):
+    e = [x + foo for x in range(3)]
+    g = lambda y: y + foo
+    def closure(y=foo):
+        return y + foo
+    assert foo
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize("baz", [1])
+def test_something(baz):
+    e = [x + baz for x in range(3)]
+    g = lambda y: y + baz
+    def closure(y=baz):
+        return y + baz
+    assert baz
+"#;
+    let got = run_parametrize_rename(content, "foo", 1, "baz", "test_rename_closures")
+        .await
+        .expect("rename should produce edits");
+    assert_eq!(got, expected);
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_enclosing_scope_references_in_nested_signature() {
+    // Parts of a nested function evaluated in the enclosing scope (decorator, parameter
+    // annotations/defaults, return annotation) and a comprehension `if` condition reference the
+    // parametrize param and must be renamed, even though the nested body is its own scope.
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize("foo", [1])
+def test_something(foo):
+    filtered = [x for x in items if x == foo]
+
+    @register(foo)
+    def helper(y: foo = foo, *args: foo) -> foo:
+        return y
+
+    assert foo
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize("baz", [1])
+def test_something(baz):
+    filtered = [x for x in items if x == baz]
+
+    @register(baz)
+    def helper(y: baz = baz, *args: baz) -> baz:
+        return y
+
+    assert baz
+"#;
+    let got = run_parametrize_rename(content, "foo", 1, "baz", "test_rename_nested_sig")
+        .await
+        .expect("rename should produce edits");
+    assert_eq!(got, expected);
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_triggered_from_inside_nested_closure() {
+    // Invoking rename on the parameter from inside a nested closure (whose own def has no
+    // parametrize decorator) must still resolve to the enclosing parametrized test and rewrite
+    // the decorator string, signature, and all references.
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize("foo", [1])
+def test_something(foo):
+    def closure():
+        return foo
+    return closure()
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize("baz", [1])
+def test_something(baz):
+    def closure():
+        return baz
+    return closure()
+"#;
+    // `foo` occurrences: decorator string (0), signature (1), closure body (2).
+    let got = run_parametrize_rename(content, "foo", 2, "baz", "test_rename_from_closure")
+        .await
+        .expect("rename from a closure reference should produce edits");
+    assert_eq!(got, expected);
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_async_test_and_nested_async_function() {
+    // An async test and a nested async closure that references the param.
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize("foo", [1])
+async def test_something(foo):
+    async def inner():
+        return foo
+    assert foo
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize("baz", [1])
+async def test_something(baz):
+    async def inner():
+        return baz
+    assert baz
+"#;
+    let got = run_parametrize_rename(content, "foo", 1, "baz", "test_rename_async")
+        .await
+        .expect("rename should produce edits");
+    assert_eq!(got, expected);
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_comprehension_unpacking_targets_shadow() {
+    // Tuple and starred unpacking comprehension targets that bind the name must be left alone.
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize("foo", [1])
+def test_something(foo):
+    a = [foo for foo, x in pairs]
+    b = [x for *foo, in chunks]
+    assert foo
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize("baz", [1])
+def test_something(baz):
+    a = [foo for foo, x in pairs]
+    b = [x for *foo, in chunks]
+    assert baz
+"#;
+    let got = run_parametrize_rename(content, "foo", 1, "baz", "test_rename_unpack")
+        .await
+        .expect("rename should produce edits");
+    assert_eq!(got, expected);
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_triggered_at_end_of_identifier() {
+    // A caret resting just past the last character of the parameter must still resolve (the cursor
+    // position editors commonly use for rename).
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize("foo", [1])
+def test_something(foo):
+    print(foo)
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize("baz", [1])
+def test_something(baz):
+    print(baz)
+"#;
+    // Position the caret immediately after `foo` in the signature.
+    let after_foo = {
+        let p = position_of(content, "foo", 1);
+        Position {
+            line: p.line,
+            character: p.character + 3,
+        }
+    };
+    use pytest_language_server::FixtureDatabase;
+    let db = Arc::new(FixtureDatabase::new());
+    let path = std::env::temp_dir()
+        .join("test_rename_caret_end")
+        .join("test_parametrize.py");
+    db.analyze_file(path.clone(), content);
+    let backend = make_backend_with_db(db);
+    let uri = Uri::from_file_path(&path).unwrap();
+    let ws = backend
+        .handle_rename(RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: after_foo,
+            },
+            new_name: "baz".to_string(),
+            work_done_progress_params: WorkDoneProgressParams {
+                work_done_token: None,
+            },
+        })
+        .await
+        .expect("handle_rename should not error")
+        .expect("caret at end of identifier should still rename");
+    let edits = ws.changes.unwrap().into_values().next().unwrap();
+    assert_eq!(apply_text_edits(content, &edits), expected);
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_indirect_list_form_declined() {
+    // `indirect=["foo"]` with list argnames must be detected and declined (review finding 3).
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize(["foo", "bar"], [(1, 2)], indirect=["foo"])
+def test_something(foo, bar):
+    print(foo, bar)
+"#;
+    let got =
+        run_parametrize_rename(content, "foo", 1, "renamed", "test_rename_indirect_list").await;
+    assert!(
+        got.is_none(),
+        "indirect param via list argnames should be declined"
+    );
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_declines_outside_function_and_on_syntax_error() {
+    use pytest_language_server::FixtureDatabase;
+    use tower_lsp_server::LanguageServer;
+
+    // Cursor at module level (not inside any function) is declined.
+    let module_level = "import pytest\n\nx = 1\n";
+    let got = run_parametrize_rename(module_level, "x", 0, "y", "test_rename_module_level").await;
+    assert!(got.is_none(), "module-level position should be declined");
+
+    // A file with a syntax error cannot be parsed, so rename is declined rather than erroring.
+    let broken = "import pytest\n\n@pytest.mark.parametrize(\"foo\", [1]\ndef test_x(foo):\n    print(foo)\n";
+    let got = run_parametrize_rename(broken, "foo", 1, "baz", "test_rename_broken").await;
+    assert!(got.is_none(), "unparseable file should be declined");
+
+    // A document the server has never analyzed has no cached content, so rename returns None.
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(db);
+    let uri = Uri::from_file_path(std::env::temp_dir().join("never_opened.py")).unwrap();
+    let result = backend
+        .rename(RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: 0,
+                    character: 0,
+                },
+            },
+            new_name: "baz".to_string(),
+            work_done_progress_params: WorkDoneProgressParams {
+                work_done_token: None,
+            },
+        })
+        .await
+        .expect("rename should not error");
+    assert!(result.is_none(), "unanalyzed document should be declined");
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_declines_indirect_parameter() {
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize("foo", ["a"], indirect=True)
+def test_something(foo):
+    print(foo)
+"#;
+    let got = run_parametrize_rename(content, "foo", 1, "renamed", "test_rename_indirect").await;
+    assert!(
+        got.is_none(),
+        "indirect parametrize param should not be renamed"
+    );
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_declines_fixture_parameter() {
+    let content = r#"import pytest
+
+
+@pytest.fixture
+def my_fixture():
+    return 1
+
+
+def test_something(my_fixture):
+    print(my_fixture)
+"#;
+    let got =
+        run_parametrize_rename(content, "my_fixture", 1, "renamed", "test_rename_fixture").await;
+    assert!(
+        got.is_none(),
+        "fixture parameters are out of scope for this provider"
+    );
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_rejects_invalid_identifier() {
+    use pytest_language_server::FixtureDatabase;
+
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize("foo", [1])
+def test_something(foo):
+    print(foo)
+"#;
+    let db = Arc::new(FixtureDatabase::new());
+    let path = std::env::temp_dir()
+        .join("test_rename_invalid")
+        .join("test_parametrize.py");
+    db.analyze_file(path.clone(), content);
+    let backend = make_backend_with_db(db);
+    let uri = Uri::from_file_path(&path).unwrap();
+
+    let result = backend
+        .handle_rename(RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: position_of(content, "foo", 1),
+            },
+            new_name: "1invalid".to_string(),
+            work_done_progress_params: WorkDoneProgressParams {
+                work_done_token: None,
+            },
+        })
+        .await;
+
+    assert!(result.is_err(), "invalid identifier should be rejected");
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_prepare_rename_parametrize_vs_fixture() {
+    use pytest_language_server::FixtureDatabase;
+
+    let content = r#"import pytest
+
+
+@pytest.fixture
+def my_fixture():
+    return 1
+
+
+@pytest.mark.parametrize("foo", [1])
+def test_something(my_fixture, foo):
+    print(my_fixture, foo)
+"#;
+    let db = Arc::new(FixtureDatabase::new());
+    let path = std::env::temp_dir()
+        .join("test_prepare_rename")
+        .join("test_parametrize.py");
+    db.analyze_file(path.clone(), content);
+    let backend = make_backend_with_db(db);
+    let uri = Uri::from_file_path(&path).unwrap();
+
+    use tower_lsp_server::LanguageServer;
+
+    let prepare = |pos: Position| {
+        let backend = &backend;
+        let uri = uri.clone();
+        async move {
+            backend
+                .prepare_rename(TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri },
+                    position: pos,
+                })
+                .await
+                .unwrap()
+        }
+    };
+
+    // On the parametrize param: returns a range.
+    let on_param = prepare(position_of(content, "foo", 1)).await;
+    assert!(
+        matches!(on_param, Some(PrepareRenameResponse::Range(_))),
+        "prepare_rename on a parametrize param should return a range, got {on_param:?}"
+    );
+
+    // On a plain fixture param: declined.
+    let on_fixture = prepare(position_of(content, "my_fixture", 1)).await;
+    assert!(
+        on_fixture.is_none(),
+        "prepare_rename on a fixture param should be declined"
+    );
+}

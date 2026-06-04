@@ -901,6 +901,7 @@ dependencies = [
  "once_cell",
  "predicates",
  "rayon",
+ "rustpython-ast",
  "rustpython-parser",
  "serde",
  "serde_json",

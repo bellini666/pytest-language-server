@@ -14,6 +14,7 @@ pub mod implementation;
 pub mod inlay_hint;
 mod language_server;
 pub mod references;
+pub mod rename;
 pub mod workspace_symbol;
 
 use crate::config::Config;

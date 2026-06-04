@@ -127,6 +127,187 @@ pub fn is_parametrize_decorator(expr: &Expr) -> bool {
     is_pytest_mark_decorator(expr, "parametrize")
 }
 
+/// Returns true if `name` is a plain Python identifier (the only thing a parametrize argname can
+/// legally be). Used to reject anything we couldn't cleanly locate in the source, e.g. implicitly
+/// concatenated string literals, so a rename never corrupts the file.
+fn is_plain_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+/// Splits the *source text* of a string literal into argnames, each paired with the precise
+/// [`TextRange`] of its identifier token.
+///
+/// Working from the source (rather than the parsed value) keeps the ranges correct regardless of
+/// quote style: `range_start` is the offset of the literal's opening prefix/quote, so the actual
+/// content offset is derived by skipping any string prefix (`r`, `b`, `u`, `f`) and the quote run
+/// (`'`, `"`, or their triple variants).
+fn split_argnames_from_source(
+    literal: &str,
+    range_start: rustpython_parser::text_size::TextSize,
+) -> Vec<(String, rustpython_parser::text_size::TextRange)> {
+    use rustpython_parser::text_size::{TextRange, TextSize};
+
+    let bytes = literal.as_bytes();
+    let mut prefix = 0;
+    while prefix < bytes.len()
+        && matches!(
+            bytes[prefix],
+            b'r' | b'R' | b'b' | b'B' | b'u' | b'U' | b'f' | b'F'
+        )
+    {
+        prefix += 1;
+    }
+    let Some(&quote) = bytes.get(prefix) else {
+        return vec![];
+    };
+    if quote != b'"' && quote != b'\'' {
+        return vec![];
+    }
+    let quote_len =
+        if bytes.len() >= prefix + 3 && bytes[prefix + 1] == quote && bytes[prefix + 2] == quote {
+            3
+        } else {
+            1
+        };
+
+    let content_offset = prefix + quote_len;
+    let content_end = literal.len().saturating_sub(quote_len);
+    if content_offset > content_end {
+        return vec![];
+    }
+    let inner = &literal[content_offset..content_end];
+
+    let mut result = Vec::new();
+    let mut offset = content_offset;
+    for segment in inner.split(',') {
+        let leading_ws = segment.len() - segment.trim_start().len();
+        let trimmed = segment.trim();
+        if is_plain_identifier(trimmed) {
+            let start = range_start + TextSize::from((offset + leading_ws) as u32);
+            let end = start + TextSize::from(trimmed.len() as u32);
+            result.push((trimmed.to_string(), TextRange::new(start, end)));
+        }
+        offset += segment.len() + 1; // +1 for the comma separator
+    }
+    result
+}
+
+/// Extracts the declared parameter names from a `@pytest.mark.parametrize(...)` decorator, each
+/// paired with the precise [`TextRange`] of its name token.
+///
+/// Handles every argnames form pytest accepts: a single name, a comma-separated string
+/// (`"a,b"` / `"a, b"`), a list or tuple of strings, and `argnames=` passed as a keyword.
+/// `content` is the full source of the file the decorator came from, used to read each string
+/// literal's exact text.
+pub fn extract_parametrize_argnames(
+    expr: &Expr,
+    content: &str,
+) -> Vec<(String, rustpython_parser::text_size::TextRange)> {
+    let Expr::Call(call) = expr else {
+        return vec![];
+    };
+    if !is_parametrize_decorator(&call.func) {
+        return vec![];
+    }
+
+    let argnames = call.args.first().or_else(|| {
+        call.keywords
+            .iter()
+            .find(|kw| kw.arg.as_ref().is_some_and(|a| a.as_str() == "argnames"))
+            .map(|kw| &kw.value)
+    });
+
+    let Some(argnames) = argnames else {
+        return vec![];
+    };
+
+    match argnames {
+        Expr::Constant(_) => parametrize_name_element_ranges(argnames, content),
+        Expr::List(list) => list
+            .elts
+            .iter()
+            .flat_map(|elt| parametrize_name_element_ranges(elt, content))
+            .collect(),
+        Expr::Tuple(tuple) => tuple
+            .elts
+            .iter()
+            .flat_map(|elt| parametrize_name_element_ranges(elt, content))
+            .collect(),
+        _ => vec![],
+    }
+}
+
+/// Extracts name/range pairs from a single string-literal element of an argnames spec.
+fn parametrize_name_element_ranges(
+    elt: &Expr,
+    content: &str,
+) -> Vec<(String, rustpython_parser::text_size::TextRange)> {
+    let Expr::Constant(c) = elt else {
+        return vec![];
+    };
+    if !matches!(c.value, rustpython_parser::ast::Constant::Str(_)) {
+        return vec![];
+    }
+    let start = c.range.start().to_usize();
+    let end = c.range.end().to_usize();
+    let Some(literal) = content.get(start..end) else {
+        return vec![];
+    };
+    split_argnames_from_source(literal, c.range.start())
+}
+
+/// Returns the subset of `argnames` that a `@pytest.mark.parametrize(...)` decorator marks as
+/// indirect (`indirect=True` marks all of them; `indirect=[names]` marks the listed ones).
+///
+/// `indirect` may be passed by keyword or as the third positional argument.
+pub fn extract_parametrize_indirect_names(
+    expr: &Expr,
+    argnames: &[String],
+) -> std::collections::HashSet<String> {
+    use std::collections::HashSet;
+
+    let Expr::Call(call) = expr else {
+        return HashSet::new();
+    };
+    if !is_parametrize_decorator(&call.func) {
+        return HashSet::new();
+    }
+
+    let indirect = call
+        .keywords
+        .iter()
+        .find(|kw| kw.arg.as_ref().is_some_and(|a| a.as_str() == "indirect"))
+        .map(|kw| &kw.value)
+        .or_else(|| call.args.get(2));
+
+    let Some(indirect) = indirect else {
+        return HashSet::new();
+    };
+
+    match indirect {
+        Expr::Constant(c) if matches!(c.value, rustpython_parser::ast::Constant::Bool(true)) => {
+            argnames.iter().cloned().collect()
+        }
+        Expr::List(list) => collect_string_constants(&list.elts),
+        Expr::Tuple(tuple) => collect_string_constants(&tuple.elts),
+        _ => HashSet::new(),
+    }
+}
+
+fn collect_string_constants(elts: &[Expr]) -> std::collections::HashSet<String> {
+    elts.iter()
+        .filter_map(|elt| match elt {
+            Expr::Constant(c) => match &c.value {
+                rustpython_parser::ast::Constant::Str(s) => Some(s.to_string()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
 /// Extracts fixture names from @pytest.mark.parametrize when indirect=True.
 pub fn extract_parametrize_indirect_fixtures(
     expr: &Expr,

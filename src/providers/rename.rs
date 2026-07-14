@@ -309,10 +309,13 @@ impl Backend {
             .get(position.line as usize + 1)
             .copied()
             .unwrap_or(content.len());
+        // Trim the line ending and clamp so an out-of-range column resolves to
+        // the logical end of the line instead of landing on the newline.
+        let line = content[line_start..line_end].trim_end_matches(['\r', '\n']);
         let cursor_byte_col = if self.client_utf16.load(std::sync::atomic::Ordering::Relaxed) {
-            super::utf16_col_to_byte(&content[line_start..line_end], position.character as usize)
+            super::utf16_col_to_byte(line, position.character as usize)
         } else {
-            position.character as usize
+            (position.character as usize).min(line.len())
         };
         let cursor_offset = line_start + cursor_byte_col;
 

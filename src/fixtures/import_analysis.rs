@@ -149,6 +149,10 @@ pub struct ImportLayout {
     pub source: ParseSource,
     /// Owned copy of each file line for `TextEdit` character-length lookups.
     lines: Vec<String>,
+    /// Whether the file ends with a newline. Used to decide if a TextEdit may
+    /// end at column 0 of the line after the last one (valid only when the
+    /// trailing newline exists).
+    pub has_trailing_newline: bool,
 }
 
 impl ImportLayout {
@@ -166,12 +170,20 @@ impl ImportLayout {
             bare_imports,
             source,
             lines,
+            has_trailing_newline: content.ends_with('\n'),
         }
     }
 
     /// Borrow all lines as `&str` slices (for passing to sort/insert helpers).
     pub fn line_strs(&self) -> Vec<&str> {
         self.lines.iter().map(|s| s.as_str()).collect()
+    }
+
+    /// Whether a position at column 0 of `line + 1` is still inside the
+    /// document (a following line exists, or the trailing newline makes the
+    /// virtual line after the last one addressable).
+    pub fn next_line_exists(&self, line: usize) -> bool {
+        line + 1 < self.lines.len() || self.has_trailing_newline
     }
 
     /// Find a module-level `from <module> import …` entry that is *not* a

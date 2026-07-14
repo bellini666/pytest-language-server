@@ -132,18 +132,36 @@ fn emit_kind_import_edits(
                 // multiline — for single-line fi.line == fi.end_line).
                 // The range ends at column 0 of the following line (replacing the
                 // trailing newline) so no column-encoding conversion is needed.
+                // When the import is the last line of a file with no trailing
+                // newline, that position would fall outside the document (some
+                // clients reject such edits), so end at the line's clamped end
+                // instead (the spec clamps an oversized character to line length).
+                let (end, new_text) = if layout.next_line_exists(fi.end_line) {
+                    (
+                        Position {
+                            line: fi.end_line as u32 + 1,
+                            character: 0,
+                        },
+                        format!("{}\n", merged_line),
+                    )
+                } else {
+                    (
+                        Position {
+                            line: fi.end_line as u32,
+                            character: u32::MAX,
+                        },
+                        merged_line.clone(),
+                    )
+                };
                 edits.push(TextEdit {
                     range: Range {
                         start: Position {
                             line: fi.line as u32,
                             character: 0,
                         },
-                        end: Position {
-                            line: fi.end_line as u32 + 1,
-                            character: 0,
-                        },
+                        end,
                     },
-                    new_text: format!("{}\n", merged_line),
+                    new_text,
                 });
             } else {
                 // Cannot merge (string-fallback multiline without names) → insert new line.
@@ -1049,6 +1067,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_build_import_edits_merge_into_final_line_without_trailing_newline() {
+        // The import is the last line and the file has no trailing newline:
+        // ending the range at (end_line + 1, 0) would fall outside the
+        // document, so the edit must end on the import line itself.
+        let layout = parse_import_layout("from typing import Optional");
+        let spec = TypeImportSpec {
+            check_name: "Any".to_string(),
+            import_statement: "from typing import Any".to_string(),
+        };
+        let existing: HashSet<String> = HashSet::new();
+        let edits = build_import_edits(&layout, &[&spec], &existing);
+
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].range.start.line, 0);
+        assert_eq!(edits[0].range.end.line, 0);
+        assert_eq!(edits[0].range.end.character, u32::MAX);
+        assert_eq!(edits[0].new_text, "from typing import Any, Optional");
+    }
+
+    #[test]
+    fn test_build_import_edits_merge_into_final_line_with_trailing_newline() {
+        // Same layout but the file ends with a newline: the (end_line + 1, 0)
+        // position is addressable, so the whole-line replacement stays.
+        let layout = parse_import_layout("from typing import Optional\n");
+        let spec = TypeImportSpec {
+            check_name: "Any".to_string(),
+            import_statement: "from typing import Any".to_string(),
+        };
+        let existing: HashSet<String> = HashSet::new();
+        let edits = build_import_edits(&layout, &[&spec], &existing);
+
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].range.end.line, 1);
+        assert_eq!(edits[0].range.end.character, 0);
+        assert_eq!(edits[0].new_text, "from typing import Any, Optional\n");
     }
 
     #[test]

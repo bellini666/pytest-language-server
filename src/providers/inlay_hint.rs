@@ -135,7 +135,7 @@ impl Backend {
                 hints.push(InlayHint {
                     position: Position {
                         line: lsp_line,
-                        character: usage.end_char as u32,
+                        character: self.to_lsp_col(&file_path, usage.line, usage.end_char),
                     },
                     label: InlayHintLabel::String(format!(": {}", display_type)),
                     kind: Some(InlayHintKind::TYPE),

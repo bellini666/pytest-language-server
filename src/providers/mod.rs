@@ -21,10 +21,43 @@ use crate::config::Config;
 use crate::fixtures::FixtureDatabase;
 use dashmap::DashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tower_lsp_server::ls_types::*;
 use tower_lsp_server::Client;
 use tracing::warn;
+
+/// Convert a UTF-16 column to a byte offset within `line`.
+/// Columns past the end of the line clamp to the line's byte length.
+pub(crate) fn utf16_col_to_byte(line: &str, utf16_col: usize) -> usize {
+    if line.is_ascii() {
+        return utf16_col.min(line.len());
+    }
+    let mut units = 0usize;
+    for (byte_idx, ch) in line.char_indices() {
+        if units >= utf16_col {
+            return byte_idx;
+        }
+        units += ch.len_utf16();
+    }
+    line.len()
+}
+
+/// Convert a byte offset within `line` to a UTF-16 column.
+/// Offsets past the end of the line clamp to the line's UTF-16 length.
+pub(crate) fn byte_col_to_utf16(line: &str, byte_col: usize) -> usize {
+    if line.is_ascii() {
+        return byte_col.min(line.len());
+    }
+    let mut units = 0usize;
+    for (byte_idx, ch) in line.char_indices() {
+        if byte_idx >= byte_col {
+            break;
+        }
+        units += ch.len_utf16();
+    }
+    units
+}
 
 /// The LSP Backend struct containing server state.
 pub struct Backend {
@@ -41,6 +74,29 @@ pub struct Backend {
     pub uri_cache: Arc<DashMap<PathBuf, Uri>>,
     /// Configuration loaded from pyproject.toml
     pub config: Arc<tokio::sync::RwLock<Config>>,
+    /// Whether the client uses UTF-16 position encoding (the LSP default).
+    /// Set to false during initialize when the client supports UTF-8, in which
+    /// case our internal byte columns can be sent as-is.
+    pub client_utf16: Arc<AtomicBool>,
+    /// Per-file change generation counters used to debounce diagnostics
+    /// publishing while the user is typing.
+    pub change_generation: Arc<DashMap<PathBuf, u64>>,
+}
+
+impl Clone for Backend {
+    fn clone(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            fixture_db: Arc::clone(&self.fixture_db),
+            workspace_root: Arc::clone(&self.workspace_root),
+            original_workspace_root: Arc::clone(&self.original_workspace_root),
+            scan_task: Arc::clone(&self.scan_task),
+            uri_cache: Arc::clone(&self.uri_cache),
+            config: Arc::clone(&self.config),
+            client_utf16: Arc::clone(&self.client_utf16),
+            change_generation: Arc::clone(&self.change_generation),
+        }
+    }
 }
 
 impl Backend {
@@ -54,7 +110,55 @@ impl Backend {
             scan_task: Arc::new(tokio::sync::Mutex::new(None)),
             uri_cache: Arc::new(DashMap::new()),
             config: Arc::new(tokio::sync::RwLock::new(Config::default())),
+            client_utf16: Arc::new(AtomicBool::new(true)),
+            change_generation: Arc::new(DashMap::new()),
         }
+    }
+
+    /// Run `f` on the text of a 1-based line (without the trailing newline).
+    /// Borrows straight from the cached content Arc — no per-call allocation —
+    /// and uses the identity-keyed line index so the file is not re-hashed on
+    /// every column conversion.
+    fn with_line_text<R>(
+        &self,
+        file_path: &std::path::Path,
+        internal_line: usize,
+        f: impl FnOnce(&str) -> R,
+    ) -> Option<R> {
+        let content = self.fixture_db.get_file_content(file_path)?;
+        let index = self.fixture_db.get_line_index_for(file_path, &content);
+        let start = *index.get(internal_line.checked_sub(1)?)?;
+        let end = index.get(internal_line).copied().unwrap_or(content.len());
+        Some(f(content[start..end].trim_end_matches(['\r', '\n'])))
+    }
+
+    /// Convert an inbound LSP position's character to an internal byte column.
+    pub(crate) fn to_byte_col(&self, file_path: &std::path::Path, position: Position) -> u32 {
+        if !self.client_utf16.load(Ordering::Relaxed) {
+            return position.character;
+        }
+        self.with_line_text(
+            file_path,
+            Self::lsp_line_to_internal(position.line),
+            |line| utf16_col_to_byte(line, position.character as usize) as u32,
+        )
+        .unwrap_or(position.character)
+    }
+
+    /// Convert an internal byte column to an outbound LSP character.
+    pub(crate) fn to_lsp_col(
+        &self,
+        file_path: &std::path::Path,
+        internal_line: usize,
+        byte_col: usize,
+    ) -> u32 {
+        if !self.client_utf16.load(Ordering::Relaxed) {
+            return byte_col as u32;
+        }
+        self.with_line_text(file_path, internal_line, |line| {
+            byte_col_to_utf16(line, byte_col) as u32
+        })
+        .unwrap_or(byte_col as u32)
     }
 
     /// Convert URI to PathBuf with error logging
@@ -83,17 +187,18 @@ impl Backend {
             return Some(cached_uri.clone());
         }
 
-        // For paths not in cache, we need to handle macOS symlink issue
-        // where /var is a symlink to /private/var
-        // The client sends /var/... but we store /private/var/...
-        // So we need to strip /private prefix when building URIs
+        // For paths not in cache, we need to handle the macOS symlink issue
+        // where /var, /tmp, /etc are symlinks into /private. The client sends
+        // /var/... but we store the canonical /private/var/..., so strip the
+        // /private prefix when the stripped path resolves back to the same file.
         let path_to_use: Option<PathBuf> = if cfg!(target_os = "macos") {
             path.to_str().and_then(|path_str| {
-                if path_str.starts_with("/private/var/") || path_str.starts_with("/private/tmp/") {
-                    Some(PathBuf::from(path_str.replacen("/private", "", 1)))
-                } else {
-                    None
+                let stripped = path_str.strip_prefix("/private")?;
+                if !stripped.starts_with('/') {
+                    return None;
                 }
+                let candidate = PathBuf::from(stripped);
+                (candidate.canonicalize().ok()? == *path).then_some(candidate)
             })
         } else if cfg!(target_os = "windows") {
             // Strip Windows extended-length path prefix (\\?\) which is added by canonicalize()
@@ -200,5 +305,42 @@ impl Backend {
         }
 
         content
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{byte_col_to_utf16, utf16_col_to_byte};
+
+    #[test]
+    fn test_utf16_byte_conversion_ascii() {
+        let line = "def test(fixture):";
+        assert_eq!(utf16_col_to_byte(line, 9), 9);
+        assert_eq!(byte_col_to_utf16(line, 9), 9);
+        // Clamps past end of line.
+        assert_eq!(utf16_col_to_byte(line, 100), line.len());
+        assert_eq!(byte_col_to_utf16(line, 100), line.len());
+    }
+
+    #[test]
+    fn test_utf16_byte_conversion_bmp() {
+        // "é" is 2 bytes in UTF-8 but 1 UTF-16 code unit.
+        let line = "x = 'é'; fixture";
+        assert_eq!(utf16_col_to_byte(line, 9), 10);
+        assert_eq!(byte_col_to_utf16(line, 10), 9);
+    }
+
+    #[test]
+    fn test_utf16_byte_conversion_astral() {
+        // "🎉" is 4 bytes in UTF-8 and 2 UTF-16 code units (surrogate pair);
+        // it starts at byte 5 / UTF-16 unit 5 and ends at byte 9 / unit 7.
+        let line = "s = '🎉'; f";
+        assert_eq!(utf16_col_to_byte(line, 7), 9);
+        assert_eq!(byte_col_to_utf16(line, 9), 7);
+        // "f" is at byte 12 / UTF-16 unit 10.
+        assert_eq!(utf16_col_to_byte(line, 10), 12);
+        assert_eq!(byte_col_to_utf16(line, 12), 10);
+        // A column inside the surrogate pair snaps to the next boundary.
+        assert_eq!(utf16_col_to_byte(line, 6), 9);
     }
 }

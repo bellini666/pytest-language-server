@@ -5924,15 +5924,7 @@ fn make_backend_with_db(
     let slot_clone = backend_slot.clone();
     let (_svc, _sock) = LspService::new(move |client| {
         let b = Backend::new(client, db.clone());
-        *slot_clone.lock().unwrap() = Some(Backend {
-            client: b.client.clone(),
-            fixture_db: b.fixture_db.clone(),
-            workspace_root: b.workspace_root.clone(),
-            original_workspace_root: b.original_workspace_root.clone(),
-            scan_task: b.scan_task.clone(),
-            uri_cache: b.uri_cache.clone(),
-            config: b.config.clone(),
-        });
+        *slot_clone.lock().unwrap() = Some(b.clone());
         b
     });
     let result = backend_slot
@@ -8417,4 +8409,174 @@ def test_something(my_fixture, foo):
         on_fixture.is_none(),
         "prepare_rename on a fixture param should be declined"
     );
+}
+
+// ── Position-encoding integration tests ─────────────────────────────────
+
+#[tokio::test]
+async fn test_references_utf16_positions_on_non_ascii_line() {
+    // The client speaks UTF-16 (the default); columns sent and received must
+    // be UTF-16 code units even though internal storage is byte offsets.
+    use pytest_language_server::FixtureDatabase;
+
+    let db = Arc::new(FixtureDatabase::new());
+    let test_path = std::env::temp_dir()
+        .join("test_utf16_positions")
+        .join("test_example.py");
+    let content = "import pytest\n\n@pytest.fixture\ndef fixture_é():\n    return 1\n\ndef test_ünï(fixture_é):\n    assert fixture_é\n";
+    db.analyze_file(test_path.clone(), content);
+
+    let backend = make_backend_with_db(db);
+    let uri = Uri::from_file_path(&test_path).unwrap();
+
+    // Cursor inside `fixture_é` on `def test_ünï(fixture_é):` (0-based line 6).
+    // "def test_ünï(" is 13 UTF-16 units but 15 bytes (ü and ï are 2 bytes each).
+    let params = ReferenceParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position: Position {
+                line: 6,
+                character: 14,
+            },
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+        context: ReferenceContext {
+            include_declaration: true,
+        },
+    };
+
+    let locations = backend
+        .handle_references(params)
+        .await
+        .unwrap()
+        .expect("references should be found for fixture_é");
+
+    // The signature usage must come back in UTF-16 columns: the parameter
+    // starts at unit 13 and `fixture_é` is 9 units long → ends at 22.
+    // (In bytes it spans 15..25 — the old, wrong behaviour.)
+    let param_loc = locations
+        .iter()
+        .find(|l| l.range.start.line == 6)
+        .expect("expected a location on the signature line");
+    assert_eq!(param_loc.range.start.character, 13);
+    assert_eq!(param_loc.range.end.character, 22);
+
+    // The definition location (line 3) is also included per includeDeclaration.
+    assert!(
+        locations.iter().any(|l| l.range.start.line == 3),
+        "expected the definition location, got {:?}",
+        locations
+    );
+}
+
+#[tokio::test]
+async fn test_references_byte_positions_when_utf8_negotiated() {
+    // When the client negotiated utf-8, internal byte columns pass through
+    // unconverted in both directions.
+    use pytest_language_server::FixtureDatabase;
+
+    let db = Arc::new(FixtureDatabase::new());
+    let test_path = std::env::temp_dir()
+        .join("test_utf8_positions")
+        .join("test_example.py");
+    let content = "import pytest\n\n@pytest.fixture\ndef fixture_é():\n    return 1\n\ndef test_ünï(fixture_é):\n    assert fixture_é\n";
+    db.analyze_file(test_path.clone(), content);
+
+    let backend = make_backend_with_db(db);
+    backend
+        .client_utf16
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    let uri = Uri::from_file_path(&test_path).unwrap();
+
+    // Byte column 16 is inside `fixture_é` ("def test_ünï(" is 15 bytes).
+    let params = ReferenceParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position: Position {
+                line: 6,
+                character: 16,
+            },
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+        context: ReferenceContext {
+            include_declaration: true,
+        },
+    };
+
+    let locations = backend
+        .handle_references(params)
+        .await
+        .unwrap()
+        .expect("references should be found for fixture_é");
+
+    // Outbound columns are byte offsets: 15..25 (`fixture_é` is 10 bytes).
+    let param_loc = locations
+        .iter()
+        .find(|l| l.range.start.line == 6)
+        .expect("expected a location on the signature line");
+    assert_eq!(param_loc.range.start.character, 15);
+    assert_eq!(param_loc.range.end.character, 25);
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_parametrize_unicode_identifier() {
+    // Unicode parametrize parameter names are legal Python; both the cursor
+    // token extraction and the new-name validation must accept them.
+    // Run in utf-8 mode so positions in this test are byte offsets end to end.
+    use pytest_language_server::FixtureDatabase;
+    use tower_lsp_server::LanguageServer;
+
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize("café", ["a", "b"])
+def test_something(café):
+    print(café)
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize("renamed_ü", ["a", "b"])
+def test_something(renamed_ü):
+    print(renamed_ü)
+"#;
+
+    let db = Arc::new(FixtureDatabase::new());
+    let path = std::env::temp_dir()
+        .join("test_rename_unicode")
+        .join("test_parametrize.py");
+    db.analyze_file(path.clone(), content);
+    let backend = make_backend_with_db(db);
+    backend
+        .client_utf16
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    let uri = Uri::from_file_path(&path).unwrap();
+
+    // Cursor on the parameter in the signature (byte column of "café").
+    let sig_line = 4u32;
+    let byte_col = "def test_something(".len() as u32;
+    let ws = backend
+        .rename(RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: sig_line,
+                    character: byte_col,
+                },
+            },
+            new_name: "renamed_ü".to_string(),
+            work_done_progress_params: WorkDoneProgressParams {
+                work_done_token: None,
+            },
+        })
+        .await
+        .expect("rename should not error")
+        .expect("unicode parametrize param should be renameable");
+
+    let edits = ws.changes.expect("rename should produce changes");
+    let edits = edits.into_values().next().expect("one file of edits");
+    assert_eq!(apply_text_edits(content, &edits), expected);
 }

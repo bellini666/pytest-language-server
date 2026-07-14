@@ -96,7 +96,7 @@ jobs:
       - name: Install dependencies
         run: |
           cd extensions/vscode-extension
-          npm install
+          npm ci
           npm install -g @vscode/vsce
 
       - name: Check dependency engines against VSCodium floor

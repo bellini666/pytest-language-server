@@ -130,19 +130,41 @@ fn emit_kind_import_edits(
 
                 // Cover all lines of the import (same range for single-line and
                 // multiline — for single-line fi.line == fi.end_line).
-                let end_char = layout.line(fi.end_line).len() as u32;
+                // The range ends at column 0 of the following line (replacing the
+                // trailing newline) so no column-encoding conversion is needed.
+                // When the import is the last line of a file with no trailing
+                // newline, that position would fall outside the document (some
+                // clients reject such edits), so end at the line's clamped end
+                // instead (the spec clamps an oversized character to line length).
+                let (end, new_text) = if layout.next_line_exists(fi.end_line) {
+                    (
+                        Position {
+                            line: fi.end_line as u32 + 1,
+                            character: 0,
+                        },
+                        format!("{}\n", merged_line),
+                    )
+                } else {
+                    (
+                        Position {
+                            line: fi.end_line as u32,
+                            // LSP uinteger max (2^31 - 1): past any real line
+                            // length, so clients clamp to end-of-line, and it
+                            // fits the signed 32-bit ints JVM clients use.
+                            character: i32::MAX as u32,
+                        },
+                        merged_line.clone(),
+                    )
+                };
                 edits.push(TextEdit {
                     range: Range {
                         start: Position {
                             line: fi.line as u32,
                             character: 0,
                         },
-                        end: Position {
-                            line: fi.end_line as u32,
-                            character: end_char,
-                        },
+                        end,
                     },
-                    new_text: merged_line,
+                    new_text,
                 });
             } else {
                 // Cannot merge (string-fallback multiline without names) → insert new line.
@@ -463,7 +485,7 @@ impl Backend {
                 }
 
                 let diag_line = Self::lsp_line_to_internal(diagnostic.range.start.line);
-                let diag_char = diagnostic.range.start.character as usize;
+                let diag_char = self.to_byte_col(&file_path, diagnostic.range.start) as usize;
 
                 info!(
                     "Looking for undeclared fixture at line={}, char={}",
@@ -516,7 +538,7 @@ impl Backend {
                 };
 
                 let insert_line = Self::internal_line_to_lsp(insertion.line);
-                let insert_char = insertion.char_pos as u32;
+                let insert_char = self.to_lsp_col(&file_path, insertion.line, insertion.char_pos);
 
                 let param_text = match &insertion.multiline_indent {
                     Some(indent) => {
@@ -573,7 +595,7 @@ impl Backend {
                     diagnostics: Some(vec![diagnostic.clone()]),
                     edit: Some(edit),
                     command: None,
-                    is_preferred: Some(true),
+                    is_preferred: Some(actions.is_empty()),
                     disabled: None,
                     data: None,
                 };
@@ -621,7 +643,7 @@ impl Backend {
                                 continue;
                             }
 
-                            let cursor_char = range.start.character as usize;
+                            let cursor_char = self.to_byte_col(&file_path, range.start) as usize;
                             if cursor_char < usage.start_char || cursor_char > usage.end_char {
                                 continue;
                             }
@@ -657,8 +679,9 @@ impl Backend {
                                 build_import_edits(&layout, &spec_refs, &existing_imports);
 
                             let lsp_line = Self::internal_line_to_lsp(usage.line);
+                            let lsp_col = self.to_lsp_col(&file_path, usage.line, usage.end_char);
                             all_edits.push(TextEdit {
-                                range: Self::create_point_range(lsp_line, usage.end_char as u32),
+                                range: Self::create_point_range(lsp_line, lsp_col),
                                 new_text: format!(": {}", adapted_type),
                             });
 
@@ -679,7 +702,7 @@ impl Backend {
                                 diagnostics: None,
                                 edit: Some(ws_edit),
                                 command: None,
-                                is_preferred: Some(true),
+                                is_preferred: Some(actions.is_empty()),
                                 disabled: None,
                                 data: None,
                             };
@@ -733,8 +756,9 @@ impl Backend {
 
                             // Annotation edit.
                             let lsp_line = Self::internal_line_to_lsp(usage.line);
+                            let lsp_col = self.to_lsp_col(&file_path, usage.line, usage.end_char);
                             annotation_edits.push(TextEdit {
-                                range: Self::create_point_range(lsp_line, usage.end_char as u32),
+                                range: Self::create_point_range(lsp_line, lsp_col),
                                 new_text: format!(": {}", adapted_type),
                             });
 
@@ -881,8 +905,9 @@ mod tests {
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].range.start.line, 1);
         assert_eq!(edits[0].range.start.character, 0);
-        assert_eq!(edits[0].range.end.line, 1);
-        assert_eq!(edits[0].new_text, "from typing import Any, Optional");
+        assert_eq!(edits[0].range.end.line, 2);
+        assert_eq!(edits[0].range.end.character, 0);
+        assert_eq!(edits[0].new_text, "from typing import Any, Optional\n");
     }
 
     #[test]
@@ -914,7 +939,10 @@ mod tests {
         let existing: HashSet<String> = HashSet::new();
         let edits = build_import_edits(&layout, &[&spec1, &spec2], &existing);
         assert_eq!(edits.len(), 1);
-        assert_eq!(edits[0].new_text, "from typing import Any, Optional, Union");
+        assert_eq!(
+            edits[0].new_text,
+            "from typing import Any, Optional, Union\n"
+        );
     }
 
     #[test]
@@ -928,7 +956,10 @@ mod tests {
         let existing: HashSet<String> = HashSet::new();
         let edits = build_import_edits(&layout, &[&spec], &existing);
         assert_eq!(edits.len(), 1);
-        assert_eq!(edits[0].new_text, "from pathlib import Path as P, PurePath");
+        assert_eq!(
+            edits[0].new_text,
+            "from pathlib import Path as P, PurePath\n"
+        );
     }
 
     #[test]
@@ -966,7 +997,7 @@ mod tests {
         assert_eq!(edits.len(), 1);
         assert_eq!(
             edits[0].new_text,
-            "from os import getcwd, othermodule, path"
+            "from os import getcwd, othermodule, path\n"
         );
     }
 
@@ -985,7 +1016,7 @@ mod tests {
         let existing: HashSet<String> = HashSet::new();
         let edits = build_import_edits(&layout, &[&spec], &existing);
         assert_eq!(edits.len(), 1);
-        assert_eq!(edits[0].new_text, "from typing import Any, Optional");
+        assert_eq!(edits[0].new_text, "from typing import Any, Optional\n");
         assert!(
             !edits[0].new_text.contains('#'),
             "merged line must not contain the original comment"
@@ -1016,8 +1047,108 @@ mod tests {
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].range.start.line, 0);
         assert_eq!(edits[0].range.start.character, 0);
-        assert_eq!(edits[0].range.end.line, 3);
-        assert_eq!(edits[0].new_text, "from typing import Any, Optional, Union");
+        assert_eq!(edits[0].range.end.line, 4);
+        assert_eq!(edits[0].range.end.character, 0);
+        assert_eq!(
+            edits[0].new_text,
+            "from typing import Any, Optional, Union\n"
+        );
+    }
+
+    /// Assert that no two edits in the set overlap (LSP forbids overlapping
+    /// TextEdits within a single TextDocumentEdit).
+    fn assert_no_overlaps(edits: &[TextEdit]) {
+        let key = |p: &Position| (p.line, p.character);
+        for (i, a) in edits.iter().enumerate() {
+            for b in edits.iter().skip(i + 1) {
+                let disjoint = key(&a.range.end) <= key(&b.range.start)
+                    || key(&b.range.end) <= key(&a.range.start);
+                assert!(
+                    disjoint,
+                    "overlapping edits: {:?} and {:?}",
+                    a.range, b.range
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_import_edits_merge_into_final_line_without_trailing_newline() {
+        // The import is the last line and the file has no trailing newline:
+        // ending the range at (end_line + 1, 0) would fall outside the
+        // document, so the edit must end on the import line itself.
+        let layout = parse_import_layout("from typing import Optional");
+        let spec = TypeImportSpec {
+            check_name: "Any".to_string(),
+            import_statement: "from typing import Any".to_string(),
+        };
+        let existing: HashSet<String> = HashSet::new();
+        let edits = build_import_edits(&layout, &[&spec], &existing);
+
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].range.start.line, 0);
+        assert_eq!(edits[0].range.end.line, 0);
+        assert_eq!(edits[0].range.end.character, i32::MAX as u32);
+        assert_eq!(edits[0].new_text, "from typing import Any, Optional");
+    }
+
+    #[test]
+    fn test_build_import_edits_merge_into_final_line_with_trailing_newline() {
+        // Same layout but the file ends with a newline: the (end_line + 1, 0)
+        // position is addressable, so the whole-line replacement stays.
+        let layout = parse_import_layout("from typing import Optional\n");
+        let spec = TypeImportSpec {
+            check_name: "Any".to_string(),
+            import_statement: "from typing import Any".to_string(),
+        };
+        let existing: HashSet<String> = HashSet::new();
+        let edits = build_import_edits(&layout, &[&spec], &existing);
+
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].range.end.line, 1);
+        assert_eq!(edits[0].range.end.character, 0);
+        assert_eq!(edits[0].new_text, "from typing import Any, Optional\n");
+    }
+
+    #[test]
+    fn test_build_import_edits_merge_plus_insert_do_not_overlap() {
+        // A multiline merge (block replace) combined with new imports that sort
+        // before and after the block in the same group must not produce
+        // overlapping TextEdits.
+        let lines = vec![
+            "from typing import (",
+            "    Any,",
+            "    Optional,",
+            ")",
+            "",
+            "def test(): pass",
+        ];
+        let layout = layout_from_lines(&lines);
+        let merge_spec = TypeImportSpec {
+            check_name: "Union".to_string(),
+            import_statement: "from typing import Union".to_string(),
+        };
+        let before_spec = TypeImportSpec {
+            check_name: "ABC".to_string(),
+            import_statement: "from abc import ABC".to_string(),
+        };
+        let after_spec = TypeImportSpec {
+            check_name: "getcwd".to_string(),
+            import_statement: "from os import getcwd".to_string(),
+        };
+        let existing: HashSet<String> = HashSet::new();
+        let edits = build_import_edits(
+            &layout,
+            &[&merge_spec, &before_spec, &after_spec],
+            &existing,
+        );
+
+        assert!(
+            edits.len() >= 2,
+            "expected merge + inserts, got {:?}",
+            edits
+        );
+        assert_no_overlaps(&edits);
     }
 
     // adapt tests live in src/fixtures/import_analysis.rs

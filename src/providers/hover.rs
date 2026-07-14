@@ -22,11 +22,11 @@ impl Backend {
                 file_path, position.line, position.character
             );
 
-            if let Some(definition) = self.fixture_db.find_fixture_definition(
-                &file_path,
-                position.line,
-                position.character,
-            ) {
+            let byte_col = self.to_byte_col(&file_path, position);
+            if let Some(definition) =
+                self.fixture_db
+                    .find_fixture_definition(&file_path, position.line, byte_col)
+            {
                 info!("Found fixture definition for hover: {:?}", definition.name);
 
                 // Get workspace root for formatting documentation

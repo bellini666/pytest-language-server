@@ -9,7 +9,6 @@
 
 use super::types::TypeImportSpec;
 use super::FixtureDatabase;
-use once_cell::sync::Lazy;
 use rustpython_parser::ast::{Expr, Stmt};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -31,92 +30,93 @@ static RUNTIME_STDLIB_MODULES: OnceLock<HashSet<String>> = OnceLock::new();
 /// Intentionally conservative — it is better to misclassify an unknown
 /// third-party module as stdlib (and skip inserting a redundant import)
 /// than to misclassify a stdlib module as third-party.
-static STDLIB_MODULES: Lazy<HashSet<&'static str>> = Lazy::new(|| {
-    [
-        "os",
-        "sys",
-        "re",
-        "json",
-        "typing",
-        "collections",
-        "functools",
-        "itertools",
-        "pathlib",
-        "datetime",
-        "time",
-        "math",
-        "random",
-        "copy",
-        "io",
-        "abc",
-        "contextlib",
-        "dataclasses",
-        "enum",
-        "logging",
-        "unittest",
-        "asyncio",
-        "concurrent",
-        "multiprocessing",
-        "threading",
-        "subprocess",
-        "shutil",
-        "tempfile",
-        "glob",
-        "fnmatch",
-        "pickle",
-        "sqlite3",
-        "urllib",
-        "http",
-        "email",
-        "html",
-        "xml",
-        "socket",
-        "ssl",
-        "select",
-        "signal",
-        "struct",
-        "codecs",
-        "textwrap",
-        "string",
-        "difflib",
-        "inspect",
-        "dis",
-        "traceback",
-        "warnings",
-        "weakref",
-        "types",
-        "importlib",
-        "pkgutil",
-        "pprint",
-        "reprlib",
-        "numbers",
-        "decimal",
-        "fractions",
-        "statistics",
-        "hashlib",
-        "hmac",
-        "secrets",
-        "base64",
-        "binascii",
-        "zlib",
-        "gzip",
-        "bz2",
-        "lzma",
-        "zipfile",
-        "tarfile",
-        "csv",
-        "configparser",
-        "argparse",
-        "getopt",
-        "getpass",
-        "platform",
-        "errno",
-        "ctypes",
-        "__future__",
-    ]
-    .into_iter()
-    .collect()
-});
+static STDLIB_MODULES: std::sync::LazyLock<HashSet<&'static str>> =
+    std::sync::LazyLock::new(|| {
+        [
+            "os",
+            "sys",
+            "re",
+            "json",
+            "typing",
+            "collections",
+            "functools",
+            "itertools",
+            "pathlib",
+            "datetime",
+            "time",
+            "math",
+            "random",
+            "copy",
+            "io",
+            "abc",
+            "contextlib",
+            "dataclasses",
+            "enum",
+            "logging",
+            "unittest",
+            "asyncio",
+            "concurrent",
+            "multiprocessing",
+            "threading",
+            "subprocess",
+            "shutil",
+            "tempfile",
+            "glob",
+            "fnmatch",
+            "pickle",
+            "sqlite3",
+            "urllib",
+            "http",
+            "email",
+            "html",
+            "xml",
+            "socket",
+            "ssl",
+            "select",
+            "signal",
+            "struct",
+            "codecs",
+            "textwrap",
+            "string",
+            "difflib",
+            "inspect",
+            "dis",
+            "traceback",
+            "warnings",
+            "weakref",
+            "types",
+            "importlib",
+            "pkgutil",
+            "pprint",
+            "reprlib",
+            "numbers",
+            "decimal",
+            "fractions",
+            "statistics",
+            "hashlib",
+            "hmac",
+            "secrets",
+            "base64",
+            "binascii",
+            "zlib",
+            "gzip",
+            "bz2",
+            "lzma",
+            "zipfile",
+            "tarfile",
+            "csv",
+            "configparser",
+            "argparse",
+            "getopt",
+            "getpass",
+            "platform",
+            "errno",
+            "ctypes",
+            "__future__",
+        ]
+        .into_iter()
+        .collect()
+    });
 
 /// Represents a fixture import in a Python file.
 #[derive(Debug, Clone)]
@@ -424,24 +424,24 @@ impl FixtureDatabase {
     /// This handles `from .module import *` patterns that bring fixtures into scope.
     ///
     /// Results are cached with content-hash and definitions-version based invalidation.
-    /// Returns fixture names that are available in `file_path` via imports.
+    /// Returns a map from fixture name to the file its import resolves to.
     pub fn get_imported_fixtures(
         &self,
         file_path: &Path,
         visited: &mut HashSet<PathBuf>,
-    ) -> HashSet<String> {
+    ) -> HashMap<String, PathBuf> {
         let canonical_path = self.get_canonical_path(file_path.to_path_buf());
 
         // Prevent circular imports
         if visited.contains(&canonical_path) {
             debug!("Circular import detected for {:?}, skipping", file_path);
-            return HashSet::new();
+            return HashMap::new();
         }
         visited.insert(canonical_path.clone());
 
         // Get the file content first (needed for cache validation)
         let Some(content) = self.get_file_content(&canonical_path) else {
-            return HashSet::new();
+            return HashMap::new();
         };
 
         let content_hash = Self::hash_content(&content);
@@ -487,8 +487,8 @@ impl FixtureDatabase {
         canonical_path: &Path,
         content: &str,
         visited: &mut HashSet<PathBuf>,
-    ) -> HashSet<String> {
-        let mut imported_fixtures = HashSet::new();
+    ) -> HashMap<String, PathBuf> {
+        let mut imported_fixtures = HashMap::new();
 
         let Some(parsed) = self.get_parsed_ast(canonical_path, content) else {
             return imported_fixtures;
@@ -523,18 +523,44 @@ impl FixtureDatabase {
                     // First, get fixtures defined directly in that file
                     if let Some(file_fixtures) = self.file_definitions.get(&resolved_canonical) {
                         for fixture_name in file_fixtures.iter() {
-                            imported_fixtures.insert(fixture_name.clone());
+                            imported_fixtures
+                                .insert(fixture_name.clone(), resolved_canonical.clone());
                         }
                     }
 
-                    // Also recursively get fixtures imported into that file
+                    // Also recursively get fixtures imported into that file.
+                    // Direct imports win over transitive ones on name clashes.
                     let transitive = self.get_imported_fixtures(&resolved_canonical, visited);
-                    imported_fixtures.extend(transitive);
+                    for (name, source) in transitive {
+                        imported_fixtures.entry(name).or_insert(source);
+                    }
                 } else {
-                    // Explicit import: only include the specified names if they are fixtures
+                    // Explicit import: prefer names actually defined in the
+                    // resolved module, then names it re-exports (transitively,
+                    // attributed to their true source). Fall back to any known
+                    // fixture name so modules that were resolved but never
+                    // scanned don't lose their fixtures.
+                    let module_fixtures: HashSet<String> = self
+                        .file_definitions
+                        .get(&resolved_canonical)
+                        .map(|entry| entry.value().clone())
+                        .unwrap_or_default();
+                    // Recurse with a clone of `visited`: it must still guard the
+                    // current path against cycles, but marking the module as
+                    // globally visited here would make a later import of the
+                    // same module (e.g. a subsequent star import) hit the
+                    // circular guard and silently lose its transitive fixtures.
+                    let mut nested_visited = visited.clone();
+                    let reexported =
+                        self.get_imported_fixtures(&resolved_canonical, &mut nested_visited);
+
                     for name in &import.imported_names {
-                        if self.definitions.contains_key(name) {
-                            imported_fixtures.insert(name.clone());
+                        if module_fixtures.contains(name) {
+                            imported_fixtures.insert(name.clone(), resolved_canonical.clone());
+                        } else if let Some(source) = reexported.get(name) {
+                            imported_fixtures.insert(name.clone(), source.clone());
+                        } else if self.definitions.contains_key(name) {
+                            imported_fixtures.insert(name.clone(), resolved_canonical.clone());
                         }
                     }
                 }
@@ -561,24 +587,18 @@ impl FixtureDatabase {
 
                 if let Some(file_fixtures) = self.file_definitions.get(&resolved_canonical) {
                     for fixture_name in file_fixtures.iter() {
-                        imported_fixtures.insert(fixture_name.clone());
+                        imported_fixtures.insert(fixture_name.clone(), resolved_canonical.clone());
                     }
                 }
 
                 let transitive = self.get_imported_fixtures(&resolved_canonical, visited);
-                imported_fixtures.extend(transitive);
+                for (name, source) in transitive {
+                    imported_fixtures.entry(name).or_insert(source);
+                }
             }
         }
 
         imported_fixtures
-    }
-
-    /// Check if a fixture is available in a file via imports.
-    /// This is used in resolution to check conftest.py files that import fixtures.
-    pub fn is_fixture_imported_in_file(&self, fixture_name: &str, file_path: &Path) -> bool {
-        let mut visited = HashSet::new();
-        let imported = self.get_imported_fixtures(file_path, &mut visited);
-        imported.contains(fixture_name)
     }
 }
 

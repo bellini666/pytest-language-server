@@ -898,7 +898,6 @@ dependencies = [
  "insta",
  "memchr",
  "ntest",
- "once_cell",
  "predicates",
  "rayon",
  "rustpython-ast",

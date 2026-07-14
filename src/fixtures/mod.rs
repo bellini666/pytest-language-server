@@ -42,6 +42,11 @@ pub struct EditableInstall {
     pub site_packages: PathBuf,
 }
 
+/// Cache entry for the identity-keyed line index: (content Arc identity, line_index).
+/// A hit requires upgrading the Weak and comparing Arc pointers, which makes
+/// it ABA-safe (a freed-and-reused allocation can't produce a false hit).
+type LineIndexIdentityCacheEntry = (std::sync::Weak<String>, Arc<Vec<usize>>);
+
 /// Cache entry for line indices: (content_hash, line_index).
 /// The content hash is used to invalidate the cache when file content changes.
 type LineIndexCacheEntry = (u64, Arc<Vec<usize>>);
@@ -58,9 +63,10 @@ type CycleCacheEntry = (u64, Arc<Vec<types::FixtureCycle>>);
 /// The version is incremented when definitions change to invalidate the cache.
 type AvailableFixturesCacheEntry = (u64, Arc<Vec<FixtureDefinition>>);
 
-/// Cache entry for imported fixtures: (content_hash, definitions_version, imported_fixture_names).
+/// Cache entry for imported fixtures: (content_hash, definitions_version,
+/// imported fixture name → file the import resolves to).
 /// Invalidated when either the file content or fixture definitions change.
-type ImportedFixturesCacheEntry = (u64, u64, Arc<HashSet<String>>);
+type ImportedFixturesCacheEntry = (u64, u64, Arc<HashMap<String, PathBuf>>);
 
 /// Cache entry for the name→TypeImportSpec map: (content_hash, Arc<map>).
 /// Invalidated when the file content changes (same strategy as ast_cache).
@@ -80,7 +86,8 @@ type NameImportMapCacheEntry = (
 );
 
 /// Maximum number of files to keep in the file content cache.
-/// When exceeded, the oldest entries are evicted to prevent unbounded memory growth.
+/// When exceeded, a batch of entries (in arbitrary map order — not LRU) is
+/// evicted to prevent unbounded memory growth.
 const MAX_FILE_CACHE_SIZE: usize = 2000;
 
 /// The central database for fixture definitions and usages.
@@ -109,6 +116,9 @@ pub struct FixtureDatabase {
     /// Cache of line indices (byte offsets) for files to avoid recomputation.
     /// Stores (content_hash, line_index) to invalidate when content changes.
     pub line_index_cache: Arc<DashMap<PathBuf, LineIndexCacheEntry>>,
+    /// Identity-keyed line-index cache so repeated per-column position
+    /// conversions skip re-hashing the whole file.
+    pub line_index_by_identity: Arc<DashMap<PathBuf, LineIndexIdentityCacheEntry>>,
     /// Cache of parsed AST for files to avoid re-parsing.
     /// Stores (content_hash, ast) to invalidate when content changes.
     pub ast_cache: Arc<DashMap<PathBuf, AstCacheEntry>>,
@@ -162,6 +172,7 @@ impl FixtureDatabase {
             imports: Arc::new(DashMap::new()),
             canonical_path_cache: Arc::new(DashMap::new()),
             line_index_cache: Arc::new(DashMap::new()),
+            line_index_by_identity: Arc::new(DashMap::new()),
             ast_cache: Arc::new(DashMap::new()),
             definitions_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cycle_cache: Arc::new(DashMap::new()),
@@ -202,13 +213,23 @@ impl FixtureDatabase {
     }
 
     /// Get file content from cache or read from filesystem.
+    /// Disk reads are cached so repeated requests for scanned (non-open)
+    /// files don't hit the filesystem every time.
     /// Returns None if file cannot be read.
     pub(crate) fn get_file_content(&self, file_path: &Path) -> Option<Arc<String>> {
         if let Some(cached) = self.file_cache.get(file_path) {
-            Some(Arc::clone(cached.value()))
-        } else {
-            std::fs::read_to_string(file_path).ok().map(Arc::new)
+            return Some(Arc::clone(cached.value()));
         }
+
+        // or_insert (not insert): if an analyze_file with fresher editor-buffer
+        // content raced in between the miss above and here, keep that buffer
+        // instead of clobbering it with our possibly-stale disk read.
+        let content = Arc::new(std::fs::read_to_string(file_path).ok()?);
+        let entry = self
+            .file_cache
+            .entry(file_path.to_path_buf())
+            .or_insert(content);
+        Some(Arc::clone(entry.value()))
     }
 
     /// Get or compute line index for a file, with content-hash-based caching.
@@ -236,6 +257,32 @@ impl FixtureDatabase {
         );
 
         arc_index
+    }
+
+    /// Get the line index for a content `Arc`, skipping the O(file) content
+    /// hash when the same `Arc` was seen last. Used by per-column position
+    /// conversions, which can run hundreds of times per request.
+    pub(crate) fn get_line_index_for(
+        &self,
+        file_path: &Path,
+        content: &Arc<String>,
+    ) -> Arc<Vec<usize>> {
+        if let Some(entry) = self.line_index_by_identity.get(file_path) {
+            let (weak, index) = entry.value();
+            if weak
+                .upgrade()
+                .is_some_and(|cached| Arc::ptr_eq(&cached, content))
+            {
+                return Arc::clone(index);
+            }
+        }
+
+        let index = self.get_line_index(file_path, content);
+        self.line_index_by_identity.insert(
+            file_path.to_path_buf(),
+            (Arc::downgrade(content), Arc::clone(&index)),
+        );
+        index
     }
 
     /// Get or parse AST for a file, with content-hash-based caching.
@@ -353,6 +400,7 @@ impl FixtureDatabase {
 
         // Remove from line_index_cache
         self.line_index_cache.remove(&canonical);
+        self.line_index_by_identity.remove(&canonical);
 
         // Remove from ast_cache
         self.ast_cache.remove(&canonical);
@@ -383,7 +431,15 @@ impl FixtureDatabase {
     /// Called periodically to prevent unbounded memory growth in very large workspaces.
     /// Most LSPs rely on did_close cleanup for open files; this is a safety net for
     /// workspace scan files that accumulate over time.
-    pub(crate) fn evict_cache_if_needed(&self) {
+    ///
+    /// Only derived, recomputable caches are evicted; `definitions`/`usages` are
+    /// the index itself and are never evicted here.
+    ///
+    /// `keep` is the file currently being analyzed — it is never evicted, since
+    /// its caches were just populated and are about to be used.
+    // ponytail: eviction picks arbitrary entries (DashMap iteration order), not
+    // LRU — add access-time tracking if churn ever shows up in profiles.
+    pub(crate) fn evict_cache_if_needed(&self, keep: &Path) {
         // Only evict if significantly over limit to avoid frequent eviction
         if self.file_cache.len() > MAX_FILE_CACHE_SIZE {
             debug!(
@@ -397,6 +453,7 @@ impl FixtureDatabase {
             let to_remove: Vec<PathBuf> = self
                 .file_cache
                 .iter()
+                .filter(|entry| entry.key() != keep)
                 .take(to_remove_count)
                 .map(|entry| entry.key().clone())
                 .collect();
@@ -405,6 +462,7 @@ impl FixtureDatabase {
                 self.file_cache.remove(&path);
                 // Also clean related caches for consistency
                 self.line_index_cache.remove(&path);
+                self.line_index_by_identity.remove(&path);
                 self.ast_cache.remove(&path);
                 self.available_fixtures_cache.remove(&path);
                 self.imported_fixtures_cache.remove(&path);

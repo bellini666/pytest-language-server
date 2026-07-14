@@ -174,7 +174,15 @@ fn handle_fixtures_unused(path: PathBuf, format: &str) {
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&json_output).unwrap());
+        match serde_json::to_string_pretty(&json_output) {
+            Ok(json) => println!("{}", json),
+            Err(e) => {
+                // Don't emit "[]" here — that would read as "no unused
+                // fixtures" to CI consumers even though some were found.
+                eprintln!("error: failed to serialize output as JSON: {}", e);
+                std::process::exit(1);
+            }
+        }
     } else {
         println!(
             "{} {} unused fixture(s):\n",

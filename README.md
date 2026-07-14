@@ -429,11 +429,9 @@ exclude = ["build/**", "dist/**", ".tox/**"]
 # Valid codes: "undeclared-fixture", "scope-mismatch", "circular-dependency"
 disabled_diagnostics = ["undeclared-fixture"]
 
-# Additional directories to scan for fixtures (planned feature)
-fixture_paths = ["fixtures/", "shared/fixtures/"]
-
-# Third-party plugins to skip when scanning venv (planned feature)
-skip_plugins = ["pytest-xdist"]
+# NOT IMPLEMENTED YET — accepted but ignored (a warning is logged):
+# fixture_paths = ["fixtures/", "shared/fixtures/"]
+# skip_plugins = ["pytest-xdist"]
 ```
 
 **Available Options:**

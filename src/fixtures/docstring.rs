@@ -6,6 +6,84 @@
 use super::FixtureDatabase;
 use rustpython_parser::ast::{Expr, Stmt};
 
+/// Find the byte offset of the first `yield`/`yield from` in a function body.
+///
+/// Covers yields in expression statements, assignments (`x = yield ...`),
+/// returns, and all compound statements including `async for`/`async with`
+/// and `match`. Does not descend into nested function or lambda definitions —
+/// their yields belong to the inner function.
+pub(crate) fn find_yield_offset(body: &[Stmt]) -> Option<usize> {
+    fn in_expr(expr: &Expr) -> Option<usize> {
+        match expr {
+            Expr::Yield(y) => Some(y.range.start().to_usize()),
+            Expr::YieldFrom(y) => Some(y.range.start().to_usize()),
+            Expr::Await(a) => in_expr(&a.value),
+            Expr::NamedExpr(n) => in_expr(&n.value),
+            // A yield may legally nest inside other expressions, e.g.
+            // `x = f((yield 1))`. Recurse into the common containers, but not
+            // into lambdas — a yield there belongs to the lambda, not to the
+            // enclosing function.
+            Expr::Call(c) => in_expr(&c.func)
+                .or_else(|| c.args.iter().find_map(in_expr))
+                .or_else(|| c.keywords.iter().find_map(|kw| in_expr(&kw.value))),
+            Expr::BinOp(e) => in_expr(&e.left).or_else(|| in_expr(&e.right)),
+            Expr::UnaryOp(e) => in_expr(&e.operand),
+            Expr::BoolOp(e) => e.values.iter().find_map(in_expr),
+            Expr::Compare(e) => in_expr(&e.left).or_else(|| e.comparators.iter().find_map(in_expr)),
+            Expr::IfExp(e) => in_expr(&e.test)
+                .or_else(|| in_expr(&e.body))
+                .or_else(|| in_expr(&e.orelse)),
+            Expr::Tuple(e) => e.elts.iter().find_map(in_expr),
+            Expr::List(e) => e.elts.iter().find_map(in_expr),
+            Expr::Set(e) => e.elts.iter().find_map(in_expr),
+            Expr::Dict(e) => e
+                .keys
+                .iter()
+                .flatten()
+                .find_map(in_expr)
+                .or_else(|| e.values.iter().find_map(in_expr)),
+            Expr::Subscript(e) => in_expr(&e.value).or_else(|| in_expr(&e.slice)),
+            Expr::Starred(e) => in_expr(&e.value),
+            Expr::Attribute(e) => in_expr(&e.value),
+            _ => None,
+        }
+    }
+
+    fn in_stmt(stmt: &Stmt) -> Option<usize> {
+        match stmt {
+            Stmt::Expr(s) => in_expr(&s.value),
+            Stmt::Assign(s) => in_expr(&s.value),
+            Stmt::AugAssign(s) => in_expr(&s.value),
+            Stmt::AnnAssign(s) => s.value.as_deref().and_then(in_expr),
+            Stmt::Return(s) => s.value.as_deref().and_then(in_expr),
+            Stmt::If(s) => find_yield_offset(&s.body).or_else(|| find_yield_offset(&s.orelse)),
+            Stmt::For(s) => find_yield_offset(&s.body).or_else(|| find_yield_offset(&s.orelse)),
+            Stmt::AsyncFor(s) => {
+                find_yield_offset(&s.body).or_else(|| find_yield_offset(&s.orelse))
+            }
+            Stmt::While(s) => find_yield_offset(&s.body).or_else(|| find_yield_offset(&s.orelse)),
+            Stmt::With(s) => find_yield_offset(&s.body),
+            Stmt::AsyncWith(s) => find_yield_offset(&s.body),
+            Stmt::Try(s) => find_yield_offset(&s.body)
+                .or_else(|| {
+                    s.handlers.iter().find_map(|handler| {
+                        let rustpython_parser::ast::ExceptHandler::ExceptHandler(h) = handler;
+                        find_yield_offset(&h.body)
+                    })
+                })
+                .or_else(|| find_yield_offset(&s.orelse))
+                .or_else(|| find_yield_offset(&s.finalbody)),
+            Stmt::Match(s) => s
+                .cases
+                .iter()
+                .find_map(|case| find_yield_offset(&case.body)),
+            _ => None,
+        }
+    }
+
+    body.iter().find_map(in_stmt)
+}
+
 impl FixtureDatabase {
     /// Extract docstring from a function body.
     /// The docstring is the first statement if it's a string literal.
@@ -29,59 +107,13 @@ impl FixtureDatabase {
         content: &str,
     ) -> Option<String> {
         if let Some(return_expr) = returns {
-            let has_yield = self.contains_yield(body);
-
-            if has_yield {
+            if find_yield_offset(body).is_some() {
                 return self.extract_yielded_type(return_expr, content);
             } else {
                 return Some(self.expr_to_string(return_expr, content));
             }
         }
         None
-    }
-
-    /// Check if a function body contains yield statements.
-    #[allow(clippy::only_used_in_recursion)]
-    pub(crate) fn contains_yield(&self, body: &[Stmt]) -> bool {
-        for stmt in body {
-            match stmt {
-                Stmt::Expr(expr_stmt) => {
-                    if let Expr::Yield(_) | Expr::YieldFrom(_) = &*expr_stmt.value {
-                        return true;
-                    }
-                }
-                Stmt::If(if_stmt)
-                    if self.contains_yield(&if_stmt.body)
-                        || self.contains_yield(&if_stmt.orelse) =>
-                {
-                    return true;
-                }
-                Stmt::For(for_stmt)
-                    if self.contains_yield(&for_stmt.body)
-                        || self.contains_yield(&for_stmt.orelse) =>
-                {
-                    return true;
-                }
-                Stmt::While(while_stmt)
-                    if self.contains_yield(&while_stmt.body)
-                        || self.contains_yield(&while_stmt.orelse) =>
-                {
-                    return true;
-                }
-                Stmt::With(with_stmt) if self.contains_yield(&with_stmt.body) => {
-                    return true;
-                }
-                Stmt::Try(try_stmt)
-                    if self.contains_yield(&try_stmt.body)
-                        || self.contains_yield(&try_stmt.orelse)
-                        || self.contains_yield(&try_stmt.finalbody) =>
-                {
-                    return true;
-                }
-                _ => {}
-            }
-        }
-        false
     }
 
     /// Extract the yielded type from a Generator/Iterator type annotation.
@@ -232,6 +264,90 @@ mod tests {
             "import pytest\nfrom typing import Iterator\n@pytest.fixture\ndef fx() -> Iterator[str]:\n    yield \"x\"\n",
         );
         assert_eq!(ret, Some("str".to_string()));
+    }
+
+    #[test]
+    fn test_return_type_yield_inside_async_with() {
+        // An async fixture yielding inside `async with` is still a generator
+        // fixture — the yielded type must be extracted from the annotation.
+        let ret = fixture_return_type(
+            "import pytest\nfrom typing import AsyncGenerator\n@pytest.fixture\nasync def fx() -> AsyncGenerator[int, None]:\n    async with make_ctx() as c:\n        yield 1\n",
+        );
+        assert_eq!(ret, Some("int".to_string()));
+    }
+
+    #[test]
+    fn test_return_type_assignment_yield() {
+        // `x = yield ...` also makes the function a generator.
+        let ret = fixture_return_type(
+            "import pytest\nfrom typing import Generator\n@pytest.fixture\ndef fx() -> Generator[int, str, None]:\n    x = yield 1\n",
+        );
+        assert_eq!(ret, Some("int".to_string()));
+    }
+
+    #[test]
+    fn test_return_type_yield_in_except_handler_and_match() {
+        let ret = fixture_return_type(
+            "import pytest\nfrom typing import Generator\n@pytest.fixture\ndef fx() -> Generator[int, None, None]:\n    try:\n        pass\n    except ValueError:\n        yield 1\n",
+        );
+        assert_eq!(ret, Some("int".to_string()));
+
+        let ret = fixture_return_type(
+            "import pytest\nfrom typing import Generator\n@pytest.fixture\ndef fx() -> Generator[int, None, None]:\n    match 1:\n        case _:\n            yield 1\n",
+        );
+        assert_eq!(ret, Some("int".to_string()));
+    }
+
+    #[test]
+    fn test_return_type_yield_in_return_and_augassign() {
+        let ret = fixture_return_type(
+            "import pytest\nfrom typing import Generator\n@pytest.fixture\ndef fx() -> Generator[int, None, None]:\n    return (yield 1)\n",
+        );
+        assert_eq!(ret, Some("int".to_string()));
+
+        let ret = fixture_return_type(
+            "import pytest\nfrom typing import Generator\n@pytest.fixture\ndef fx() -> Generator[int, None, None]:\n    x = 0\n    x += yield 1\n",
+        );
+        assert_eq!(ret, Some("int".to_string()));
+    }
+
+    #[test]
+    fn test_return_type_yield_nested_in_expressions() {
+        // A yield nested inside a call argument still makes the function a
+        // generator.
+        let ret = fixture_return_type(
+            "import pytest\nfrom typing import Generator\n@pytest.fixture\ndef fx() -> Generator[int, None, None]:\n    x = f((yield 1))\n",
+        );
+        assert_eq!(ret, Some("int".to_string()));
+
+        // ... and inside a tuple / boolean expression.
+        let ret = fixture_return_type(
+            "import pytest\nfrom typing import Generator\n@pytest.fixture\ndef fx() -> Generator[int, None, None]:\n    x = ((yield 1), 2)\n",
+        );
+        assert_eq!(ret, Some("int".to_string()));
+    }
+
+    #[test]
+    fn test_return_type_yield_in_lambda_is_not_a_generator() {
+        // A yield inside a lambda belongs to the lambda, not the fixture:
+        // the fixture is NOT a generator, so the annotation is kept whole.
+        let ret = fixture_return_type(
+            "import pytest\nfrom typing import Generator\n@pytest.fixture\ndef fx() -> Generator[int, None, None]:\n    x = lambda: (yield 1)\n    return x\n",
+        );
+        assert_eq!(ret, Some("Generator[int, None, None]".to_string()));
+    }
+
+    #[test]
+    fn test_return_type_yield_inside_async_for_and_while() {
+        let ret = fixture_return_type(
+            "import pytest\nfrom typing import AsyncGenerator\n@pytest.fixture\nasync def fx() -> AsyncGenerator[int, None]:\n    async for i in aiter():\n        yield 1\n",
+        );
+        assert_eq!(ret, Some("int".to_string()));
+
+        let ret = fixture_return_type(
+            "import pytest\nfrom typing import Generator\n@pytest.fixture\ndef fx() -> Generator[int, None, None]:\n    while True:\n        yield 1\n",
+        );
+        assert_eq!(ret, Some("int".to_string()));
     }
 
     #[test]

@@ -7,7 +7,6 @@
 use super::decorators;
 use super::types::{FixtureDefinition, FixtureUsage, TypeImportSpec};
 use super::FixtureDatabase;
-use once_cell::sync::Lazy;
 use rustpython_parser::ast::{ArgWithDefault, Arguments, Expr, Stmt};
 use rustpython_parser::{parse, Mode};
 use std::collections::{HashMap, HashSet};
@@ -39,9 +38,10 @@ impl FixtureDatabase {
         self.file_cache
             .insert(file_path.clone(), std::sync::Arc::new(content.to_string()));
 
-        // Parse the Python code
+        // Parse the Python code and populate the AST cache so follow-up
+        // requests (completion, hover, code actions) don't re-parse.
         let parsed = match parse(content, Mode::Module, "") {
-            Ok(ast) => ast,
+            Ok(ast) => std::sync::Arc::new(ast),
             Err(e) => {
                 // Keep existing fixture data when parse fails (user is likely editing)
                 // This provides better LSP experience during editing with syntax errors
@@ -52,6 +52,11 @@ impl FixtureDatabase {
                 return;
             }
         };
+        let content_hash = Self::hash_content(content);
+        self.ast_cache.insert(
+            file_path.clone(),
+            (content_hash, std::sync::Arc::clone(&parsed)),
+        );
 
         // Clear previous usages for this file (only after successful parse)
         self.cleanup_usages_for_file(&file_path);
@@ -84,7 +89,7 @@ impl FixtureDatabase {
         let line_index = self.get_line_index(&file_path, content);
 
         // Process each statement in the module
-        if let rustpython_parser::ast::Mod::Module(module) = parsed {
+        if let rustpython_parser::ast::Mod::Module(module) = parsed.as_ref() {
             debug!("Module has {} statements", module.body.len());
 
             // First pass: collect all module-level names (imports, assignments, function/class defs)
@@ -101,8 +106,13 @@ impl FixtureDatabase {
                 .insert(file_path.clone(), module_level_names.clone());
 
             // Build a name→TypeImportSpec map from every import statement in the file.
-            // Used during fixture analysis to resolve return-type annotation imports.
+            // Used during fixture analysis to resolve return-type annotation imports,
+            // and cached for code-action and inlay-hint requests.
             let import_map = self.build_name_to_import_map(&module.body, &file_path);
+            self.name_import_map_cache.insert(
+                file_path.clone(),
+                (content_hash, std::sync::Arc::new(import_map.clone())),
+            );
 
             // Collect type aliases so that `-> MyType` can be expanded to the
             // underlying type before import resolution.
@@ -126,7 +136,7 @@ impl FixtureDatabase {
         debug!("Analysis complete for {:?}", file_path);
 
         // Periodically evict cache entries to prevent unbounded memory growth
-        self.evict_cache_if_needed();
+        self.evict_cache_if_needed(&file_path);
     }
 
     /// Remove definitions that were in a specific file.
@@ -322,7 +332,12 @@ impl FixtureDatabase {
                 |target| matches!(target, Expr::Name(name) if name.id.as_str() == "pytestmark"),
             );
             if is_pytestmark {
-                self.visit_pytestmark_assignment(Some(&assign.value), file_path, line_index);
+                self.visit_pytestmark_assignment(
+                    Some(&assign.value),
+                    file_path,
+                    content,
+                    line_index,
+                );
             }
         }
 
@@ -336,6 +351,7 @@ impl FixtureDatabase {
                 self.visit_pytestmark_assignment(
                     ann_assign.value.as_deref(),
                     file_path,
+                    content,
                     line_index,
                 );
             }
@@ -345,7 +361,7 @@ impl FixtureDatabase {
         if let Stmt::ClassDef(class_def) = stmt {
             // Check for @pytest.mark.usefixtures decorator on the class
             for decorator in &class_def.decorator_list {
-                let usefixtures = decorators::extract_usefixtures_names(decorator);
+                let usefixtures = decorators::extract_usefixtures_names(decorator, content);
                 for (fixture_name, range) in usefixtures {
                     let usage_line =
                         self.get_line_from_offset(range.start().to_usize(), line_index);
@@ -363,8 +379,8 @@ impl FixtureDatabase {
                         file_path,
                         fixture_name,
                         usage_line,
-                        start_char + 1,
-                        end_char - 1,
+                        start_char,
+                        end_char,
                         false, // usefixtures string — not a function parameter
                     );
                 }
@@ -410,7 +426,7 @@ impl FixtureDatabase {
 
         // Check for @pytest.mark.usefixtures decorator on the function
         for decorator in decorator_list {
-            let usefixtures = decorators::extract_usefixtures_names(decorator);
+            let usefixtures = decorators::extract_usefixtures_names(decorator, content);
             for (fixture_name, range) in usefixtures {
                 let usage_line = self.get_line_from_offset(range.start().to_usize(), line_index);
                 let start_char =
@@ -427,8 +443,8 @@ impl FixtureDatabase {
                     file_path,
                     fixture_name,
                     usage_line,
-                    start_char + 1,
-                    end_char - 1,
+                    start_char,
+                    end_char,
                     false, // usefixtures string — not a function parameter
                 );
             }
@@ -436,7 +452,8 @@ impl FixtureDatabase {
 
         // Check for @pytest.mark.parametrize with indirect=True on the function
         for decorator in decorator_list {
-            let indirect_fixtures = decorators::extract_parametrize_indirect_fixtures(decorator);
+            let indirect_fixtures =
+                decorators::extract_parametrize_indirect_fixtures(decorator, content);
             for (fixture_name, range) in indirect_fixtures {
                 let usage_line = self.get_line_from_offset(range.start().to_usize(), line_index);
                 let start_char =
@@ -453,8 +470,8 @@ impl FixtureDatabase {
                     file_path,
                     fixture_name,
                     usage_line,
-                    start_char + 1,
-                    end_char - 1,
+                    start_char,
+                    end_char,
                     false, // parametrize indirect string — not a function parameter
                 );
             }
@@ -726,13 +743,14 @@ impl FixtureDatabase {
         &self,
         value: Option<&Expr>,
         file_path: &PathBuf,
+        content: &str,
         line_index: &[usize],
     ) {
         let Some(value) = value else {
             return;
         };
 
-        let usefixtures = decorators::extract_usefixtures_from_expr(value);
+        let usefixtures = decorators::extract_usefixtures_from_expr(value, content);
         for (fixture_name, range) in usefixtures {
             let usage_line = self.get_line_from_offset(range.start().to_usize(), line_index);
             let start_char =
@@ -748,8 +766,8 @@ impl FixtureDatabase {
                 file_path,
                 fixture_name,
                 usage_line,
-                start_char.saturating_add(1),
-                end_char.saturating_sub(1),
+                start_char,
+                end_char,
                 false, // pytestmark usefixtures string — not a function parameter
             );
         }
@@ -758,7 +776,7 @@ impl FixtureDatabase {
 
 /// Python builtin types that never require an import statement.
 /// Uses O(1) `HashSet` lookup, consistent with `is_standard_library_module()`.
-static BUILTINS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
+static BUILTINS: std::sync::LazyLock<HashSet<&'static str>> = std::sync::LazyLock::new(|| {
     [
         "int",
         "str",
@@ -1149,133 +1167,8 @@ impl FixtureDatabase {
     /// Find the line number of the first yield statement in a function body.
     /// Returns None if no yield statement is found.
     fn find_yield_line(&self, body: &[Stmt], line_index: &[usize]) -> Option<usize> {
-        for stmt in body {
-            if let Some(line) = self.find_yield_in_stmt(stmt, line_index) {
-                return Some(line);
-            }
-        }
-        None
-    }
-
-    /// Recursively search for yield statements in a statement.
-    fn find_yield_in_stmt(&self, stmt: &Stmt, line_index: &[usize]) -> Option<usize> {
-        match stmt {
-            Stmt::Expr(expr_stmt) => self.find_yield_in_expr(&expr_stmt.value, line_index),
-            Stmt::If(if_stmt) => {
-                // Check body
-                for s in &if_stmt.body {
-                    if let Some(line) = self.find_yield_in_stmt(s, line_index) {
-                        return Some(line);
-                    }
-                }
-                // Check elif/else
-                for s in &if_stmt.orelse {
-                    if let Some(line) = self.find_yield_in_stmt(s, line_index) {
-                        return Some(line);
-                    }
-                }
-                None
-            }
-            Stmt::With(with_stmt) => {
-                for s in &with_stmt.body {
-                    if let Some(line) = self.find_yield_in_stmt(s, line_index) {
-                        return Some(line);
-                    }
-                }
-                None
-            }
-            Stmt::AsyncWith(with_stmt) => {
-                for s in &with_stmt.body {
-                    if let Some(line) = self.find_yield_in_stmt(s, line_index) {
-                        return Some(line);
-                    }
-                }
-                None
-            }
-            Stmt::Try(try_stmt) => {
-                for s in &try_stmt.body {
-                    if let Some(line) = self.find_yield_in_stmt(s, line_index) {
-                        return Some(line);
-                    }
-                }
-                for handler in &try_stmt.handlers {
-                    let rustpython_parser::ast::ExceptHandler::ExceptHandler(h) = handler;
-                    for s in &h.body {
-                        if let Some(line) = self.find_yield_in_stmt(s, line_index) {
-                            return Some(line);
-                        }
-                    }
-                }
-                for s in &try_stmt.orelse {
-                    if let Some(line) = self.find_yield_in_stmt(s, line_index) {
-                        return Some(line);
-                    }
-                }
-                for s in &try_stmt.finalbody {
-                    if let Some(line) = self.find_yield_in_stmt(s, line_index) {
-                        return Some(line);
-                    }
-                }
-                None
-            }
-            Stmt::For(for_stmt) => {
-                for s in &for_stmt.body {
-                    if let Some(line) = self.find_yield_in_stmt(s, line_index) {
-                        return Some(line);
-                    }
-                }
-                for s in &for_stmt.orelse {
-                    if let Some(line) = self.find_yield_in_stmt(s, line_index) {
-                        return Some(line);
-                    }
-                }
-                None
-            }
-            Stmt::AsyncFor(for_stmt) => {
-                for s in &for_stmt.body {
-                    if let Some(line) = self.find_yield_in_stmt(s, line_index) {
-                        return Some(line);
-                    }
-                }
-                for s in &for_stmt.orelse {
-                    if let Some(line) = self.find_yield_in_stmt(s, line_index) {
-                        return Some(line);
-                    }
-                }
-                None
-            }
-            Stmt::While(while_stmt) => {
-                for s in &while_stmt.body {
-                    if let Some(line) = self.find_yield_in_stmt(s, line_index) {
-                        return Some(line);
-                    }
-                }
-                for s in &while_stmt.orelse {
-                    if let Some(line) = self.find_yield_in_stmt(s, line_index) {
-                        return Some(line);
-                    }
-                }
-                None
-            }
-            _ => None,
-        }
-    }
-
-    /// Find yield expression and return its line number.
-    fn find_yield_in_expr(&self, expr: &Expr, line_index: &[usize]) -> Option<usize> {
-        match expr {
-            Expr::Yield(yield_expr) => {
-                let line =
-                    self.get_line_from_offset(yield_expr.range.start().to_usize(), line_index);
-                Some(line)
-            }
-            Expr::YieldFrom(yield_from) => {
-                let line =
-                    self.get_line_from_offset(yield_from.range.start().to_usize(), line_index);
-                Some(line)
-            }
-            _ => None,
-        }
+        super::docstring::find_yield_offset(body)
+            .map(|offset| self.get_line_from_offset(offset, line_index))
     }
 }
 

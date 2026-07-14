@@ -70,9 +70,59 @@ pub fn is_usefixtures_decorator(expr: &Expr) -> bool {
     is_pytest_mark_decorator(expr, "usefixtures")
 }
 
+/// Returns the range of a string literal's content, without the surrounding
+/// prefix (`r`, `b`, `u`, `f`) and quote run (`'`/`"`, single or triple).
+///
+/// `literal` is the literal's exact source text and `range` its full range;
+/// falls back to the full range when the text doesn't look like a string.
+fn literal_content_range(
+    literal: &str,
+    range: rustpython_parser::text_size::TextRange,
+) -> rustpython_parser::text_size::TextRange {
+    use rustpython_parser::text_size::{TextRange, TextSize};
+
+    let bytes = literal.as_bytes();
+    let mut prefix = 0;
+    while prefix < bytes.len()
+        && matches!(
+            bytes[prefix],
+            b'r' | b'R' | b'b' | b'B' | b'u' | b'U' | b'f' | b'F'
+        )
+    {
+        prefix += 1;
+    }
+    let Some(&quote) = bytes.get(prefix) else {
+        return range;
+    };
+    if quote != b'"' && quote != b'\'' {
+        return range;
+    }
+    let quote_len =
+        if bytes.len() >= prefix + 3 && bytes[prefix + 1] == quote && bytes[prefix + 2] == quote {
+            3
+        } else {
+            1
+        };
+
+    let content_offset = prefix + quote_len;
+    let content_end = literal.len().saturating_sub(quote_len);
+    if content_offset > content_end {
+        return range;
+    }
+    TextRange::new(
+        range.start() + TextSize::from(content_offset as u32),
+        range.start() + TextSize::from(content_end as u32),
+    )
+}
+
 /// Extracts fixture names from @pytest.mark.usefixtures("fix1", "fix2", ...) decorator.
+///
+/// Each name is paired with the range of the string literal's *content*
+/// (quotes and any string prefix excluded), so the range covers exactly the
+/// fixture name. `content` is the full source of the file the decorator is in.
 pub fn extract_usefixtures_names(
     expr: &Expr,
+    content: &str,
 ) -> Vec<(String, rustpython_parser::text_size::TextRange)> {
     let Expr::Call(call) = expr else {
         return vec![];
@@ -86,7 +136,10 @@ pub fn extract_usefixtures_names(
         .filter_map(|arg| {
             if let Expr::Constant(c) = arg {
                 if let rustpython_parser::ast::Constant::Str(s) = &c.value {
-                    return Some((s.to_string(), c.range));
+                    let literal = content
+                        .get(c.range.start().to_usize()..c.range.end().to_usize())
+                        .unwrap_or("");
+                    return Some((s.to_string(), literal_content_range(literal, c.range)));
                 }
             }
             None
@@ -102,21 +155,22 @@ pub fn extract_usefixtures_names(
 ///   pytestmark = (pytest.mark.usefixtures("fix1"), pytest.mark.usefixtures("fix2"))
 pub fn extract_usefixtures_from_expr(
     expr: &Expr,
+    content: &str,
 ) -> Vec<(String, rustpython_parser::text_size::TextRange)> {
     match expr {
         // Direct call: pytest.mark.usefixtures("fix1", "fix2")
-        Expr::Call(_) => extract_usefixtures_names(expr),
+        Expr::Call(_) => extract_usefixtures_names(expr, content),
         // List: [pytest.mark.usefixtures("fix1"), ...]
         Expr::List(list) => list
             .elts
             .iter()
-            .flat_map(extract_usefixtures_from_expr)
+            .flat_map(|e| extract_usefixtures_from_expr(e, content))
             .collect(),
         // Tuple: (pytest.mark.usefixtures("fix1"), ...)
         Expr::Tuple(tuple) => tuple
             .elts
             .iter()
-            .flat_map(extract_usefixtures_from_expr)
+            .flat_map(|e| extract_usefixtures_from_expr(e, content))
             .collect(),
         _ => vec![],
     }
@@ -130,10 +184,11 @@ pub fn is_parametrize_decorator(expr: &Expr) -> bool {
 /// Returns true if `name` is a plain Python identifier (the only thing a parametrize argname can
 /// legally be). Used to reject anything we couldn't cleanly locate in the source, e.g. implicitly
 /// concatenated string literals, so a rename never corrupts the file.
+/// Unicode-aware to match `is_valid_python_identifier` in the rename provider.
 fn is_plain_identifier(name: &str) -> bool {
     let mut chars = name.chars();
-    matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
-        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+    matches!(chars.next(), Some(c) if c == '_' || c.is_alphabetic())
+        && chars.all(|c| c == '_' || c.is_alphanumeric())
 }
 
 /// Splits the *source text* of a string literal into argnames, each paired with the precise
@@ -308,72 +363,28 @@ fn collect_string_constants(elts: &[Expr]) -> std::collections::HashSet<String> 
         .collect()
 }
 
-/// Extracts fixture names from @pytest.mark.parametrize when indirect=True.
+/// Extracts fixture names from @pytest.mark.parametrize when they are marked
+/// indirect (`indirect=True` or `indirect=[names]`, keyword or positional).
+///
+/// Each name is paired with the precise range of its token inside the
+/// argnames literal (via [`extract_parametrize_argnames`]), so usages point
+/// at the parameter name itself rather than a whole string literal.
 pub fn extract_parametrize_indirect_fixtures(
     expr: &Expr,
+    content: &str,
 ) -> Vec<(String, rustpython_parser::text_size::TextRange)> {
-    let Expr::Call(call) = expr else {
-        return vec![];
-    };
-    if !is_parametrize_decorator(&call.func) {
+    let argnames = extract_parametrize_argnames(expr, content);
+    if argnames.is_empty() {
         return vec![];
     }
 
-    let indirect_value = call.keywords.iter().find_map(|kw| {
-        if kw.arg.as_ref().is_some_and(|a| a.as_str() == "indirect") {
-            Some(&kw.value)
-        } else {
-            None
-        }
-    });
+    let names: Vec<String> = argnames.iter().map(|(name, _)| name.clone()).collect();
+    let indirect = extract_parametrize_indirect_names(expr, &names);
 
-    let Some(indirect) = indirect_value else {
-        return vec![];
-    };
-
-    let Some(first_arg) = call.args.first() else {
-        return vec![];
-    };
-
-    let Expr::Constant(param_const) = first_arg else {
-        return vec![];
-    };
-
-    let rustpython_parser::ast::Constant::Str(param_str) = &param_const.value else {
-        return vec![];
-    };
-
-    let param_names: Vec<&str> = param_str.split(',').map(|s| s.trim()).collect();
-
-    match indirect {
-        Expr::Constant(c) => {
-            if matches!(c.value, rustpython_parser::ast::Constant::Bool(true)) {
-                return param_names
-                    .into_iter()
-                    .map(|name| (name.to_string(), param_const.range))
-                    .collect();
-            }
-        }
-        Expr::List(list) => {
-            return list
-                .elts
-                .iter()
-                .filter_map(|elt| {
-                    if let Expr::Constant(c) = elt {
-                        if let rustpython_parser::ast::Constant::Str(s) = &c.value {
-                            if param_names.contains(&s.as_str()) {
-                                return Some((s.to_string(), c.range));
-                            }
-                        }
-                    }
-                    None
-                })
-                .collect();
-        }
-        _ => {}
-    }
-
-    vec![]
+    argnames
+        .into_iter()
+        .filter(|(name, _)| indirect.contains(name))
+        .collect()
 }
 
 /// Extracts whether autouse=True is set on a @pytest.fixture decorator.

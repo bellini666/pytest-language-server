@@ -21,9 +21,9 @@ impl Backend {
                 diagnostics.push(Diagnostic {
                     range: Self::create_range(
                         line,
-                        fixture.start_char as u32,
+                        self.to_lsp_col(file_path, fixture.line, fixture.start_char),
                         line,
-                        fixture.end_char as u32,
+                        self.to_lsp_col(file_path, fixture.line, fixture.end_char),
                     ),
                     severity: Some(DiagnosticSeverity::WARNING),
                     code: Some(NumberOrString::String("undeclared-fixture".to_string())),
@@ -49,9 +49,9 @@ impl Backend {
                 diagnostics.push(Diagnostic {
                     range: Self::create_range(
                         line,
-                        cycle.fixture.start_char as u32,
+                        self.to_lsp_col(file_path, cycle.fixture.line, cycle.fixture.start_char),
                         line,
-                        cycle.fixture.end_char as u32,
+                        self.to_lsp_col(file_path, cycle.fixture.line, cycle.fixture.end_char),
                     ),
                     severity: Some(DiagnosticSeverity::ERROR),
                     code: Some(NumberOrString::String("circular-dependency".to_string())),
@@ -73,9 +73,17 @@ impl Backend {
                 diagnostics.push(Diagnostic {
                     range: Self::create_range(
                         line,
-                        mismatch.fixture.start_char as u32,
+                        self.to_lsp_col(
+                            file_path,
+                            mismatch.fixture.line,
+                            mismatch.fixture.start_char,
+                        ),
                         line,
-                        mismatch.fixture.end_char as u32,
+                        self.to_lsp_col(
+                            file_path,
+                            mismatch.fixture.line,
+                            mismatch.fixture.end_char,
+                        ),
                     ),
                     severity: Some(DiagnosticSeverity::WARNING),
                     code: Some(NumberOrString::String("scope-mismatch".to_string())),

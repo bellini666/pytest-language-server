@@ -131,6 +131,21 @@ impl Config {
             })
             .collect();
 
+        // These options are accepted but not implemented yet; warn instead of
+        // silently ignoring the user's configuration.
+        if !raw.fixture_paths.is_empty() {
+            warn!(
+                "'fixture_paths' in {:?} is not implemented yet and will be ignored",
+                path
+            );
+        }
+        if !raw.skip_plugins.is_empty() {
+            warn!(
+                "'skip_plugins' in {:?} is not implemented yet and will be ignored",
+                path
+            );
+        }
+
         debug!(
             "Loaded config from {:?}: {} exclude patterns, {} disabled diagnostics",
             path,

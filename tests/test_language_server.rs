@@ -22,15 +22,7 @@ fn make_backend_with_db(db: Arc<FixtureDatabase>) -> Backend {
     let slot_clone = slot.clone();
     let (_svc, _sock) = LspService::new(move |client| {
         let b = Backend::new(client, db.clone());
-        *slot_clone.lock().unwrap() = Some(Backend {
-            client: b.client.clone(),
-            fixture_db: b.fixture_db.clone(),
-            workspace_root: b.workspace_root.clone(),
-            original_workspace_root: b.original_workspace_root.clone(),
-            scan_task: b.scan_task.clone(),
-            uri_cache: b.uri_cache.clone(),
-            config: b.config.clone(),
-        });
+        *slot_clone.lock().unwrap() = Some(b.clone());
         b
     });
     let backend = slot.lock().unwrap().take().expect("backend created");
@@ -2273,4 +2265,210 @@ async fn test_publish_diagnostics_clean_file_publishes_nothing() {
     backend
         .publish_diagnostics_for_file(&conftest_uri, &conftest_path)
         .await;
+}
+
+// ── Position-encoding negotiation ────────────────────────────────────────
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_initialize_negotiates_utf8_when_client_supports_it() {
+    let backend = make_backend();
+    let params = InitializeParams {
+        capabilities: ClientCapabilities {
+            general: Some(GeneralClientCapabilities {
+                position_encodings: Some(vec![
+                    PositionEncodingKind::UTF8,
+                    PositionEncodingKind::UTF16,
+                ]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let result = backend.initialize(params).await.unwrap();
+    assert_eq!(
+        result.capabilities.position_encoding,
+        Some(PositionEncodingKind::UTF8)
+    );
+    assert!(!backend
+        .client_utf16
+        .load(std::sync::atomic::Ordering::Relaxed));
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_initialize_defaults_to_utf16_encoding() {
+    let backend = make_backend();
+    let result = backend
+        .initialize(InitializeParams::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        result.capabilities.position_encoding,
+        Some(PositionEncodingKind::UTF16)
+    );
+    assert!(backend
+        .client_utf16
+        .load(std::sync::atomic::Ordering::Relaxed));
+}
+
+// ── Multi-root workspaces ─────────────────────────────────────────────────
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_initialize_scans_all_workspace_folders() {
+    use std::fs;
+
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    let base = std::env::temp_dir().join("test_ls_multi_root");
+    let root_a = base.join("root_a");
+    let root_b = base.join("root_b");
+    fs::create_dir_all(&root_a).unwrap();
+    fs::create_dir_all(&root_b).unwrap();
+    fs::write(
+        root_a.join("conftest.py"),
+        "import pytest\n\n@pytest.fixture\ndef fixture_root_a():\n    return 1\n",
+    )
+    .unwrap();
+    fs::write(
+        root_b.join("conftest.py"),
+        "import pytest\n\n@pytest.fixture\ndef fixture_root_b():\n    return 2\n",
+    )
+    .unwrap();
+
+    let params = InitializeParams {
+        workspace_folders: Some(vec![
+            WorkspaceFolder {
+                uri: Uri::from_file_path(&root_a).unwrap(),
+                name: "root_a".to_string(),
+            },
+            WorkspaceFolder {
+                uri: Uri::from_file_path(&root_b).unwrap(),
+                name: "root_b".to_string(),
+            },
+        ]),
+        ..Default::default()
+    };
+
+    backend.initialize(params).await.unwrap();
+
+    // Wait for the background scan task to finish before asserting.
+    if let Some(handle) = backend.scan_task.lock().await.take() {
+        handle.await.unwrap();
+    }
+
+    assert!(
+        db.definitions.contains_key("fixture_root_a"),
+        "first workspace folder should be scanned"
+    );
+    assert!(
+        db.definitions.contains_key("fixture_root_b"),
+        "second workspace folder should be scanned"
+    );
+}
+
+// ── did_change debounce ───────────────────────────────────────────────────
+
+fn did_change_params(uri: Uri, version: i32, text: &str) -> DidChangeTextDocumentParams {
+    DidChangeTextDocumentParams {
+        text_document: VersionedTextDocumentIdentifier { uri, version },
+        content_changes: vec![TextDocumentContentChangeEvent {
+            range: None,
+            range_length: None,
+            text: text.to_string(),
+        }],
+    }
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_did_change_debounce_publishes_after_quiet_period() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+    let uri = turi("test_ls_debounce", "test_example.py");
+
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "python".to_string(),
+                version: 1,
+                text: "def test_a():\n    pass\n".to_string(),
+            },
+        })
+        .await;
+
+    // Two rapid changes bump the generation twice; the assertion below pins
+    // the synchronous generation bookkeeping. The sleep then lets both
+    // debounce tasks run: the first is superseded (early-return path) and
+    // the second publishes — exercised for coverage, observable effects go
+    // to the mock client.
+    backend
+        .did_change(did_change_params(
+            uri.clone(),
+            2,
+            "def test_a():\n    x = 1\n",
+        ))
+        .await;
+    backend
+        .did_change(did_change_params(
+            uri.clone(),
+            3,
+            "def test_a():\n    x = 2\n",
+        ))
+        .await;
+
+    // Let the debounce window elapse so the pending task runs to completion.
+    tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+
+    let file_path = tfile("test_ls_debounce", "test_example.py");
+    let generation = backend.change_generation.get(&file_path).map(|g| *g);
+    assert_eq!(generation, Some(2), "both changes must bump the generation");
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_did_close_while_debounce_pending_clears_generation() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+    let uri = turi("test_ls_debounce_close", "test_example.py");
+
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "python".to_string(),
+                version: 1,
+                text: "def test_a():\n    pass\n".to_string(),
+            },
+        })
+        .await;
+    backend
+        .did_change(did_change_params(
+            uri.clone(),
+            2,
+            "def test_a():\n    x = 1\n",
+        ))
+        .await;
+
+    // Close while the debounce task is still sleeping: did_close drops the
+    // generation entry synchronously (asserted below) and the pending task
+    // early-returns on the mismatch when it wakes during the sleep.
+    backend
+        .did_close(DidCloseTextDocumentParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+        })
+        .await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+
+    let file_path = tfile("test_ls_debounce_close", "test_example.py");
+    assert!(
+        backend.change_generation.get(&file_path).is_none(),
+        "closed file must not retain a debounce generation entry"
+    );
 }

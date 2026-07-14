@@ -37,6 +37,14 @@ sed -i.bak "s/^version = \".*\"/version = \"$NEW_VERSION\"/" extensions/zed-exte
 if [ -f "extensions/vscode-extension/package.json" ]; then
     sed -i.bak "s/\"version\": \".*\"/\"version\": \"$NEW_VERSION\"/" extensions/vscode-extension/package.json && rm extensions/vscode-extension/package.json.bak
     echo "  - extensions/vscode-extension/package.json"
+    # Keep package-lock.json in sync — CI uses `npm ci`, which fails on a
+    # package.json/lockfile version mismatch.
+    if command -v npm >/dev/null; then
+        (cd extensions/vscode-extension && npm install --package-lock-only --ignore-scripts >/dev/null)
+        echo "  - extensions/vscode-extension/package-lock.json"
+    else
+        echo "  ! npm not found — update extensions/vscode-extension/package-lock.json manually"
+    fi
 fi
 
 # Update IntelliJ plugin

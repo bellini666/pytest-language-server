@@ -174,11 +174,6 @@ impl ImportLayout {
         self.lines.iter().map(|s| s.as_str()).collect()
     }
 
-    /// Get a single 0-based line as `&str` (empty string if out of bounds).
-    pub fn line(&self, idx: usize) -> &str {
-        self.lines.get(idx).map(|s| s.as_str()).unwrap_or("")
-    }
-
     /// Find a module-level `from <module> import …` entry that is *not* a
     /// star-import, regardless of whether it is single-line or multiline.
     ///

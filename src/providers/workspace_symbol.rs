@@ -42,8 +42,13 @@ impl Backend {
                 };
 
                 let line = Self::internal_line_to_lsp(definition.line);
-                let start_char = definition.start_char as u32;
-                let end_char = definition.end_char as u32;
+                let start_char = self.to_lsp_col(
+                    &definition.file_path,
+                    definition.line,
+                    definition.start_char,
+                );
+                let end_char =
+                    self.to_lsp_col(&definition.file_path, definition.line, definition.end_char);
 
                 let location = Location {
                     uri,

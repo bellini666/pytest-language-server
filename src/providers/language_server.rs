@@ -19,81 +19,103 @@ impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         info!("Initialize request received");
 
+        // Negotiate position encoding: internal columns are UTF-8 byte offsets,
+        // so prefer utf-8 when the client supports it and skip conversion entirely.
+        let client_supports_utf8 = params
+            .capabilities
+            .general
+            .as_ref()
+            .and_then(|g| g.position_encodings.as_ref())
+            .is_some_and(|encodings| encodings.contains(&PositionEncodingKind::UTF8));
+        self.client_utf16
+            .store(!client_supports_utf8, std::sync::atomic::Ordering::Relaxed);
+        let position_encoding = if client_supports_utf8 {
+            PositionEncodingKind::UTF8
+        } else {
+            PositionEncodingKind::UTF16
+        };
+
         // Scan the workspace for fixtures on initialization
         // This is done in a background task to avoid blocking the LSP initialization
         // Try workspace_folders first (preferred), fall back to deprecated root_uri
-        let root_uri = params
+        let root_uris: Vec<Uri> = params
             .workspace_folders
             .as_ref()
-            .and_then(|folders| folders.first())
-            .map(|folder| folder.uri.clone())
+            .map(|folders| folders.iter().map(|f| f.uri.clone()).collect())
+            .filter(|uris: &Vec<Uri>| !uris.is_empty())
             .or_else(|| {
                 #[allow(deprecated)]
-                params.root_uri.clone()
-            });
+                params.root_uri.clone().map(|uri| vec![uri])
+            })
+            .unwrap_or_default();
 
-        if let Some(root_uri) = root_uri {
-            if let Some(root_path) = root_uri.to_file_path() {
-                let root_path = root_path.to_path_buf();
-                info!("Starting workspace scan: {:?}", root_path);
+        let root_paths: Vec<std::path::PathBuf> = root_uris
+            .iter()
+            .filter_map(|uri| uri.to_file_path().map(|p| p.to_path_buf()))
+            .collect();
 
-                // Store the original workspace root (as client provided it)
-                *self.original_workspace_root.write().await = Some(root_path.clone());
+        if let Some(first_root) = root_paths.first().cloned() {
+            info!("Starting workspace scan: {:?}", root_paths);
 
-                // Store the canonical workspace root (with symlinks resolved)
-                let canonical_root = root_path
-                    .canonicalize()
-                    .unwrap_or_else(|_| root_path.clone());
-                *self.workspace_root.write().await = Some(canonical_root.clone());
+            // Store the original workspace root (as client provided it).
+            // Config and relative-path display use the first folder.
+            *self.original_workspace_root.write().await = Some(first_root.clone());
 
-                // Load configuration from pyproject.toml
-                let loaded_config = config::Config::load(&root_path);
-                info!("Loaded config: {:?}", loaded_config);
-                *self.config.write().await = loaded_config;
+            // Store the canonical workspace root (with symlinks resolved)
+            let canonical_root = first_root
+                .canonicalize()
+                .unwrap_or_else(|_| first_root.clone());
+            *self.workspace_root.write().await = Some(canonical_root.clone());
 
-                // Clone references for the background task
-                let fixture_db = Arc::clone(&self.fixture_db);
-                let client = self.client.clone();
-                let exclude_patterns = self.config.read().await.exclude.clone();
+            // Load configuration from pyproject.toml
+            let loaded_config = config::Config::load(&first_root);
+            info!("Loaded config: {:?}", loaded_config);
+            *self.config.write().await = loaded_config;
 
-                // Spawn workspace scanning in a background task
-                // This allows the LSP to respond immediately while scanning continues
-                let scan_handle = tokio::spawn(async move {
-                    client
-                        .log_message(
-                            MessageType::INFO,
-                            format!("Scanning workspace: {:?}", root_path),
-                        )
-                        .await;
+            // Clone references for the background task
+            let fixture_db = Arc::clone(&self.fixture_db);
+            let client = self.client.clone();
+            let exclude_patterns = self.config.read().await.exclude.clone();
 
-                    // Run the synchronous scan in a blocking task to avoid blocking the async runtime
-                    let scan_result = tokio::task::spawn_blocking(move || {
-                        fixture_db.scan_workspace_with_excludes(&root_path, &exclude_patterns);
-                    })
+            // Spawn workspace scanning in a background task
+            // This allows the LSP to respond immediately while scanning continues
+            let scan_handle = tokio::spawn(async move {
+                client
+                    .log_message(
+                        MessageType::INFO,
+                        format!("Scanning workspace: {:?}", root_paths),
+                    )
                     .await;
 
-                    match scan_result {
-                        Ok(()) => {
-                            info!("Workspace scan complete");
-                            client
-                                .log_message(MessageType::INFO, "Workspace scan complete")
-                                .await;
-                        }
-                        Err(e) => {
-                            error!("Workspace scan failed: {:?}", e);
-                            client
-                                .log_message(
-                                    MessageType::ERROR,
-                                    format!("Workspace scan failed: {:?}", e),
-                                )
-                                .await;
-                        }
+                // Run the synchronous scan in a blocking task to avoid blocking the async runtime
+                let scan_result = tokio::task::spawn_blocking(move || {
+                    for root_path in &root_paths {
+                        fixture_db.scan_workspace_with_excludes(root_path, &exclude_patterns);
                     }
-                });
+                })
+                .await;
 
-                // Store the handle so we can cancel it on shutdown
-                *self.scan_task.lock().await = Some(scan_handle);
-            }
+                match scan_result {
+                    Ok(()) => {
+                        info!("Workspace scan complete");
+                        client
+                            .log_message(MessageType::INFO, "Workspace scan complete")
+                            .await;
+                    }
+                    Err(e) => {
+                        error!("Workspace scan failed: {:?}", e);
+                        client
+                            .log_message(
+                                MessageType::ERROR,
+                                format!("Workspace scan failed: {:?}", e),
+                            )
+                            .await;
+                    }
+                }
+            });
+
+            // Store the handle so we can cancel it on shutdown
+            *self.scan_task.lock().await = Some(scan_handle);
         } else {
             warn!("No root URI provided in initialize - workspace scanning disabled");
             self.client
@@ -111,6 +133,7 @@ impl LanguageServer for Backend {
                 version: Some(env!("CARGO_PKG_VERSION").to_string()),
             }),
             capabilities: ServerCapabilities {
+                position_encoding: Some(position_encoding),
                 definition_provider: Some(OneOf::Left(true)),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 references_provider: Some(OneOf::Left(true)),
@@ -222,18 +245,38 @@ impl LanguageServer for Backend {
                 self.fixture_db
                     .analyze_file(file_path.clone(), &change.text);
 
-                // Publish diagnostics for undeclared fixtures
-                self.publish_diagnostics_for_file(&uri, &file_path).await;
+                // Debounce the follow-on work (cycle/scope diagnostics and the
+                // inlay-hint refresh round trip) so rapid keystrokes coalesce
+                // into a single pass once typing pauses.
+                let generation = {
+                    let mut entry = self.change_generation.entry(file_path.clone()).or_insert(0);
+                    *entry += 1;
+                    *entry
+                };
 
-                // Request inlay hint refresh so editors update hints after edits
-                // (e.g., when user adds/removes type annotations)
-                if let Err(e) = self.client.inlay_hint_refresh().await {
-                    // Not all clients support this, so just log and continue
-                    info!(
-                        "Inlay hint refresh request failed (client may not support it): {}",
-                        e
-                    );
-                }
+                let backend = self.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+                    // A newer change superseded this one — its task will publish.
+                    let current = backend.change_generation.get(&file_path).map(|g| *g);
+                    if current != Some(generation) {
+                        return;
+                    }
+
+                    // Publish diagnostics for undeclared fixtures
+                    backend.publish_diagnostics_for_file(&uri, &file_path).await;
+
+                    // Request inlay hint refresh so editors update hints after edits
+                    // (e.g., when user adds/removes type annotations)
+                    if let Err(e) = backend.client.inlay_hint_refresh().await {
+                        // Not all clients support this, so just log and continue
+                        info!(
+                            "Inlay hint refresh request failed (client may not support it): {}",
+                            e
+                        );
+                    }
+                });
             }
         }
     }
@@ -310,6 +353,13 @@ impl LanguageServer for Backend {
             self.fixture_db.cleanup_file_cache(&file_path);
             // Clean up URI cache entry
             self.uri_cache.remove(&file_path);
+            // Drop the debounce counter for this file
+            self.change_generation.remove(&file_path);
+
+            // Clear published diagnostics so closed files don't show stale warnings
+            self.client
+                .publish_diagnostics(uri.clone(), Vec::new(), None)
+                .await;
         }
     }
 

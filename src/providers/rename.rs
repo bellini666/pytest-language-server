@@ -304,7 +304,17 @@ impl Backend {
         };
 
         let line_index = FixtureDatabase::build_line_index(content);
-        let cursor_offset = *line_index.get(position.line as usize)? + position.character as usize;
+        let line_start = *line_index.get(position.line as usize)?;
+        let line_end = line_index
+            .get(position.line as usize + 1)
+            .copied()
+            .unwrap_or(content.len());
+        let cursor_byte_col = if self.client_utf16.load(std::sync::atomic::Ordering::Relaxed) {
+            super::utf16_col_to_byte(&content[line_start..line_end], position.character as usize)
+        } else {
+            position.character as usize
+        };
+        let cursor_offset = line_start + cursor_byte_col;
 
         // Innermost *parametrized* function whose decorators or body contain the cursor. Filtering
         // to parametrized functions means a cursor inside a nested closure that references the
@@ -396,7 +406,7 @@ impl Backend {
             .copied()
             .unwrap_or(occurrences[0]);
 
-        let to_lsp = |tr: &TextRange| self.text_range_to_lsp(tr, &line_index);
+        let to_lsp = |tr: &TextRange| self.text_range_to_lsp(tr, content, &line_index);
         Some(RenameTarget {
             cursor_token: to_lsp(&cursor_tr),
             edits: occurrences.iter().map(to_lsp).collect(),
@@ -404,28 +414,28 @@ impl Backend {
     }
 
     /// Convert a source [`TextRange`] into an LSP [`Range`] using the file's line index.
-    fn text_range_to_lsp(&self, tr: &TextRange, line_index: &[usize]) -> Range {
-        let start_offset = tr.start().to_usize();
-        let end_offset = tr.end().to_usize();
-        let start_line = self
-            .fixture_db
-            .get_line_from_offset(start_offset, line_index);
-        let end_line = self.fixture_db.get_line_from_offset(end_offset, line_index);
+    fn text_range_to_lsp(&self, tr: &TextRange, content: &str, line_index: &[usize]) -> Range {
+        let utf16 = self.client_utf16.load(std::sync::atomic::Ordering::Relaxed);
+        let to_position = |offset: usize| {
+            let line = self.fixture_db.get_line_from_offset(offset, line_index);
+            let byte_col = self
+                .fixture_db
+                .get_char_position_from_offset(offset, line_index);
+            let character = if utf16 {
+                let line_start = line_index[line - 1];
+                let line_end = line_index.get(line).copied().unwrap_or(content.len());
+                super::byte_col_to_utf16(&content[line_start..line_end], byte_col) as u32
+            } else {
+                byte_col as u32
+            };
+            Position {
+                line: (line - 1) as u32,
+                character,
+            }
+        };
         Range {
-            start: Position {
-                line: (start_line - 1) as u32,
-                character: self
-                    .fixture_db
-                    .get_char_position_from_offset(start_offset, line_index)
-                    as u32,
-            },
-            end: Position {
-                line: (end_line - 1) as u32,
-                character: self
-                    .fixture_db
-                    .get_char_position_from_offset(end_offset, line_index)
-                    as u32,
-            },
+            start: to_position(tr.start().to_usize()),
+            end: to_position(tr.end().to_usize()),
         }
     }
 }
@@ -489,12 +499,15 @@ fn collect_functions<'a>(stmts: &'a [Stmt], out: &mut Vec<FuncCtx<'a>>) {
 }
 
 fn is_valid_python_identifier(name: &str) -> bool {
+    // Approximates Python's XID_Start/XID_Continue rules with Unicode
+    // alphanumerics — accepts legal identifiers like `café` without pulling
+    // in a unicode-ident dependency.
     let mut chars = name.chars();
     match chars.next() {
-        Some(c) if c == '_' || c.is_ascii_alphabetic() => {}
+        Some(c) if c == '_' || c.is_alphabetic() => {}
         _ => return false,
     }
-    if !chars.all(|c| c == '_' || c.is_ascii_alphanumeric()) {
+    if !chars.all(|c| c == '_' || c.is_alphanumeric()) {
         return false;
     }
     !PYTHON_KEYWORDS.contains(&name)

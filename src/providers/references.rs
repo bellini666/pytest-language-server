@@ -26,11 +26,11 @@ impl Backend {
             );
 
             // First, find which fixture we're looking at (definition or usage)
-            if let Some(fixture_name) = self.fixture_db.find_fixture_at_position(
-                &file_path,
-                position.line,
-                position.character,
-            ) {
+            let byte_col = self.to_byte_col(&file_path, position);
+            if let Some(fixture_name) =
+                self.fixture_db
+                    .find_fixture_at_position(&file_path, position.line, byte_col)
+            {
                 info!(
                     "Found fixture: {}, determining which definition to use",
                     fixture_name
@@ -44,11 +44,9 @@ impl Backend {
 
                 // Determine which specific definition the user is referring to
                 // This could be a usage (resolve to definition) or clicking on a definition itself
-                let target_definition = self.fixture_db.find_fixture_definition(
-                    &file_path,
-                    position.line,
-                    position.character,
-                );
+                let target_definition =
+                    self.fixture_db
+                        .find_fixture_definition(&file_path, position.line, byte_col);
 
                 let (references, definition_to_include) = if let Some(definition) =
                     target_definition
@@ -160,9 +158,17 @@ impl Backend {
                         uri: ref_uri,
                         range: Self::create_range(
                             ref_line,
-                            reference.start_char as u32,
+                            self.to_lsp_col(
+                                &reference.file_path,
+                                reference.line,
+                                reference.start_char,
+                            ),
                             ref_line,
-                            reference.end_char as u32,
+                            self.to_lsp_col(
+                                &reference.file_path,
+                                reference.line,
+                                reference.end_char,
+                            ),
                         ),
                     };
                     debug!(

@@ -27,10 +27,11 @@ impl Backend {
 
         if let Some(file_path) = self.uri_to_path(&uri) {
             // Find the fixture at the cursor position (works on both definitions and usages)
+            let byte_col = self.to_byte_col(&file_path, position);
             if let Some(definition) = self.fixture_db.find_fixture_or_definition_at_position(
                 &file_path,
                 position.line,
-                position.character,
+                byte_col,
             ) {
                 let Some(def_uri) = self.path_to_uri(&definition.file_path) else {
                     return Ok(None);
@@ -40,11 +41,19 @@ impl Backend {
                 let selection_range = Range {
                     start: Position {
                         line: def_line,
-                        character: definition.start_char as u32,
+                        character: self.to_lsp_col(
+                            &definition.file_path,
+                            definition.line,
+                            definition.start_char,
+                        ),
                     },
                     end: Position {
                         line: def_line,
-                        character: definition.end_char as u32,
+                        character: self.to_lsp_col(
+                            &definition.file_path,
+                            definition.line,
+                            definition.end_char,
+                        ),
                     },
                 };
 
@@ -120,11 +129,11 @@ impl Backend {
             let from_range = Range {
                 start: Position {
                     line: usage_line,
-                    character: usage.start_char as u32,
+                    character: self.to_lsp_col(&usage.file_path, usage.line, usage.start_char),
                 },
                 end: Position {
                     line: usage_line,
-                    character: usage.end_char as u32,
+                    character: self.to_lsp_col(&usage.file_path, usage.line, usage.end_char),
                 },
             };
 
@@ -196,11 +205,19 @@ impl Backend {
                 let to_range = Range {
                     start: Position {
                         line: dep_line,
-                        character: dep_def.start_char as u32,
+                        character: self.to_lsp_col(
+                            &dep_def.file_path,
+                            dep_def.line,
+                            dep_def.start_char,
+                        ),
                     },
                     end: Position {
                         line: dep_line,
-                        character: dep_def.end_char as u32,
+                        character: self.to_lsp_col(
+                            &dep_def.file_path,
+                            dep_def.line,
+                            dep_def.end_char,
+                        ),
                     },
                 };
 
@@ -258,11 +275,11 @@ impl Backend {
             let range = Range {
                 start: Position {
                     line: lsp_line,
-                    character: start as u32,
+                    character: self.to_lsp_col(file_path, line, start),
                 },
                 end: Position {
                     line: lsp_line,
-                    character: (start + param_name.len()) as u32,
+                    character: self.to_lsp_col(file_path, line, start + param_name.len()),
                 },
             };
             return Some(vec![range]);

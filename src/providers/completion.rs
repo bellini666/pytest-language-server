@@ -129,20 +129,20 @@ struct EnrichedFixture {
 /// Filter available fixtures according to common rules and enrich them with
 /// detail/sort metadata.
 fn filter_and_enrich_fixtures(
-    available: Vec<FixtureDefinition>,
+    available: &[FixtureDefinition],
     file_path: &std::path::Path,
     declared_params: Option<&[String]>,
     opts: &CompletionOpts<'_>,
 ) -> Vec<EnrichedFixture> {
     available
-        .into_iter()
+        .iter()
         .filter(|f| !is_fixture_excluded(f, declared_params, opts))
         .map(|f| {
-            let detail = make_fixture_detail(&f);
-            let priority = fixture_sort_priority(&f, file_path);
+            let detail = make_fixture_detail(f);
+            let priority = fixture_sort_priority(f, file_path);
             let sort_text = make_sort_text(priority, &f.name);
             EnrichedFixture {
-                fixture: f,
+                fixture: f.clone(),
                 detail,
                 sort_text,
             }
@@ -175,11 +175,11 @@ impl Backend {
 
         if let Some(file_path) = self.uri_to_path(&uri) {
             // Get the completion context
-            if let Some(ctx) = self.fixture_db.get_completion_context(
-                &file_path,
-                position.line,
-                position.character,
-            ) {
+            let byte_col = self.to_byte_col(&file_path, position);
+            if let Some(ctx) =
+                self.fixture_db
+                    .get_completion_context(&file_path, position.line, byte_col)
+            {
                 info!("Completion context: {:?}", ctx);
 
                 // Get workspace root for formatting documentation
@@ -266,7 +266,7 @@ impl Backend {
     ) -> CompletionResponse {
         let available = self.fixture_db.get_available_fixtures(file_path);
         let enriched =
-            filter_and_enrich_fixtures(available, file_path, Some(declared_params), opts);
+            filter_and_enrich_fixtures(&available, file_path, Some(declared_params), opts);
 
         let items = enriched
             .into_iter()
@@ -304,7 +304,7 @@ impl Backend {
     ) -> CompletionResponse {
         let available = self.fixture_db.get_available_fixtures(file_path);
         let enriched =
-            filter_and_enrich_fixtures(available, file_path, Some(declared_params), opts);
+            filter_and_enrich_fixtures(&available, file_path, Some(declared_params), opts);
 
         // Get insertion info for adding new parameters
         let insertion_info = self
@@ -342,8 +342,9 @@ impl Backend {
                         }
                     };
                     let lsp_line = Self::internal_line_to_lsp(info.line);
+                    let lsp_col = self.to_lsp_col(file_path, info.line, info.char_pos);
                     vec![TextEdit {
-                        range: Self::create_point_range(lsp_line, info.char_pos as u32),
+                        range: Self::create_point_range(lsp_line, lsp_col),
                         new_text: text,
                     }]
                 });
@@ -380,7 +381,7 @@ impl Backend {
             current_fixture_name: None,
             insert_prefix,
         };
-        let enriched = filter_and_enrich_fixtures(available, file_path, None, &no_filter_opts);
+        let enriched = filter_and_enrich_fixtures(&available, file_path, None, &no_filter_opts);
 
         let items = enriched
             .into_iter()
@@ -612,7 +613,7 @@ mod tests {
             current_fixture_name: Some("my_fixture"),
             insert_prefix: "",
         };
-        let enriched = filter_and_enrich_fixtures(fixtures.clone(), file, None, &opts);
+        let enriched = filter_and_enrich_fixtures(&fixtures, file, None, &opts);
         assert_eq!(enriched.len(), 1);
         assert_eq!(enriched[0].fixture.name, "other_fixture");
 
@@ -622,7 +623,7 @@ mod tests {
             current_fixture_name: None,
             insert_prefix: "",
         };
-        let enriched = filter_and_enrich_fixtures(fixtures, file, None, &test_opts);
+        let enriched = filter_and_enrich_fixtures(&fixtures, file, None, &test_opts);
         assert_eq!(enriched.len(), 2);
     }
 
@@ -642,7 +643,7 @@ mod tests {
             current_fixture_name: None,
             insert_prefix: "",
         };
-        let enriched = filter_and_enrich_fixtures(fixtures.clone(), &file_path, Some(&[]), &opts);
+        let enriched = filter_and_enrich_fixtures(&fixtures, &file_path, Some(&[]), &opts);
         let names: Vec<&str> = enriched.iter().map(|e| e.fixture.name.as_str()).collect();
         assert_eq!(names, vec!["session_fix"]);
 
@@ -652,7 +653,7 @@ mod tests {
             current_fixture_name: None,
             insert_prefix: "",
         };
-        let enriched = filter_and_enrich_fixtures(fixtures.clone(), &file_path, Some(&[]), &opts);
+        let enriched = filter_and_enrich_fixtures(&fixtures, &file_path, Some(&[]), &opts);
         let names: Vec<&str> = enriched.iter().map(|e| e.fixture.name.as_str()).collect();
         assert_eq!(names, vec!["module_fix", "session_fix"]);
 
@@ -662,7 +663,7 @@ mod tests {
             current_fixture_name: None,
             insert_prefix: "",
         };
-        let enriched = filter_and_enrich_fixtures(fixtures.clone(), &file_path, Some(&[]), &opts);
+        let enriched = filter_and_enrich_fixtures(&fixtures, &file_path, Some(&[]), &opts);
         assert_eq!(enriched.len(), 4);
 
         // Test function context (None scope): all should survive
@@ -671,7 +672,7 @@ mod tests {
             current_fixture_name: None,
             insert_prefix: "",
         };
-        let enriched = filter_and_enrich_fixtures(fixtures.clone(), &file_path, Some(&[]), &opts);
+        let enriched = filter_and_enrich_fixtures(&fixtures, &file_path, Some(&[]), &opts);
         assert_eq!(enriched.len(), 4);
     }
 
@@ -690,7 +691,7 @@ mod tests {
             current_fixture_name: None,
             insert_prefix: "",
         };
-        let enriched = filter_and_enrich_fixtures(fixtures, &file_path, Some(&declared), &opts);
+        let enriched = filter_and_enrich_fixtures(&fixtures, &file_path, Some(&declared), &opts);
         let names: Vec<&str> = enriched.iter().map(|e| e.fixture.name.as_str()).collect();
         assert_eq!(names, vec!["app"]);
     }
@@ -712,7 +713,7 @@ mod tests {
             current_fixture_name: None,
             insert_prefix: "",
         };
-        let enriched = filter_and_enrich_fixtures(fixtures, &file_path, None, &opts);
+        let enriched = filter_and_enrich_fixtures(&fixtures, &file_path, None, &opts);
         let names: Vec<&str> = enriched.iter().map(|e| e.fixture.name.as_str()).collect();
         assert_eq!(names, vec!["real_fixture"]);
     }
@@ -853,16 +854,7 @@ mod tests {
         let slot_clone = backend_slot.clone();
         let (_svc, _sock) = LspService::new(move |client| {
             let b = Backend::new(client, db.clone());
-            // Clone all Arc fields to capture a usable Backend outside
-            *slot_clone.lock().unwrap() = Some(Backend {
-                client: b.client.clone(),
-                fixture_db: b.fixture_db.clone(),
-                workspace_root: b.workspace_root.clone(),
-                original_workspace_root: b.original_workspace_root.clone(),
-                scan_task: b.scan_task.clone(),
-                uri_cache: b.uri_cache.clone(),
-                config: b.config.clone(),
-            });
+            *slot_clone.lock().unwrap() = Some(b.clone());
             b
         });
         let result = backend_slot

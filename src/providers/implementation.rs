@@ -34,10 +34,11 @@ impl Backend {
             );
 
             // First find the fixture definition (works on both definitions and usages)
+            let byte_col = self.to_byte_col(&file_path, position);
             if let Some(definition) = self.fixture_db.find_fixture_or_definition_at_position(
                 &file_path,
                 position.line,
-                position.character,
+                byte_col,
             ) {
                 info!("Found definition: {:?}", definition);
 

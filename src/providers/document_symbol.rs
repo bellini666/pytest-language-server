@@ -25,12 +25,22 @@ impl Backend {
             return Ok(None);
         };
 
-        // Collect all fixture definitions for this file
+        // Collect all fixture definitions for this file using the
+        // file_definitions reverse index (avoids scanning the whole workspace).
         let mut symbols: Vec<DocumentSymbol> = Vec::new();
 
-        // Iterate over all fixture definitions
-        for entry in self.fixture_db.definitions.iter() {
-            for definition in entry.value() {
+        let fixture_names: Vec<String> = self
+            .fixture_db
+            .file_definitions
+            .get(&file_path)
+            .map(|entry| entry.value().iter().cloned().collect())
+            .unwrap_or_default();
+
+        for name in &fixture_names {
+            let Some(defs) = self.fixture_db.definitions.get(name) else {
+                continue;
+            };
+            for definition in defs.value() {
                 // Only include fixtures from this file
                 if definition.file_path != file_path {
                     continue;
@@ -42,8 +52,9 @@ impl Backend {
                 }
 
                 let line = Self::internal_line_to_lsp(definition.line);
-                let start_char = definition.start_char as u32;
-                let end_char = definition.end_char as u32;
+                let start_char =
+                    self.to_lsp_col(&file_path, definition.line, definition.start_char);
+                let end_char = self.to_lsp_col(&file_path, definition.line, definition.end_char);
 
                 // Selection range is the fixture name
                 let selection_range = Self::create_range(line, start_char, line, end_char);

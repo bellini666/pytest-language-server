@@ -18,16 +18,34 @@ impl Backend {
             return Ok(None);
         };
 
-        // Get all definitions in this file
+        // Get all definitions in this file using the file_definitions reverse
+        // index (avoids scanning the whole workspace).
         let mut lenses = Vec::new();
 
-        for entry in self.fixture_db.definitions.iter() {
-            for def in entry.value() {
-                // Only show lenses for fixtures defined in this file
-                if def.file_path != file_path || def.is_third_party {
-                    continue;
-                }
+        let fixture_names: Vec<String> = self
+            .fixture_db
+            .file_definitions
+            .get(&file_path)
+            .map(|entry| entry.value().iter().cloned().collect())
+            .unwrap_or_default();
 
+        for name in &fixture_names {
+            // Snapshot matching definitions so no map guard is held across the
+            // find_references_for_definition call below (it reads this map too).
+            let defs: Vec<_> = self
+                .fixture_db
+                .definitions
+                .get(name)
+                .map(|entry| {
+                    entry
+                        .value()
+                        .iter()
+                        .filter(|def| def.file_path == file_path && !def.is_third_party)
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            for def in &defs {
                 // Count usages for this definition
                 let references = self.fixture_db.find_references_for_definition(def);
                 let usage_count = references.len();
@@ -46,7 +64,7 @@ impl Backend {
                 let arguments = match (
                     serde_json::to_value(uri.to_string()),
                     serde_json::to_value(line),
-                    serde_json::to_value(def.start_char),
+                    serde_json::to_value(self.to_lsp_col(&def.file_path, def.line, def.start_char)),
                 ) {
                     (Ok(uri_val), Ok(line_val), Ok(char_val)) => {
                         Some(vec![uri_val, line_val, char_val])

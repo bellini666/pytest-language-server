@@ -66,49 +66,46 @@ pub(crate) fn format_docstring(docstring: String) -> String {
     result.join("\n")
 }
 
-/// Extract the word at a given character position in a line.
+/// Extract the word at a given byte offset in a line.
 /// Returns None if the position is not within a word.
-pub(crate) fn extract_word_at_position(line: &str, character: usize) -> Option<String> {
-    let char_indices: Vec<(usize, char)> = line.char_indices().collect();
-
-    if character >= char_indices.len() {
+///
+/// The offset is interpreted in bytes to match the columns stored in
+/// `FixtureUsage`/`FixtureDefinition`; offsets inside a multi-byte character
+/// are floored to its start.
+pub(crate) fn extract_word_at_position(line: &str, byte_col: usize) -> Option<String> {
+    if byte_col >= line.len() {
         return None;
     }
 
-    let (_byte_pos, c) = char_indices[character];
+    // Floor to the containing character's boundary.
+    let mut idx = byte_col;
+    while !line.is_char_boundary(idx) {
+        idx -= 1;
+    }
 
-    if !c.is_alphanumeric() && c != '_' {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    if !line[idx..].chars().next().is_some_and(is_word) {
         return None;
     }
 
-    // Find start of word
-    let mut start_idx = character;
-    while start_idx > 0 {
-        let (_, prev_c) = char_indices[start_idx - 1];
-        if !prev_c.is_alphanumeric() && prev_c != '_' {
-            break;
-        }
-        start_idx -= 1;
-    }
+    // Scan backwards for the start of the word.
+    let start = line[..idx]
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| is_word(*c))
+        .last()
+        .map(|(i, _)| i)
+        .unwrap_or(idx);
 
-    // Find end of word
-    let mut end_idx = character + 1;
-    while end_idx < char_indices.len() {
-        let (_, curr_c) = char_indices[end_idx];
-        if !curr_c.is_alphanumeric() && curr_c != '_' {
-            break;
-        }
-        end_idx += 1;
-    }
+    // Scan forwards for the end of the word.
+    let end = line[idx..]
+        .char_indices()
+        .take_while(|(_, c)| is_word(*c))
+        .last()
+        .map(|(i, c)| idx + i + c.len_utf8())
+        .unwrap_or(idx);
 
-    let start_byte = char_indices[start_idx].0;
-    let end_byte = if end_idx < char_indices.len() {
-        char_indices[end_idx].0
-    } else {
-        line.len()
-    };
-
-    Some(line[start_byte..end_byte].to_string())
+    Some(line[start..end].to_string())
 }
 
 /// Find the character position of a function name in a line of code.
@@ -262,6 +259,29 @@ mod tests {
         );
         assert_eq!(extract_word_at_position(line, 16), Some("arg1".to_string()));
         assert_eq!(extract_word_at_position(line, 20), None); // comma
+    }
+
+    #[test]
+    fn test_extract_word_at_position_non_ascii() {
+        // "é" is two bytes — offsets are bytes, not chars.
+        let line = "def test(café_fixture):";
+        assert_eq!(
+            extract_word_at_position(line, 10),
+            Some("café_fixture".to_string())
+        );
+        // Offset inside the multi-byte "é" floors to the character start.
+        assert_eq!(
+            extract_word_at_position(line, 14),
+            Some("café_fixture".to_string())
+        );
+        // Word after a non-ASCII prefix resolves at its byte offset.
+        let line = "x = 'é'; fixture_a";
+        assert_eq!(
+            extract_word_at_position(line, 10),
+            Some("fixture_a".to_string())
+        );
+        // Past end of line.
+        assert_eq!(extract_word_at_position(line, 100), None);
     }
 
     #[test]

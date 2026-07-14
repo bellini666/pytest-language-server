@@ -22,15 +22,7 @@ fn make_backend_with_db(db: Arc<FixtureDatabase>) -> Backend {
     let slot_clone = slot.clone();
     let (_svc, _sock) = LspService::new(move |client| {
         let b = Backend::new(client, db.clone());
-        *slot_clone.lock().unwrap() = Some(Backend {
-            client: b.client.clone(),
-            fixture_db: b.fixture_db.clone(),
-            workspace_root: b.workspace_root.clone(),
-            original_workspace_root: b.original_workspace_root.clone(),
-            scan_task: b.scan_task.clone(),
-            uri_cache: b.uri_cache.clone(),
-            config: b.config.clone(),
-        });
+        *slot_clone.lock().unwrap() = Some(b.clone());
         b
     });
     let backend = slot.lock().unwrap().take().expect("backend created");

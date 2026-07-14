@@ -47,7 +47,13 @@ fn collect_walrus_targets(expr: &Expr, names: &mut HashSet<String>) {
                 .iter()
                 .for_each(|c| collect_walrus_targets(c, names));
         }
-        Expr::Call(e) => e.args.iter().for_each(|a| collect_walrus_targets(a, names)),
+        Expr::Call(e) => {
+            collect_walrus_targets(&e.func, names);
+            e.args.iter().for_each(|a| collect_walrus_targets(a, names));
+            e.keywords
+                .iter()
+                .for_each(|kw| collect_walrus_targets(&kw.value, names));
+        }
         Expr::Tuple(e) => e.elts.iter().for_each(|v| collect_walrus_targets(v, names)),
         Expr::IfExp(e) => {
             collect_walrus_targets(&e.test, names);
@@ -759,6 +765,7 @@ mod tests {
         // (an uncollected `my_fixture` read would be flagged as undeclared).
         for body in [
             "    x = f((my_fixture := 1))\n    _ = my_fixture\n",
+            "    x = f(kw=(my_fixture := 1))\n    _ = my_fixture\n",
             "    x = (my_fixture := 1) < 2\n    _ = my_fixture\n",
             "    x = not (my_fixture := 1)\n    _ = my_fixture\n",
             "    x = (my_fixture := 1) + 1\n    _ = my_fixture\n",

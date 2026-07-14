@@ -19,6 +19,32 @@ pub(crate) fn find_yield_offset(body: &[Stmt]) -> Option<usize> {
             Expr::YieldFrom(y) => Some(y.range.start().to_usize()),
             Expr::Await(a) => in_expr(&a.value),
             Expr::NamedExpr(n) => in_expr(&n.value),
+            // A yield may legally nest inside other expressions, e.g.
+            // `x = f((yield 1))`. Recurse into the common containers, but not
+            // into lambdas — a yield there belongs to the lambda, not to the
+            // enclosing function.
+            Expr::Call(c) => in_expr(&c.func)
+                .or_else(|| c.args.iter().find_map(in_expr))
+                .or_else(|| c.keywords.iter().find_map(|kw| in_expr(&kw.value))),
+            Expr::BinOp(e) => in_expr(&e.left).or_else(|| in_expr(&e.right)),
+            Expr::UnaryOp(e) => in_expr(&e.operand),
+            Expr::BoolOp(e) => e.values.iter().find_map(in_expr),
+            Expr::Compare(e) => in_expr(&e.left).or_else(|| e.comparators.iter().find_map(in_expr)),
+            Expr::IfExp(e) => in_expr(&e.test)
+                .or_else(|| in_expr(&e.body))
+                .or_else(|| in_expr(&e.orelse)),
+            Expr::Tuple(e) => e.elts.iter().find_map(in_expr),
+            Expr::List(e) => e.elts.iter().find_map(in_expr),
+            Expr::Set(e) => e.elts.iter().find_map(in_expr),
+            Expr::Dict(e) => e
+                .keys
+                .iter()
+                .flatten()
+                .find_map(in_expr)
+                .or_else(|| e.values.iter().find_map(in_expr)),
+            Expr::Subscript(e) => in_expr(&e.value).or_else(|| in_expr(&e.slice)),
+            Expr::Starred(e) => in_expr(&e.value),
+            Expr::Attribute(e) => in_expr(&e.value),
             _ => None,
         }
     }
@@ -283,6 +309,32 @@ mod tests {
             "import pytest\nfrom typing import Generator\n@pytest.fixture\ndef fx() -> Generator[int, None, None]:\n    x = 0\n    x += yield 1\n",
         );
         assert_eq!(ret, Some("int".to_string()));
+    }
+
+    #[test]
+    fn test_return_type_yield_nested_in_expressions() {
+        // A yield nested inside a call argument still makes the function a
+        // generator.
+        let ret = fixture_return_type(
+            "import pytest\nfrom typing import Generator\n@pytest.fixture\ndef fx() -> Generator[int, None, None]:\n    x = f((yield 1))\n",
+        );
+        assert_eq!(ret, Some("int".to_string()));
+
+        // ... and inside a tuple / boolean expression.
+        let ret = fixture_return_type(
+            "import pytest\nfrom typing import Generator\n@pytest.fixture\ndef fx() -> Generator[int, None, None]:\n    x = ((yield 1), 2)\n",
+        );
+        assert_eq!(ret, Some("int".to_string()));
+    }
+
+    #[test]
+    fn test_return_type_yield_in_lambda_is_not_a_generator() {
+        // A yield inside a lambda belongs to the lambda, not the fixture:
+        // the fixture is NOT a generator, so the annotation is kept whole.
+        let ret = fixture_return_type(
+            "import pytest\nfrom typing import Generator\n@pytest.fixture\ndef fx() -> Generator[int, None, None]:\n    x = lambda: (yield 1)\n    return x\n",
+        );
+        assert_eq!(ret, Some("Generator[int, None, None]".to_string()));
     }
 
     #[test]

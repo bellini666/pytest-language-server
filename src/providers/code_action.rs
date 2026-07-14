@@ -148,7 +148,10 @@ fn emit_kind_import_edits(
                     (
                         Position {
                             line: fi.end_line as u32,
-                            character: u32::MAX,
+                            // LSP uinteger max (2^31 - 1): past any real line
+                            // length, so clients clamp to end-of-line, and it
+                            // fits the signed 32-bit ints JVM clients use.
+                            character: i32::MAX as u32,
                         },
                         merged_line.clone(),
                     )
@@ -1085,7 +1088,7 @@ mod tests {
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].range.start.line, 0);
         assert_eq!(edits[0].range.end.line, 0);
-        assert_eq!(edits[0].range.end.character, u32::MAX);
+        assert_eq!(edits[0].range.end.character, i32::MAX as u32);
         assert_eq!(edits[0].new_text, "from typing import Any, Optional");
     }
 

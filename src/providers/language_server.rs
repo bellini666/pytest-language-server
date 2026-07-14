@@ -268,9 +268,11 @@ impl LanguageServer for Backend {
                     backend.publish_diagnostics_for_file(&uri, &file_path).await;
 
                     // If the file was closed while we were publishing (did_close
-                    // removes the generation entry), re-clear so a closed file
-                    // never ends up showing stale diagnostics.
-                    if backend.change_generation.get(&file_path).is_none() {
+                    // removes it from uri_cache), re-clear so a closed file never
+                    // ends up showing stale diagnostics. Checking uri_cache rather
+                    // than the generation entry means a close-then-reopen during
+                    // the publish doesn't wipe the reopened file's diagnostics.
+                    if !backend.uri_cache.contains_key(&file_path) {
                         backend
                             .client
                             .publish_diagnostics(uri.clone(), Vec::new(), None)

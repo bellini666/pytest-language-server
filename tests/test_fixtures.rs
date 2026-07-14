@@ -15291,3 +15291,44 @@ fn test_explicit_import_resolves_to_reexporting_source() {
         "the fixture must be attributed to the file that defines it"
     );
 }
+
+#[test]
+#[timeout(30000)]
+fn test_explicit_then_star_import_keeps_transitive_fixtures() {
+    // An explicit import of a module must not mark it as globally visited:
+    // a later star import of the same module in the same pass still has to
+    // pick up the module's transitively re-exported fixtures.
+    let db = FixtureDatabase::new();
+    let base = std::env::temp_dir().join("pls_explicit_then_star");
+
+    let module_c = base.join("module_c.py");
+    db.analyze_file(
+        module_c.clone(),
+        "import pytest\n\n@pytest.fixture\ndef transitive_fix():\n    return 1\n",
+    );
+
+    let module_a = base.join("module_a.py");
+    db.analyze_file(
+        module_a.clone(),
+        "from module_c import *\n\nimport pytest\n\n@pytest.fixture\ndef direct_fix():\n    return 2\n",
+    );
+
+    let conftest = base.join("conftest.py");
+    db.analyze_file(
+        conftest.clone(),
+        "from module_a import direct_fix\nfrom module_a import *\n",
+    );
+
+    let mut visited = HashSet::new();
+    let imported = db.get_imported_fixtures(&conftest, &mut visited);
+    assert!(
+        imported.contains_key("direct_fix"),
+        "explicitly imported fixture must be found, got {:?}",
+        imported.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        imported.get("transitive_fix"),
+        Some(&module_c),
+        "star import must still surface module_a's transitive re-exports"
+    );
+}

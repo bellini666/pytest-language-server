@@ -184,10 +184,11 @@ pub fn is_parametrize_decorator(expr: &Expr) -> bool {
 /// Returns true if `name` is a plain Python identifier (the only thing a parametrize argname can
 /// legally be). Used to reject anything we couldn't cleanly locate in the source, e.g. implicitly
 /// concatenated string literals, so a rename never corrupts the file.
+/// Unicode-aware to match `is_valid_python_identifier` in the rename provider.
 fn is_plain_identifier(name: &str) -> bool {
     let mut chars = name.chars();
-    matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
-        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+    matches!(chars.next(), Some(c) if c == '_' || c.is_alphabetic())
+        && chars.all(|c| c == '_' || c.is_alphanumeric())
 }
 
 /// Splits the *source text* of a string literal into argnames, each paired with the precise

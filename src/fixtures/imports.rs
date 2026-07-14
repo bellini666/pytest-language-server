@@ -545,7 +545,14 @@ impl FixtureDatabase {
                         .get(&resolved_canonical)
                         .map(|entry| entry.value().clone())
                         .unwrap_or_default();
-                    let reexported = self.get_imported_fixtures(&resolved_canonical, visited);
+                    // Recurse with a clone of `visited`: it must still guard the
+                    // current path against cycles, but marking the module as
+                    // globally visited here would make a later import of the
+                    // same module (e.g. a subsequent star import) hit the
+                    // circular guard and silently lose its transitive fixtures.
+                    let mut nested_visited = visited.clone();
+                    let reexported =
+                        self.get_imported_fixtures(&resolved_canonical, &mut nested_visited);
 
                     for name in &import.imported_names {
                         if module_fixtures.contains(name) {

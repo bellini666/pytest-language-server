@@ -754,18 +754,20 @@ mod tests {
     #[test]
     fn test_walrus_targets_collected_through_containers() {
         // Walrus bindings nested in calls, comparisons, boolean/unary/binary
-        // ops, tuples and ternaries all register as locals.
+        // ops, tuples and ternaries all register as locals. The target shadows
+        // a known fixture name so the test fails if collection stops working
+        // (an uncollected `my_fixture` read would be flagged as undeclared).
         for body in [
-            "    x = f((v := 1))\n    _ = v\n",
-            "    x = (v := 1) < 2\n    _ = v\n",
-            "    x = not (v := 1)\n    _ = v\n",
-            "    x = (v := 1) + 1\n    _ = v\n",
-            "    x = ((v := 1), 2)\n    _ = v\n",
-            "    x = 1 if (v := 2) else (w := 3)\n    _ = v\n",
+            "    x = f((my_fixture := 1))\n    _ = my_fixture\n",
+            "    x = (my_fixture := 1) < 2\n    _ = my_fixture\n",
+            "    x = not (my_fixture := 1)\n    _ = my_fixture\n",
+            "    x = (my_fixture := 1) + 1\n    _ = my_fixture\n",
+            "    x = ((my_fixture := 1), 2)\n    _ = my_fixture\n",
+            "    x = 1 if (my_fixture := 2) else 3\n    _ = my_fixture\n",
         ] {
             let undeclared = analyze_with_conftest(body);
             assert!(
-                undeclared.iter().all(|u| u.name != "v" && u.name != "w"),
+                undeclared.iter().all(|u| u.name != "my_fixture"),
                 "walrus target should be a local in {body:?}, got {undeclared:?}"
             );
         }

@@ -8519,3 +8519,64 @@ async fn test_references_byte_positions_when_utf8_negotiated() {
     assert_eq!(param_loc.range.start.character, 15);
     assert_eq!(param_loc.range.end.character, 25);
 }
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_rename_parametrize_unicode_identifier() {
+    // Unicode parametrize parameter names are legal Python; both the cursor
+    // token extraction and the new-name validation must accept them.
+    // Run in utf-8 mode so positions in this test are byte offsets end to end.
+    use pytest_language_server::FixtureDatabase;
+    use tower_lsp_server::LanguageServer;
+
+    let content = r#"import pytest
+
+
+@pytest.mark.parametrize("café", ["a", "b"])
+def test_something(café):
+    print(café)
+"#;
+    let expected = r#"import pytest
+
+
+@pytest.mark.parametrize("renamed_ü", ["a", "b"])
+def test_something(renamed_ü):
+    print(renamed_ü)
+"#;
+
+    let db = Arc::new(FixtureDatabase::new());
+    let path = std::env::temp_dir()
+        .join("test_rename_unicode")
+        .join("test_parametrize.py");
+    db.analyze_file(path.clone(), content);
+    let backend = make_backend_with_db(db);
+    backend
+        .client_utf16
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    let uri = Uri::from_file_path(&path).unwrap();
+
+    // Cursor on the parameter in the signature (byte column of "café").
+    let sig_line = 4u32;
+    let byte_col = "def test_something(".len() as u32;
+    let ws = backend
+        .rename(RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: sig_line,
+                    character: byte_col,
+                },
+            },
+            new_name: "renamed_ü".to_string(),
+            work_done_progress_params: WorkDoneProgressParams {
+                work_done_token: None,
+            },
+        })
+        .await
+        .expect("rename should not error")
+        .expect("unicode parametrize param should be renameable");
+
+    let edits = ws.changes.expect("rename should produce changes");
+    let edits = edits.into_values().next().expect("one file of edits");
+    assert_eq!(apply_text_edits(content, &edits), expected);
+}

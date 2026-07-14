@@ -447,26 +447,37 @@ fn range_contains(range: &TextRange, offset: usize) -> bool {
     range.start().to_usize() <= offset && offset <= range.end().to_usize()
 }
 
-/// Returns the ASCII identifier spanning `offset` in `content`, treating `offset` inclusively so
+/// Returns the identifier spanning `offset` in `content`, treating `offset` inclusively so
 /// a caret resting just past the last character (a common rename position) still resolves.
 ///
-/// Works in byte offsets to stay consistent with the rest of this provider; identifiers are ASCII
-/// so this never splits a multi-byte character.
+/// Works in byte offsets to stay consistent with the rest of this provider, but is
+/// Unicode-aware (matching `is_valid_python_identifier`); an offset inside a multi-byte
+/// character is floored to its start.
 fn identifier_at(content: &str, offset: usize) -> Option<String> {
-    let bytes = content.as_bytes();
-    if offset > bytes.len() {
+    if offset > content.len() {
         return None;
     }
-    let is_word = |b: u8| b == b'_' || b.is_ascii_alphanumeric();
+    let mut idx = offset;
+    while idx > 0 && !content.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    let is_word = |c: char| c == '_' || c.is_alphanumeric();
 
-    let mut start = offset;
-    while start > 0 && is_word(bytes[start - 1]) {
-        start -= 1;
-    }
-    let mut end = offset;
-    while end < bytes.len() && is_word(bytes[end]) {
-        end += 1;
-    }
+    let start = content[..idx]
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| is_word(*c))
+        .last()
+        .map(|(i, _)| i)
+        .unwrap_or(idx);
+    let end = idx
+        + content[idx..]
+            .char_indices()
+            .take_while(|(_, c)| is_word(*c))
+            .last()
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
+
     if start == end {
         return None;
     }

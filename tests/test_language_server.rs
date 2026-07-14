@@ -2402,8 +2402,11 @@ async fn test_did_change_debounce_publishes_after_quiet_period() {
         })
         .await;
 
-    // Two rapid changes: the first debounce task must be superseded by the
-    // second (covers the early-return path), the second must publish.
+    // Two rapid changes bump the generation twice; the assertion below pins
+    // the synchronous generation bookkeeping. The sleep then lets both
+    // debounce tasks run: the first is superseded (early-return path) and
+    // the second publishes — exercised for coverage, observable effects go
+    // to the mock client.
     backend
         .did_change(did_change_params(
             uri.clone(),
@@ -2452,8 +2455,9 @@ async fn test_did_close_while_debounce_pending_clears_generation() {
         ))
         .await;
 
-    // Close while the debounce task is still pending: the generation entry is
-    // dropped, so the task must re-clear instead of leaving stale diagnostics.
+    // Close while the debounce task is still sleeping: did_close drops the
+    // generation entry synchronously (asserted below) and the pending task
+    // early-returns on the mismatch when it wakes during the sleep.
     backend
         .did_close(DidCloseTextDocumentParams {
             text_document: TextDocumentIdentifier { uri: uri.clone() },

@@ -51,10 +51,22 @@ updates:
     commit-message:
       prefix: "deps(vscode)"
       include: "scope"
+    ignore:
+      # engines.vscode is our VSCodium support floor, not a dependency.
+      # @types/vscode is pinned exactly to it; bump both by hand, together,
+      # after checking github.com/VSCodium/vscodium/releases. See issue #144.
+      - dependency-name: "@types/vscode"
+      # typescript-eslint peer-caps typescript at <6.1.0, so TS7 breaks
+      # npm install. Drop this once typescript-eslint supports TS7.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
     groups:
-      npm-all:
+      npm-minor-patch:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
   # Gradle dependencies (IntelliJ plugin)
   - package-ecosystem: "gradle"

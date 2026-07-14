@@ -8,6 +8,7 @@ license_check: true
 allow_licenses:
   - MIT
   - Apache-2.0
+  - BlueOak-1.0.0
   - BSD-2-Clause
   - BSD-3-Clause
   - ISC

@@ -150,6 +150,27 @@ When adding new LSP features, update the feature lists in all extension READMEs:
 
 Keep them in sync with the main `README.md` features section.
 
+### VSCode Extension: the VSCodium support floor
+`engines.vscode` is a product decision (oldest VSCodium we support), not a dependency. VSCodium
+skips releases and trails VS Code by 4-6 minors for weeks, so tracking the newest `@types/vscode`
+makes the extension uninstallable there — that was issue #144.
+
+Rules:
+- `@types/vscode` is pinned **exactly** to the highest version published at or below
+  `engines.vscode` (DefinitelyTyped doesn't publish one per VS Code release — there is no 1.112.0,
+  so a `^1.112.0` floor pins `1.110.0`). Never use a caret: `vsce` validates the *declared range*,
+  not the resolved version, so a caret lets npm install types above the floor with `vsce` none the
+  wiser. Exact pinning makes `tsc` reject any API newer than the floor — that is the real guard.
+- Move `engines.vscode` and `@types/vscode` together, by hand, after checking
+  [VSCodium releases](https://github.com/VSCodium/vscodium/releases). Dependabot ignores both.
+- Runtime deps declare their own `engines.vscode`; `npm run check-engines` fails if one exceeds
+  ours. `vsce` does not check this.
+- Everything else (eslint, typescript, webpack, ts-loader, @types/node) is build-time only and
+  cannot reach VSCodium users.
+- `tsconfig.json` must keep `"types": ["node"]`. The extension imports `path`/`fs` and uses
+  `process`/`console`; before vscode-languageclient v10 those types leaked in via the library's
+  `/// <reference types="node" />`, which v10 removed.
+
 ### Imported Fixtures
 Fixtures imported via star imports in `conftest.py` are discovered:
 ```python

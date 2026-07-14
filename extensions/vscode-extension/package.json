@@ -89,12 +89,13 @@
     "compile": "webpack",
     "watch": "webpack --watch",
     "package": "webpack --mode production --devtool hidden-source-map",
-    "lint": "eslint src"
+    "lint": "eslint src",
+    "check-engines": "node scripts/check-engines.js"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^25.6.0",
-    "@types/vscode": "^1.112.0",
+    "@types/vscode": "1.110.0",
     "eslint": "^10.2.1",
     "ts-loader": "^9.5.7",
     "typescript": "^6.0.3",
@@ -103,6 +104,6 @@
     "webpack-cli": "^7.0.2"
   },
   "dependencies": {
-    "vscode-languageclient": "^9.0.0"
+    "vscode-languageclient": "^10.1.0"
   }
 }

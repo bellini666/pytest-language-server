@@ -174,7 +174,10 @@ fn handle_fixtures_unused(path: PathBuf, format: &str) {
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&json_output).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json_output).unwrap_or_else(|_| "[]".to_string())
+        );
     } else {
         println!(
             "{} {} unused fixture(s):\n",

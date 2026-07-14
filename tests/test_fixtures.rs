@@ -4,6 +4,7 @@
 
 use ntest::timeout;
 use pytest_language_server::FixtureDatabase;
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 #[test]
@@ -12265,15 +12266,15 @@ pytest_plugins = ["module_b"]
     db.analyze_file(conftest_path.clone(), conftest_content);
 
     // Only module_b should be imported via conftest (last assignment wins)
-    let imported = db.is_fixture_imported_in_file("fixture_b", &conftest_path);
+    let mut visited = HashSet::new();
+    let imported = db.get_imported_fixtures(&conftest_path, &mut visited);
     assert!(
-        imported,
+        imported.contains_key("fixture_b"),
         "fixture_b should be imported (last pytest_plugins assignment)"
     );
 
-    let imported_a = db.is_fixture_imported_in_file("fixture_a", &conftest_path);
     assert!(
-        !imported_a,
+        !imported.contains_key("fixture_a"),
         "fixture_a should NOT be imported (overwritten by second pytest_plugins)"
     );
 }
@@ -13427,7 +13428,7 @@ def my_session_fixture():
     // fixture can only depend on other session-scoped fixtures.
     let available = db.get_available_fixtures(&test_path);
     let filtered: Vec<_> = available
-        .into_iter()
+        .iter()
         .filter(|f| f.scope >= FixtureScope::Session)
         .collect();
 
@@ -13509,7 +13510,7 @@ def my_module_fixture():
     // and class, but allow module, package, and session.
     let available = db.get_available_fixtures(&test_path);
     let filtered: Vec<_> = available
-        .into_iter()
+        .iter()
         .filter(|f| f.scope >= FixtureScope::Module)
         .collect();
 
@@ -13591,7 +13592,7 @@ def my_func_fixture():
     // Simulate scope filtering: function scope allows all scopes (>= Function)
     let available = db.get_available_fixtures(&test_path);
     let filtered: Vec<_> = available
-        .into_iter()
+        .iter()
         .filter(|f| f.scope >= FixtureScope::Function)
         .collect();
 
@@ -15208,4 +15209,53 @@ fn test_completion_context_text_fallback_fixture_scope_single_quotes() {
             other
         ),
     }
+}
+
+// ── Cache eviction ──────────────────────────────────────────────────────
+
+#[test]
+#[timeout(120000)]
+fn test_file_cache_eviction_bounds_cache_size() {
+    let db = FixtureDatabase::new();
+    let base = PathBuf::from("/tmp/pls_eviction_test");
+
+    // MAX_FILE_CACHE_SIZE is 2000; exceed it enough to trigger bulk eviction.
+    let total = 2101;
+    for i in 0..total {
+        let path = base.join(format!("test_file_{i}.py"));
+        db.analyze_file(path, "x = 1\n");
+    }
+
+    assert!(
+        db.file_cache.len() <= 2000,
+        "file cache exceeded its bound: {}",
+        db.file_cache.len()
+    );
+
+    // The most recently analyzed file must never be evicted.
+    let last = base.join(format!("test_file_{}.py", total - 1));
+    assert!(
+        db.file_cache.contains_key(&last),
+        "the just-analyzed file must be retained"
+    );
+
+    // Related caches must be cleaned alongside evicted file_cache entries.
+    let mut evicted = 0;
+    for i in 0..total {
+        let path = base.join(format!("test_file_{i}.py"));
+        if !db.file_cache.contains_key(&path) {
+            evicted += 1;
+            assert!(
+                !db.ast_cache.contains_key(&path),
+                "ast_cache must not retain evicted file {:?}",
+                path
+            );
+            assert!(
+                !db.line_index_cache.contains_key(&path),
+                "line_index_cache must not retain evicted file {:?}",
+                path
+            );
+        }
+    }
+    assert!(evicted > 0, "expected at least one eviction");
 }

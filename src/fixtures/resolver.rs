@@ -11,7 +11,7 @@ use super::types::{
 use super::FixtureDatabase;
 use rustpython_parser::ast::{Arguments, Expr, Ranged, Stmt};
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::{debug, info};
 
 impl FixtureDatabase {
@@ -75,16 +75,20 @@ impl FixtureDatabase {
         None
     }
 
-    /// Get the fixture definition at a specific line (if the line is a fixture definition)
+    /// Get the fixture definition at a specific line (if the line is a fixture definition).
+    /// Uses the file_definitions reverse index instead of scanning all definitions.
     fn get_fixture_definition_at_line(
         &self,
         file_path: &Path,
         line: usize,
     ) -> Option<FixtureDefinition> {
-        for entry in self.definitions.iter() {
-            for def in entry.value().iter() {
-                if def.file_path == file_path && def.line == line {
-                    return Some(def.clone());
+        let names = self.file_definitions.get(file_path)?;
+        for name in names.iter() {
+            if let Some(defs) = self.definitions.get(name) {
+                for def in defs.iter() {
+                    if def.file_path == file_path && def.line == line {
+                        return Some(def.clone());
+                    }
                 }
             }
         }
@@ -228,22 +232,30 @@ impl FixtureDatabase {
             // Then check if the conftest imports this fixture
             // Check both filesystem and file cache for conftest existence
             let conftest_in_cache = self.file_cache.contains_key(&conftest_path);
-            if (conftest_path.exists() || conftest_in_cache)
-                && self.is_fixture_imported_in_file(fixture_name, &conftest_path)
-            {
-                // The fixture is imported in this conftest, so it's available here
-                // Return the original definition (pytest makes it available at conftest scope)
-                debug!(
-                    "Fixture {} is imported in conftest.py: {:?}",
-                    fixture_name, conftest_path
-                );
-                // Get any matching definition that passes the filter
-                if let Some(def) = definitions.iter().find(|def| filter(def)) {
-                    info!(
-                        "Found imported fixture {} via conftest.py: {:?} (original: {:?})",
-                        fixture_name, conftest_path, def.file_path
+            if conftest_path.exists() || conftest_in_cache {
+                let mut visited = HashSet::new();
+                let imported = self.get_imported_fixtures(&conftest_path, &mut visited);
+                if let Some(source) = imported.get(fixture_name) {
+                    // The fixture is imported in this conftest, so it's available here
+                    // Return the original definition (pytest makes it available at
+                    // conftest scope). Prefer the definition from the file the import
+                    // actually resolves to; fall back to any matching definition when
+                    // the source file's definition isn't indexed.
+                    debug!(
+                        "Fixture {} is imported in conftest.py: {:?} (from {:?})",
+                        fixture_name, conftest_path, source
                     );
-                    return Some(def.clone());
+                    if let Some(def) = definitions
+                        .iter()
+                        .find(|def| &def.file_path == source && filter(def))
+                        .or_else(|| definitions.iter().find(|def| filter(def)))
+                    {
+                        info!(
+                            "Found imported fixture {} via conftest.py: {:?} (original: {:?})",
+                            fixture_name, conftest_path, def.file_path
+                        );
+                        return Some(def.clone());
+                    }
                 }
             }
 
@@ -356,26 +368,22 @@ impl FixtureDatabase {
         super::string_utils::extract_word_at_position(line, character)
     }
 
-    /// Find all references (usages) of a fixture by name
+    /// Find all references (usages) of a fixture by name.
+    /// Uses the usage_by_fixture reverse index instead of scanning all usages.
     pub fn find_fixture_references(&self, fixture_name: &str) -> Vec<FixtureUsage> {
         info!("Finding all references for fixture: {}", fixture_name);
 
-        let mut all_references = Vec::new();
-
-        for entry in self.usages.iter() {
-            let file_path = entry.key();
-            let usages = entry.value();
-
-            for usage in usages.iter() {
-                if usage.name == fixture_name {
-                    debug!(
-                        "Found reference to {} in {:?} at line {}",
-                        fixture_name, file_path, usage.line
-                    );
-                    all_references.push(usage.clone());
-                }
-            }
-        }
+        let all_references: Vec<FixtureUsage> = self
+            .usage_by_fixture
+            .get(fixture_name)
+            .map(|entry| {
+                entry
+                    .value()
+                    .iter()
+                    .map(|(_, usage)| usage.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
 
         info!(
             "Found {} total references for fixture: {}",
@@ -399,11 +407,18 @@ impl FixtureDatabase {
 
         let mut matching_references = Vec::new();
 
-        // Use reverse index for O(m) lookup instead of O(n) iteration over all usages
-        let Some(usages_for_fixture) = self.usage_by_fixture.get(&definition.name) else {
-            info!("No references found for fixture: {}", definition.name);
-            return matching_references;
-        };
+        // Use reverse index for O(m) lookup instead of O(n) iteration over all usages.
+        // Snapshot the bucket so the shard guard is not held across the resolution
+        // calls below (they take guards on other maps; holding this one blocks
+        // writers to the bucket and is a latent deadlock hazard).
+        let usages_for_fixture: Vec<(PathBuf, FixtureUsage)> =
+            match self.usage_by_fixture.get(&definition.name) {
+                Some(entry) => entry.value().clone(),
+                None => {
+                    info!("No references found for fixture: {}", definition.name);
+                    return matching_references;
+                }
+            };
 
         for (file_path, usage) in usages_for_fixture.iter() {
             let fixture_def_at_line = self.get_fixture_definition_at_line(file_path, usage.line);
@@ -459,8 +474,11 @@ impl FixtureDatabase {
 
     /// Get all available fixtures for a given file.
     /// Results are cached with version-based invalidation for performance.
-    /// Returns Arc to avoid cloning the potentially large Vec on cache hits.
-    pub fn get_available_fixtures(&self, file_path: &Path) -> Vec<FixtureDefinition> {
+    /// Returns Arc so cache hits are an O(1) refcount bump, not a Vec clone.
+    pub fn get_available_fixtures(
+        &self,
+        file_path: &Path,
+    ) -> std::sync::Arc<Vec<FixtureDefinition>> {
         use std::sync::Arc;
 
         // Canonicalize path for consistent cache keys
@@ -474,107 +492,104 @@ impl FixtureDatabase {
         if let Some(cached) = self.available_fixtures_cache.get(&file_path) {
             let (cached_version, cached_fixtures) = cached.value();
             if *cached_version == current_version {
-                // Return cloned Vec from Arc (cheap reference count increment)
-                return cached_fixtures.as_ref().clone();
+                return Arc::clone(cached_fixtures);
             }
         }
 
         // Compute available fixtures
-        let available_fixtures = self.compute_available_fixtures(&file_path);
+        let available_fixtures = Arc::new(self.compute_available_fixtures(&file_path));
 
         // Store in cache
         self.available_fixtures_cache.insert(
             file_path,
-            (current_version, Arc::new(available_fixtures.clone())),
+            (current_version, Arc::clone(&available_fixtures)),
         );
 
         available_fixtures
     }
 
     /// Internal method to compute available fixtures without caching.
+    ///
+    /// Single pass over all definitions: each definition gets a rank encoding
+    /// pytest's priority rules (same file < closest conftest < plugin <
+    /// third-party), and the lowest-ranked definition wins per fixture name.
+    /// This is O(total_defs + ancestor_dirs) instead of scanning the whole
+    /// definitions map once per ancestor directory.
     fn compute_available_fixtures(&self, file_path: &Path) -> Vec<FixtureDefinition> {
-        let mut available_fixtures = Vec::new();
-        let mut seen_names = HashSet::new();
+        use std::collections::HashMap;
 
-        // Priority 1: Fixtures in the same file
-        for entry in self.definitions.iter() {
-            let fixture_name = entry.key();
-            for def in entry.value().iter() {
-                if def.file_path == file_path && !seen_names.contains(fixture_name.as_str()) {
-                    available_fixtures.push(def.clone());
-                    seen_names.insert(fixture_name.clone());
-                }
-            }
+        // Rank ancestor conftests by proximity. Ranks are doubled so that
+        // fixtures *imported into* a conftest slot in just after the ones
+        // defined directly in it (rank * 2 + 1).
+        let mut conftest_rank: HashMap<PathBuf, usize> = HashMap::new();
+        let mut ancestor_conftests: Vec<PathBuf> = Vec::new();
+        let mut depth = 1usize;
+        let mut dir = file_path.parent();
+        while let Some(d) = dir {
+            let conftest_path = d.join("conftest.py");
+            conftest_rank.insert(conftest_path.clone(), depth * 2);
+            ancestor_conftests.push(conftest_path);
+            depth += 1;
+            dir = d.parent();
         }
+        let plugin_rank = depth * 2;
+        let third_party_rank = depth * 2 + 2;
 
-        // Priority 2: Fixtures in conftest.py files (including imported fixtures)
-        if let Some(mut current_dir) = file_path.parent() {
-            loop {
-                let conftest_path = current_dir.join("conftest.py");
-
-                // First add fixtures defined directly in the conftest
-                for entry in self.definitions.iter() {
-                    let fixture_name = entry.key();
-                    for def in entry.value().iter() {
-                        if def.file_path == conftest_path
-                            && !seen_names.contains(fixture_name.as_str())
-                        {
-                            available_fixtures.push(def.clone());
-                            seen_names.insert(fixture_name.clone());
-                        }
+        let mut best: HashMap<String, (usize, FixtureDefinition)> = HashMap::new();
+        let mut consider =
+            |name: &str, rank: usize, def: &FixtureDefinition| match best.get_mut(name) {
+                Some(existing) => {
+                    if rank < existing.0 {
+                        *existing = (rank, def.clone());
                     }
                 }
+                None => {
+                    best.insert(name.to_string(), (rank, def.clone()));
+                }
+            };
 
-                // Then add fixtures imported into the conftest
-                if self.file_cache.contains_key(&conftest_path) {
-                    let mut visited = HashSet::new();
-                    let imported_fixtures =
-                        self.get_imported_fixtures(&conftest_path, &mut visited);
-                    for fixture_name in imported_fixtures {
-                        if !seen_names.contains(&fixture_name) {
-                            // Get the original definition for this imported fixture
-                            if let Some(definitions) = self.definitions.get(&fixture_name) {
-                                if let Some(def) = definitions.first() {
-                                    available_fixtures.push(def.clone());
-                                    seen_names.insert(fixture_name);
-                                }
-                            }
-                        }
+        for entry in self.definitions.iter() {
+            let fixture_name = entry.key();
+            for def in entry.value().iter() {
+                let rank = if def.file_path == file_path {
+                    0
+                } else if let Some(rank) = conftest_rank.get(&def.file_path) {
+                    *rank
+                } else if def.is_third_party {
+                    third_party_rank
+                } else if def.is_plugin {
+                    plugin_rank
+                } else {
+                    // Not visible from this file (e.g. another test file).
+                    continue;
+                };
+                consider(fixture_name, rank, def);
+            }
+        }
+
+        // Fixtures imported into ancestor conftests (results are cached per conftest).
+        for conftest_path in &ancestor_conftests {
+            if !self.file_cache.contains_key(conftest_path) {
+                continue;
+            }
+            let rank = conftest_rank[conftest_path] + 1;
+            let mut visited = HashSet::new();
+            for (fixture_name, source) in self.get_imported_fixtures(conftest_path, &mut visited) {
+                // Prefer the definition from the file the import resolves to.
+                if let Some(definitions) = self.definitions.get(&fixture_name) {
+                    if let Some(def) = definitions
+                        .iter()
+                        .find(|def| def.file_path == source)
+                        .or_else(|| definitions.first())
+                    {
+                        consider(&fixture_name, rank, def);
                     }
                 }
-
-                match current_dir.parent() {
-                    Some(parent) => current_dir = parent,
-                    None => break,
-                }
             }
         }
 
-        // Priority 3: Plugin fixtures (pytest11 entry points, e.g. workspace editable installs)
-        for entry in self.definitions.iter() {
-            let fixture_name = entry.key();
-            for def in entry.value().iter() {
-                if def.is_plugin
-                    && !def.is_third_party
-                    && !seen_names.contains(fixture_name.as_str())
-                {
-                    available_fixtures.push(def.clone());
-                    seen_names.insert(fixture_name.clone());
-                }
-            }
-        }
-
-        // Priority 4: Third-party fixtures from site-packages
-        for entry in self.definitions.iter() {
-            let fixture_name = entry.key();
-            for def in entry.value().iter() {
-                if def.is_third_party && !seen_names.contains(fixture_name.as_str()) {
-                    available_fixtures.push(def.clone());
-                    seen_names.insert(fixture_name.clone());
-                }
-            }
-        }
-
+        let mut available_fixtures: Vec<FixtureDefinition> =
+            best.into_values().map(|(_, def)| def).collect();
         available_fixtures.sort_by(|a, b| a.name.cmp(&b.name));
         available_fixtures
     }

@@ -21,6 +21,43 @@ pub(crate) struct BodyScanContext<'a> {
     pub function_line: usize,
 }
 
+/// Collect names bound by walrus (`:=`) expressions anywhere inside `expr`.
+fn collect_walrus_targets(expr: &Expr, names: &mut HashSet<String>) {
+    if let Expr::NamedExpr(named) = expr {
+        if let Expr::Name(name) = named.target.as_ref() {
+            names.insert(name.id.to_string());
+        }
+        collect_walrus_targets(&named.value, names);
+        return;
+    }
+    // Recurse into the common containers a walrus realistically appears in.
+    match expr {
+        Expr::BoolOp(e) => e
+            .values
+            .iter()
+            .for_each(|v| collect_walrus_targets(v, names)),
+        Expr::BinOp(e) => {
+            collect_walrus_targets(&e.left, names);
+            collect_walrus_targets(&e.right, names);
+        }
+        Expr::UnaryOp(e) => collect_walrus_targets(&e.operand, names),
+        Expr::Compare(e) => {
+            collect_walrus_targets(&e.left, names);
+            e.comparators
+                .iter()
+                .for_each(|c| collect_walrus_targets(c, names));
+        }
+        Expr::Call(e) => e.args.iter().for_each(|a| collect_walrus_targets(a, names)),
+        Expr::Tuple(e) => e.elts.iter().for_each(|v| collect_walrus_targets(v, names)),
+        Expr::IfExp(e) => {
+            collect_walrus_targets(&e.test, names);
+            collect_walrus_targets(&e.body, names);
+            collect_walrus_targets(&e.orelse, names);
+        }
+        _ => {}
+    }
+}
+
 impl FixtureDatabase {
     /// Scan a function body for undeclared fixture usages.
     /// An undeclared fixture is a reference to a fixture that exists in the database
@@ -78,6 +115,7 @@ impl FixtureDatabase {
                     for target in &assign.targets {
                         self.collect_names_from_expr(target, &mut temp_names);
                     }
+                    collect_walrus_targets(&assign.value, &mut temp_names);
                     for name in temp_names {
                         local_vars.insert(name, line);
                     }
@@ -121,9 +159,23 @@ impl FixtureDatabase {
                     self.collect_local_variables(&for_stmt.body, line_index, local_vars);
                 }
                 Stmt::While(while_stmt) => {
+                    let line =
+                        self.get_line_from_offset(while_stmt.range.start().to_usize(), line_index);
+                    let mut temp_names = HashSet::new();
+                    collect_walrus_targets(&while_stmt.test, &mut temp_names);
+                    for name in temp_names {
+                        local_vars.insert(name, line);
+                    }
                     self.collect_local_variables(&while_stmt.body, line_index, local_vars);
                 }
                 Stmt::If(if_stmt) => {
+                    let line =
+                        self.get_line_from_offset(if_stmt.range.start().to_usize(), line_index);
+                    let mut temp_names = HashSet::new();
+                    collect_walrus_targets(&if_stmt.test, &mut temp_names);
+                    for name in temp_names {
+                        local_vars.insert(name, line);
+                    }
                     self.collect_local_variables(&if_stmt.body, line_index, local_vars);
                     self.collect_local_variables(&if_stmt.orelse, line_index, local_vars);
                 }
@@ -196,10 +248,16 @@ impl FixtureDatabase {
                 for stmt in &while_stmt.body {
                     self.visit_stmt_for_names(stmt, ctx);
                 }
+                for stmt in &while_stmt.orelse {
+                    self.visit_stmt_for_names(stmt, ctx);
+                }
             }
             Stmt::For(for_stmt) => {
                 self.visit_expr_for_names(&for_stmt.iter, ctx);
                 for stmt in &for_stmt.body {
+                    self.visit_stmt_for_names(stmt, ctx);
+                }
+                for stmt in &for_stmt.orelse {
                     self.visit_stmt_for_names(stmt, ctx);
                 }
             }
@@ -229,6 +287,47 @@ impl FixtureDatabase {
                 self.visit_expr_for_names(&assert_stmt.test, ctx);
                 if let Some(ref msg) = assert_stmt.msg {
                     self.visit_expr_for_names(msg, ctx);
+                }
+            }
+            Stmt::AnnAssign(ann_assign) => {
+                if let Some(ref value) = ann_assign.value {
+                    self.visit_expr_for_names(value, ctx);
+                }
+            }
+            Stmt::Raise(raise_stmt) => {
+                if let Some(ref exc) = raise_stmt.exc {
+                    self.visit_expr_for_names(exc, ctx);
+                }
+                if let Some(ref cause) = raise_stmt.cause {
+                    self.visit_expr_for_names(cause, ctx);
+                }
+            }
+            Stmt::Try(try_stmt) => {
+                for stmt in &try_stmt.body {
+                    self.visit_stmt_for_names(stmt, ctx);
+                }
+                for handler in &try_stmt.handlers {
+                    let rustpython_parser::ast::ExceptHandler::ExceptHandler(h) = handler;
+                    for stmt in &h.body {
+                        self.visit_stmt_for_names(stmt, ctx);
+                    }
+                }
+                for stmt in &try_stmt.orelse {
+                    self.visit_stmt_for_names(stmt, ctx);
+                }
+                for stmt in &try_stmt.finalbody {
+                    self.visit_stmt_for_names(stmt, ctx);
+                }
+            }
+            Stmt::Match(match_stmt) => {
+                self.visit_expr_for_names(&match_stmt.subject, ctx);
+                for case in &match_stmt.cases {
+                    if let Some(ref guard) = case.guard {
+                        self.visit_expr_for_names(guard, ctx);
+                    }
+                    for stmt in &case.body {
+                        self.visit_stmt_for_names(stmt, ctx);
+                    }
                 }
             }
             _ => {}
@@ -327,6 +426,67 @@ impl FixtureDatabase {
             }
             Expr::Await(await_expr) => {
                 self.visit_expr_for_names(&await_expr.value, ctx);
+            }
+            Expr::BoolOp(bool_op) => {
+                for value in &bool_op.values {
+                    self.visit_expr_for_names(value, ctx);
+                }
+            }
+            Expr::IfExp(if_exp) => {
+                self.visit_expr_for_names(&if_exp.test, ctx);
+                self.visit_expr_for_names(&if_exp.body, ctx);
+                self.visit_expr_for_names(&if_exp.orelse, ctx);
+            }
+            Expr::NamedExpr(named) => {
+                // Only the value is a read; the walrus target is a binding.
+                self.visit_expr_for_names(&named.value, ctx);
+            }
+            Expr::Starred(starred) => {
+                self.visit_expr_for_names(&starred.value, ctx);
+            }
+            Expr::JoinedStr(joined) => {
+                for value in &joined.values {
+                    self.visit_expr_for_names(value, ctx);
+                }
+            }
+            Expr::FormattedValue(formatted) => {
+                self.visit_expr_for_names(&formatted.value, ctx);
+            }
+            Expr::Set(set) => {
+                for elt in &set.elts {
+                    self.visit_expr_for_names(elt, ctx);
+                }
+            }
+            Expr::Slice(slice) => {
+                for part in [&slice.lower, &slice.upper, &slice.step]
+                    .into_iter()
+                    .flatten()
+                {
+                    self.visit_expr_for_names(part, ctx);
+                }
+            }
+            // Comprehensions: only the iterables are visited — elements and
+            // conditions typically reference comprehension-local loop targets,
+            // which would produce false positives without scope tracking.
+            Expr::ListComp(comp) => {
+                for generator in &comp.generators {
+                    self.visit_expr_for_names(&generator.iter, ctx);
+                }
+            }
+            Expr::SetComp(comp) => {
+                for generator in &comp.generators {
+                    self.visit_expr_for_names(&generator.iter, ctx);
+                }
+            }
+            Expr::GeneratorExp(comp) => {
+                for generator in &comp.generators {
+                    self.visit_expr_for_names(&generator.iter, ctx);
+                }
+            }
+            Expr::DictComp(comp) => {
+                for generator in &comp.generators {
+                    self.visit_expr_for_names(&generator.iter, ctx);
+                }
             }
             _ => {}
         }
@@ -487,6 +647,58 @@ mod tests {
         assert!(
             undeclared.iter().all(|u| u.name != "my_fixture"),
             "declared parameter should suppress flag, got {:?}",
+            undeclared
+        );
+    }
+
+    #[test]
+    fn test_undeclared_flagged_in_fstring() {
+        let undeclared = analyze_with_conftest("    x = f\"{my_fixture}\"\n");
+        assert!(
+            undeclared.iter().any(|u| u.name == "my_fixture"),
+            "fixture inside f-string should be flagged, got {:?}",
+            undeclared
+        );
+    }
+
+    #[test]
+    fn test_undeclared_flagged_in_ternary_and_boolop() {
+        let undeclared = analyze_with_conftest("    x = 1 if my_fixture else 2\n");
+        assert!(undeclared.iter().any(|u| u.name == "my_fixture"));
+
+        let undeclared = analyze_with_conftest("    x = my_fixture or None\n");
+        assert!(undeclared.iter().any(|u| u.name == "my_fixture"));
+    }
+
+    #[test]
+    fn test_undeclared_flagged_in_ann_assign_and_raise() {
+        let undeclared = analyze_with_conftest("    x: int = my_fixture\n");
+        assert!(undeclared.iter().any(|u| u.name == "my_fixture"));
+
+        let undeclared = analyze_with_conftest("    raise ValueError(my_fixture)\n");
+        assert!(undeclared.iter().any(|u| u.name == "my_fixture"));
+    }
+
+    #[test]
+    fn test_undeclared_flagged_in_try_and_comprehension_iterable() {
+        let undeclared = analyze_with_conftest(
+            "    try:\n        _ = my_fixture\n    except KeyError:\n        pass\n",
+        );
+        assert!(undeclared.iter().any(|u| u.name == "my_fixture"));
+
+        let undeclared = analyze_with_conftest("    x = [i for i in my_fixture]\n");
+        assert!(undeclared.iter().any(|u| u.name == "my_fixture"));
+    }
+
+    #[test]
+    fn test_walrus_target_not_flagged() {
+        // `(my_fixture := 5)` binds a local; neither the binding nor a later
+        // read of it should be flagged as an undeclared fixture.
+        let undeclared =
+            analyze_with_conftest("    if (my_fixture := 5):\n        _ = my_fixture\n");
+        assert!(
+            undeclared.iter().all(|u| u.name != "my_fixture"),
+            "walrus binding should suppress undeclared flag, got {:?}",
             undeclared
         );
     }

@@ -135,10 +135,32 @@ fn test_extract_usefixtures() {
 
     if let rustpython_parser::ast::Mod::Module(module) = parsed {
         if let rustpython_parser::ast::Stmt::FunctionDef(func_def) = &module.body[0] {
-            let names = decorators::extract_usefixtures_names(&func_def.decorator_list[0]);
+            let names = decorators::extract_usefixtures_names(&func_def.decorator_list[0], code);
             assert_eq!(names.len(), 2);
             assert_eq!(names[0].0, "f1");
             assert_eq!(names[1].0, "f2");
+        }
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_extract_usefixtures_ranges_cover_exact_names() {
+    // Ranges must cover exactly the fixture name for any quote style,
+    // including prefixed (r"...") and triple-quoted ("""...""") literals.
+    let code = "@pytest.mark.usefixtures('f1', r'f2', \"\"\"f3\"\"\")\ndef test_x(): pass";
+    let parsed = parse(code, Mode::Module, "").unwrap();
+
+    if let rustpython_parser::ast::Mod::Module(module) = parsed {
+        if let rustpython_parser::ast::Stmt::FunctionDef(func_def) = &module.body[0] {
+            let names = decorators::extract_usefixtures_names(&func_def.decorator_list[0], code);
+            assert_eq!(names.len(), 3);
+            for (name, range) in &names {
+                let span = &code[range.start().to_usize()..range.end().to_usize()];
+                assert_eq!(span, name, "range must cover exactly the fixture name");
+            }
+        } else {
+            panic!("expected function def");
         }
     }
 }
@@ -151,7 +173,7 @@ fn test_extract_usefixtures_from_expr_direct_call() {
 
     if let rustpython_parser::ast::Mod::Module(module) = parsed {
         if let rustpython_parser::ast::Stmt::Assign(assign) = &module.body[0] {
-            let names = decorators::extract_usefixtures_from_expr(&assign.value);
+            let names = decorators::extract_usefixtures_from_expr(&assign.value, code);
             assert_eq!(names.len(), 2);
             assert_eq!(names[0].0, "f1");
             assert_eq!(names[1].0, "f2");
@@ -167,7 +189,7 @@ fn test_extract_usefixtures_from_expr_list() {
 
     if let rustpython_parser::ast::Mod::Module(module) = parsed {
         if let rustpython_parser::ast::Stmt::Assign(assign) = &module.body[0] {
-            let names = decorators::extract_usefixtures_from_expr(&assign.value);
+            let names = decorators::extract_usefixtures_from_expr(&assign.value, code);
             assert_eq!(names.len(), 2);
             assert_eq!(names[0].0, "f1");
             assert_eq!(names[1].0, "f2");
@@ -183,7 +205,7 @@ fn test_extract_usefixtures_from_expr_tuple() {
 
     if let rustpython_parser::ast::Mod::Module(module) = parsed {
         if let rustpython_parser::ast::Stmt::Assign(assign) = &module.body[0] {
-            let names = decorators::extract_usefixtures_from_expr(&assign.value);
+            let names = decorators::extract_usefixtures_from_expr(&assign.value, code);
             assert_eq!(names.len(), 2);
             assert_eq!(names[0].0, "f1");
             assert_eq!(names[1].0, "f2");
@@ -199,7 +221,7 @@ fn test_extract_usefixtures_from_expr_no_usefixtures() {
 
     if let rustpython_parser::ast::Mod::Module(module) = parsed {
         if let rustpython_parser::ast::Stmt::Assign(assign) = &module.body[0] {
-            let names = decorators::extract_usefixtures_from_expr(&assign.value);
+            let names = decorators::extract_usefixtures_from_expr(&assign.value, code);
             assert_eq!(names.len(), 0);
         }
     }
@@ -228,10 +250,18 @@ fn test_extract_parametrize_indirect() {
 
     if let rustpython_parser::ast::Mod::Module(module) = parsed {
         if let rustpython_parser::ast::Stmt::FunctionDef(func_def) = &module.body[0] {
-            let fixtures =
-                decorators::extract_parametrize_indirect_fixtures(&func_def.decorator_list[0]);
+            let fixtures = decorators::extract_parametrize_indirect_fixtures(
+                &func_def.decorator_list[0],
+                code,
+            );
             assert_eq!(fixtures.len(), 1);
             assert_eq!(fixtures[0].0, "f1");
+            // The range must point at the name token itself, not the whole literal.
+            let (name, range) = &fixtures[0];
+            assert_eq!(
+                &code[range.start().to_usize()..range.end().to_usize()],
+                name
+            );
         }
     }
 }

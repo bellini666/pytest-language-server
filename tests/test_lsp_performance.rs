@@ -8,6 +8,7 @@
 use ntest::timeout;
 use pytest_language_server::FixtureDatabase;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tempfile::TempDir;
 
 /// Helper to create a temporary test file with given content
@@ -791,4 +792,52 @@ def fixture_{n}():
             i
         );
     }
+}
+
+/// Concurrent re-analysis of the SAME file — the real contention surface for
+/// the shared definitions/usages maps (the older test only used distinct files).
+#[test]
+#[timeout(60000)]
+fn test_concurrent_same_file_modifications() {
+    let db = Arc::new(FixtureDatabase::new());
+    let path = PathBuf::from("/tmp/pls_concurrent_same/test_file.py");
+
+    const CONTENT_A: &str = "import pytest\n\n@pytest.fixture\ndef fix_a():\n    return 1\n\ndef test_x(fix_a):\n    assert fix_a\n";
+    const CONTENT_B: &str = "import pytest\n\n@pytest.fixture\ndef fix_b():\n    return 2\n\ndef test_x(fix_b):\n    assert fix_b\n";
+
+    let mut handles = Vec::new();
+    for t in 0..8usize {
+        let db = Arc::clone(&db);
+        let path = path.clone();
+        handles.push(std::thread::spawn(move || {
+            for i in 0..50usize {
+                let content = if (t + i) % 2 == 0 {
+                    CONTENT_A
+                } else {
+                    CONTENT_B
+                };
+                db.analyze_file(path.clone(), content);
+                // Interleave reads that take guards on the same maps.
+                let _ = db.find_fixture_references("fix_a");
+                let _ = db.get_available_fixtures(&path);
+                let _ = db.get_undeclared_fixtures(&path);
+            }
+        }));
+    }
+    for handle in handles {
+        handle.join().expect("no thread should panic or deadlock");
+    }
+
+    // A final serial analysis must restore a fully consistent state.
+    db.analyze_file(path.clone(), CONTENT_A);
+    assert!(db.definitions.contains_key("fix_a"));
+    let stale_b = db
+        .definitions
+        .get("fix_b")
+        .map(|defs| defs.iter().any(|d| d.file_path == path))
+        .unwrap_or(false);
+    assert!(
+        !stale_b,
+        "fix_b must be cleaned up after the final analysis"
+    );
 }

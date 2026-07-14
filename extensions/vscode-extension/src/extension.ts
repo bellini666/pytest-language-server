@@ -9,6 +9,16 @@ import {
 
 let client: LanguageClient | undefined;
 
+/** Detect musl-based Linux (no glibc runtime in the process report). */
+function isMusl(): boolean {
+  try {
+    const report = process.report?.getReport() as { header?: { glibcVersionRuntime?: string } };
+    return report?.header?.glibcVersionRuntime === undefined;
+  } catch {
+    return false;
+  }
+}
+
 export async function activate(context: vscode.ExtensionContext) {
   const config = vscode.workspace.getConfiguration('pytestLanguageServer');
   const customExecutable = config.get<string>('executable', '');
@@ -25,6 +35,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
     let binaryName: string;
     if (platform === 'win32') {
+      // Windows arm64 can run the x64 binary through emulation.
       binaryName = 'pytest-language-server.exe';
     } else if (platform === 'darwin') {
       // macOS
@@ -34,6 +45,21 @@ export async function activate(context: vscode.ExtensionContext) {
         binaryName = 'pytest-language-server-x86_64-apple-darwin';
       }
     } else if (platform === 'linux') {
+      if (arch !== 'arm64' && arch !== 'x64') {
+        vscode.window.showErrorMessage(
+          `Unsupported architecture: linux/${arch}. Please install pytest-language-server manually ` +
+          `(e.g. "pip install pytest-language-server") and set "pytestLanguageServer.executable".`
+        );
+        return;
+      }
+      if (isMusl()) {
+        vscode.window.showErrorMessage(
+          'The bundled pytest-language-server binary is built against glibc and will not run on ' +
+          'musl-based systems (e.g. Alpine). Please install pytest-language-server manually ' +
+          '(e.g. "pip install pytest-language-server") and set "pytestLanguageServer.executable".'
+        );
+        return;
+      }
       if (arch === 'arm64') {
         binaryName = 'pytest-language-server-aarch64-unknown-linux-gnu';
       } else {
@@ -109,6 +135,29 @@ export async function activate(context: vscode.ExtensionContext) {
         }
       }
     })
+  );
+
+  // Register the command emitted by the server's code lenses ("N usages"):
+  // resolve references at the lens position and show them in the peek view.
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      'pytest-lsp.findReferences',
+      async (uriString: string, line: number, character: number) => {
+        const uri = vscode.Uri.parse(uriString);
+        const position = new vscode.Position(line, character);
+        const locations = await vscode.commands.executeCommand<vscode.Location[]>(
+          'vscode.executeReferenceProvider',
+          uri,
+          position
+        );
+        await vscode.commands.executeCommand(
+          'editor.action.showReferences',
+          uri,
+          position,
+          locations ?? []
+        );
+      }
+    )
   );
 
   // Start the language server with proper error handling

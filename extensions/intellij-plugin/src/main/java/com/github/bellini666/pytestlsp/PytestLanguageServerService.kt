@@ -7,8 +7,6 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.SystemInfo
 import com.intellij.util.system.CpuArch
 import java.io.File
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption
 
 @Service(Service.Level.PROJECT)
 class PytestLanguageServerService(private val project: Project) {

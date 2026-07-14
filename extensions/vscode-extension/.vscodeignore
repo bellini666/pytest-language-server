@@ -1,9 +1,11 @@
 .vscode/**
 .vscode-test/**
 src/**
+scripts/**
 .gitignore
 .yarnrc
 webpack.config.js
+eslint.config.mjs
 **/tsconfig.json
 **/.eslintrc.json
 out/**/*.map

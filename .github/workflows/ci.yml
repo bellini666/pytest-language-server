@@ -99,6 +99,11 @@ jobs:
           npm install
           npm install -g @vscode/vsce
 
+      - name: Check dependency engines against VSCodium floor
+        run: |
+          cd extensions/vscode-extension
+          npm run check-engines
+
       - name: Lint
         run: |
           cd extensions/vscode-extension

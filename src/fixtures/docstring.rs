@@ -260,6 +260,45 @@ mod tests {
     }
 
     #[test]
+    fn test_return_type_yield_in_except_handler_and_match() {
+        let ret = fixture_return_type(
+            "import pytest\nfrom typing import Generator\n@pytest.fixture\ndef fx() -> Generator[int, None, None]:\n    try:\n        pass\n    except ValueError:\n        yield 1\n",
+        );
+        assert_eq!(ret, Some("int".to_string()));
+
+        let ret = fixture_return_type(
+            "import pytest\nfrom typing import Generator\n@pytest.fixture\ndef fx() -> Generator[int, None, None]:\n    match 1:\n        case _:\n            yield 1\n",
+        );
+        assert_eq!(ret, Some("int".to_string()));
+    }
+
+    #[test]
+    fn test_return_type_yield_in_return_and_augassign() {
+        let ret = fixture_return_type(
+            "import pytest\nfrom typing import Generator\n@pytest.fixture\ndef fx() -> Generator[int, None, None]:\n    return (yield 1)\n",
+        );
+        assert_eq!(ret, Some("int".to_string()));
+
+        let ret = fixture_return_type(
+            "import pytest\nfrom typing import Generator\n@pytest.fixture\ndef fx() -> Generator[int, None, None]:\n    x = 0\n    x += yield 1\n",
+        );
+        assert_eq!(ret, Some("int".to_string()));
+    }
+
+    #[test]
+    fn test_return_type_yield_inside_async_for_and_while() {
+        let ret = fixture_return_type(
+            "import pytest\nfrom typing import AsyncGenerator\n@pytest.fixture\nasync def fx() -> AsyncGenerator[int, None]:\n    async for i in aiter():\n        yield 1\n",
+        );
+        assert_eq!(ret, Some("int".to_string()));
+
+        let ret = fixture_return_type(
+            "import pytest\nfrom typing import Generator\n@pytest.fixture\ndef fx() -> Generator[int, None, None]:\n    while True:\n        yield 1\n",
+        );
+        assert_eq!(ret, Some("int".to_string()));
+    }
+
+    #[test]
     fn test_return_type_non_subscript_generator_falls_through() {
         // Plain `Generator` without subscript → falls through to expr_to_string.
         let ret = fixture_return_type(

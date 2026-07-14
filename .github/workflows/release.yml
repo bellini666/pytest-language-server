@@ -554,6 +554,7 @@ jobs:
   publish-zed:
     name: Publish Zed extension
     runs-on: ubuntu-latest
+    needs: [test]
     # Disabled due to bug in huacnlee/zed-extension-action - regex doesn't handle multiline TOML
     # Manually update version in bellini666/extensions repository after each release
     if: false

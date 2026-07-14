@@ -704,6 +704,74 @@ mod tests {
     }
 
     #[test]
+    fn test_undeclared_flagged_in_match_and_orelse_blocks() {
+        let undeclared =
+            analyze_with_conftest("    match my_fixture:\n        case _:\n            pass\n");
+        assert!(undeclared.iter().any(|u| u.name == "my_fixture"));
+
+        let undeclared =
+            analyze_with_conftest("    match 1:\n        case _:\n            _ = my_fixture\n");
+        assert!(undeclared.iter().any(|u| u.name == "my_fixture"));
+
+        let undeclared = analyze_with_conftest(
+            "    for i in []:\n        pass\n    else:\n        _ = my_fixture\n",
+        );
+        assert!(undeclared.iter().any(|u| u.name == "my_fixture"));
+
+        let undeclared = analyze_with_conftest(
+            "    while False:\n        pass\n    else:\n        _ = my_fixture\n",
+        );
+        assert!(undeclared.iter().any(|u| u.name == "my_fixture"));
+    }
+
+    #[test]
+    fn test_undeclared_flagged_in_raise_from_and_finally() {
+        let undeclared = analyze_with_conftest("    raise ValueError() from my_fixture\n");
+        assert!(undeclared.iter().any(|u| u.name == "my_fixture"));
+
+        let undeclared =
+            analyze_with_conftest("    try:\n        pass\n    finally:\n        _ = my_fixture\n");
+        assert!(undeclared.iter().any(|u| u.name == "my_fixture"));
+
+        let undeclared = analyze_with_conftest(
+            "    try:\n        pass\n    except ValueError:\n        pass\n    else:\n        _ = my_fixture\n",
+        );
+        assert!(undeclared.iter().any(|u| u.name == "my_fixture"));
+    }
+
+    #[test]
+    fn test_undeclared_flagged_in_set_slice_and_starred() {
+        let undeclared = analyze_with_conftest("    x = {my_fixture}\n");
+        assert!(undeclared.iter().any(|u| u.name == "my_fixture"));
+
+        let undeclared = analyze_with_conftest("    x = [1, 2][my_fixture:]\n");
+        assert!(undeclared.iter().any(|u| u.name == "my_fixture"));
+
+        let undeclared = analyze_with_conftest("    x = [*my_fixture]\n");
+        assert!(undeclared.iter().any(|u| u.name == "my_fixture"));
+    }
+
+    #[test]
+    fn test_walrus_targets_collected_through_containers() {
+        // Walrus bindings nested in calls, comparisons, boolean/unary/binary
+        // ops, tuples and ternaries all register as locals.
+        for body in [
+            "    x = f((v := 1))\n    _ = v\n",
+            "    x = (v := 1) < 2\n    _ = v\n",
+            "    x = not (v := 1)\n    _ = v\n",
+            "    x = (v := 1) + 1\n    _ = v\n",
+            "    x = ((v := 1), 2)\n    _ = v\n",
+            "    x = 1 if (v := 2) else (w := 3)\n    _ = v\n",
+        ] {
+            let undeclared = analyze_with_conftest(body);
+            assert!(
+                undeclared.iter().all(|u| u.name != "v" && u.name != "w"),
+                "walrus target should be a local in {body:?}, got {undeclared:?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_is_available_fixture_same_file() {
         let db = FixtureDatabase::new();
         let conftest_path = PathBuf::from("/tmp/pls_avail/conftest.py");

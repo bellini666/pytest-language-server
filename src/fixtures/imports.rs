@@ -535,9 +535,24 @@ impl FixtureDatabase {
                         imported_fixtures.entry(name).or_insert(source);
                     }
                 } else {
-                    // Explicit import: only include the specified names if they are fixtures
+                    // Explicit import: prefer names actually defined in the
+                    // resolved module, then names it re-exports (transitively,
+                    // attributed to their true source). Fall back to any known
+                    // fixture name so modules that were resolved but never
+                    // scanned don't lose their fixtures.
+                    let module_fixtures: HashSet<String> = self
+                        .file_definitions
+                        .get(&resolved_canonical)
+                        .map(|entry| entry.value().clone())
+                        .unwrap_or_default();
+                    let reexported = self.get_imported_fixtures(&resolved_canonical, visited);
+
                     for name in &import.imported_names {
-                        if self.definitions.contains_key(name) {
+                        if module_fixtures.contains(name) {
+                            imported_fixtures.insert(name.clone(), resolved_canonical.clone());
+                        } else if let Some(source) = reexported.get(name) {
+                            imported_fixtures.insert(name.clone(), source.clone());
+                        } else if self.definitions.contains_key(name) {
                             imported_fixtures.insert(name.clone(), resolved_canonical.clone());
                         }
                     }

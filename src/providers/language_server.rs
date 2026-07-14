@@ -267,6 +267,17 @@ impl LanguageServer for Backend {
                     // Publish diagnostics for undeclared fixtures
                     backend.publish_diagnostics_for_file(&uri, &file_path).await;
 
+                    // If the file was closed while we were publishing (did_close
+                    // removes the generation entry), re-clear so a closed file
+                    // never ends up showing stale diagnostics.
+                    if backend.change_generation.get(&file_path).is_none() {
+                        backend
+                            .client
+                            .publish_diagnostics(uri.clone(), Vec::new(), None)
+                            .await;
+                        return;
+                    }
+
                     // Request inlay hint refresh so editors update hints after edits
                     // (e.g., when user adds/removes type annotations)
                     if let Err(e) = backend.client.inlay_hint_refresh().await {

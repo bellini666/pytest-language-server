@@ -115,17 +115,21 @@ impl Backend {
         }
     }
 
-    /// Get the text of a 1-based line in a file (without the trailing newline).
-    fn line_text(&self, file_path: &std::path::Path, internal_line: usize) -> Option<String> {
+    /// Run `f` on the text of a 1-based line (without the trailing newline).
+    /// Borrows straight from the cached content Arc — no per-call allocation —
+    /// and uses the identity-keyed line index so the file is not re-hashed on
+    /// every column conversion.
+    fn with_line_text<R>(
+        &self,
+        file_path: &std::path::Path,
+        internal_line: usize,
+        f: impl FnOnce(&str) -> R,
+    ) -> Option<R> {
         let content = self.fixture_db.get_file_content(file_path)?;
-        let index = self.fixture_db.get_line_index(file_path, &content);
+        let index = self.fixture_db.get_line_index_for(file_path, &content);
         let start = *index.get(internal_line.checked_sub(1)?)?;
         let end = index.get(internal_line).copied().unwrap_or(content.len());
-        Some(
-            content[start..end]
-                .trim_end_matches(['\r', '\n'])
-                .to_string(),
-        )
+        Some(f(content[start..end].trim_end_matches(['\r', '\n'])))
     }
 
     /// Convert an inbound LSP position's character to an internal byte column.
@@ -133,10 +137,12 @@ impl Backend {
         if !self.client_utf16.load(Ordering::Relaxed) {
             return position.character;
         }
-        match self.line_text(file_path, Self::lsp_line_to_internal(position.line)) {
-            Some(line) => utf16_col_to_byte(&line, position.character as usize) as u32,
-            None => position.character,
-        }
+        self.with_line_text(
+            file_path,
+            Self::lsp_line_to_internal(position.line),
+            |line| utf16_col_to_byte(line, position.character as usize) as u32,
+        )
+        .unwrap_or(position.character)
     }
 
     /// Convert an internal byte column to an outbound LSP character.
@@ -149,10 +155,10 @@ impl Backend {
         if !self.client_utf16.load(Ordering::Relaxed) {
             return byte_col as u32;
         }
-        match self.line_text(file_path, internal_line) {
-            Some(line) => byte_col_to_utf16(&line, byte_col) as u32,
-            None => byte_col as u32,
-        }
+        self.with_line_text(file_path, internal_line, |line| {
+            byte_col_to_utf16(line, byte_col) as u32
+        })
+        .unwrap_or(byte_col as u32)
     }
 
     /// Convert URI to PathBuf with error logging

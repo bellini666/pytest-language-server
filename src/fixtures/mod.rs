@@ -42,6 +42,11 @@ pub struct EditableInstall {
     pub site_packages: PathBuf,
 }
 
+/// Cache entry for the identity-keyed line index: (content Arc identity, line_index).
+/// A hit requires upgrading the Weak and comparing Arc pointers, which makes
+/// it ABA-safe (a freed-and-reused allocation can't produce a false hit).
+type LineIndexIdentityCacheEntry = (std::sync::Weak<String>, Arc<Vec<usize>>);
+
 /// Cache entry for line indices: (content_hash, line_index).
 /// The content hash is used to invalidate the cache when file content changes.
 type LineIndexCacheEntry = (u64, Arc<Vec<usize>>);
@@ -111,6 +116,9 @@ pub struct FixtureDatabase {
     /// Cache of line indices (byte offsets) for files to avoid recomputation.
     /// Stores (content_hash, line_index) to invalidate when content changes.
     pub line_index_cache: Arc<DashMap<PathBuf, LineIndexCacheEntry>>,
+    /// Identity-keyed line-index cache so repeated per-column position
+    /// conversions skip re-hashing the whole file.
+    pub line_index_by_identity: Arc<DashMap<PathBuf, LineIndexIdentityCacheEntry>>,
     /// Cache of parsed AST for files to avoid re-parsing.
     /// Stores (content_hash, ast) to invalidate when content changes.
     pub ast_cache: Arc<DashMap<PathBuf, AstCacheEntry>>,
@@ -164,6 +172,7 @@ impl FixtureDatabase {
             imports: Arc::new(DashMap::new()),
             canonical_path_cache: Arc::new(DashMap::new()),
             line_index_cache: Arc::new(DashMap::new()),
+            line_index_by_identity: Arc::new(DashMap::new()),
             ast_cache: Arc::new(DashMap::new()),
             definitions_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cycle_cache: Arc::new(DashMap::new()),
@@ -211,10 +220,16 @@ impl FixtureDatabase {
         if let Some(cached) = self.file_cache.get(file_path) {
             return Some(Arc::clone(cached.value()));
         }
+
+        // or_insert (not insert): if an analyze_file with fresher editor-buffer
+        // content raced in between the miss above and here, keep that buffer
+        // instead of clobbering it with our possibly-stale disk read.
         let content = Arc::new(std::fs::read_to_string(file_path).ok()?);
-        self.file_cache
-            .insert(file_path.to_path_buf(), Arc::clone(&content));
-        Some(content)
+        let entry = self
+            .file_cache
+            .entry(file_path.to_path_buf())
+            .or_insert(content);
+        Some(Arc::clone(entry.value()))
     }
 
     /// Get or compute line index for a file, with content-hash-based caching.
@@ -242,6 +257,32 @@ impl FixtureDatabase {
         );
 
         arc_index
+    }
+
+    /// Get the line index for a content `Arc`, skipping the O(file) content
+    /// hash when the same `Arc` was seen last. Used by per-column position
+    /// conversions, which can run hundreds of times per request.
+    pub(crate) fn get_line_index_for(
+        &self,
+        file_path: &Path,
+        content: &Arc<String>,
+    ) -> Arc<Vec<usize>> {
+        if let Some(entry) = self.line_index_by_identity.get(file_path) {
+            let (weak, index) = entry.value();
+            if weak
+                .upgrade()
+                .is_some_and(|cached| Arc::ptr_eq(&cached, content))
+            {
+                return Arc::clone(index);
+            }
+        }
+
+        let index = self.get_line_index(file_path, content);
+        self.line_index_by_identity.insert(
+            file_path.to_path_buf(),
+            (Arc::downgrade(content), Arc::clone(&index)),
+        );
+        index
     }
 
     /// Get or parse AST for a file, with content-hash-based caching.
@@ -359,6 +400,7 @@ impl FixtureDatabase {
 
         // Remove from line_index_cache
         self.line_index_cache.remove(&canonical);
+        self.line_index_by_identity.remove(&canonical);
 
         // Remove from ast_cache
         self.ast_cache.remove(&canonical);
@@ -420,6 +462,7 @@ impl FixtureDatabase {
                 self.file_cache.remove(&path);
                 // Also clean related caches for consistency
                 self.line_index_cache.remove(&path);
+                self.line_index_by_identity.remove(&path);
                 self.ast_cache.remove(&path);
                 self.available_fixtures_cache.remove(&path);
                 self.imported_fixtures_cache.remove(&path);

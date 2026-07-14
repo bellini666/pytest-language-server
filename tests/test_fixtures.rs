@@ -15217,7 +15217,7 @@ fn test_completion_context_text_fallback_fixture_scope_single_quotes() {
 #[timeout(120000)]
 fn test_file_cache_eviction_bounds_cache_size() {
     let db = FixtureDatabase::new();
-    let base = PathBuf::from("/tmp/pls_eviction_test");
+    let base = std::env::temp_dir().join("pls_eviction_test");
 
     // MAX_FILE_CACHE_SIZE is 2000; exceed it enough to trigger bulk eviction.
     let total = 2101;
@@ -15258,4 +15258,36 @@ fn test_file_cache_eviction_bounds_cache_size() {
         }
     }
     assert!(evicted > 0, "expected at least one eviction");
+}
+
+#[test]
+#[timeout(30000)]
+fn test_explicit_import_resolves_to_reexporting_source() {
+    // conftest explicitly imports a fixture from module B, which itself
+    // star-imports it from module C. The imported-fixtures map must attribute
+    // the fixture to its true source (module C).
+    let db = FixtureDatabase::new();
+    let base = std::env::temp_dir().join("pls_reexport_source");
+
+    let module_c = base.join("module_c.py");
+    db.analyze_file(
+        module_c.clone(),
+        "import pytest\n\n@pytest.fixture\ndef reexported_fix():\n    return 1\n",
+    );
+
+    let module_b = base.join("module_b.py");
+    db.analyze_file(module_b.clone(), "from module_c import *\n");
+
+    let conftest = base.join("conftest.py");
+    db.analyze_file(conftest.clone(), "from module_b import reexported_fix\n");
+
+    let mut visited = HashSet::new();
+    let imported = db.get_imported_fixtures(&conftest, &mut visited);
+    let source = imported
+        .get("reexported_fix")
+        .expect("explicitly imported re-exported fixture must be found");
+    assert_eq!(
+        source, &module_c,
+        "the fixture must be attributed to the file that defines it"
+    );
 }

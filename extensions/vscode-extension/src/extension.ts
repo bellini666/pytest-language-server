@@ -9,11 +9,18 @@ import {
 
 let client: LanguageClient | undefined;
 
-/** Detect musl-based Linux (no glibc runtime in the process report). */
+/** Detect musl-based Linux (report present but no glibc runtime in it).
+ * Unknown (no report/header available) is treated as glibc so we never
+ * block a working system on missing information. */
 function isMusl(): boolean {
   try {
-    const report = process.report?.getReport() as { header?: { glibcVersionRuntime?: string } };
-    return report?.header?.glibcVersionRuntime === undefined;
+    const report = process.report?.getReport() as
+      | { header?: { glibcVersionRuntime?: string } }
+      | undefined;
+    if (!report?.header) {
+      return false;
+    }
+    return report.header.glibcVersionRuntime === undefined;
   } catch {
     return false;
   }

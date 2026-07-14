@@ -800,7 +800,9 @@ def fixture_{n}():
 #[timeout(60000)]
 fn test_concurrent_same_file_modifications() {
     let db = Arc::new(FixtureDatabase::new());
-    let path = PathBuf::from("/tmp/pls_concurrent_same/test_file.py");
+    let path = std::env::temp_dir()
+        .join("pls_concurrent_same")
+        .join("test_file.py");
 
     const CONTENT_A: &str = "import pytest\n\n@pytest.fixture\ndef fix_a():\n    return 1\n\ndef test_x(fix_a):\n    assert fix_a\n";
     const CONTENT_B: &str = "import pytest\n\n@pytest.fixture\ndef fix_b():\n    return 2\n\ndef test_x(fix_b):\n    assert fix_b\n";

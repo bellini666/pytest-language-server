@@ -8469,3 +8469,53 @@ async fn test_references_utf16_positions_on_non_ascii_line() {
         locations
     );
 }
+
+#[tokio::test]
+async fn test_references_byte_positions_when_utf8_negotiated() {
+    // When the client negotiated utf-8, internal byte columns pass through
+    // unconverted in both directions.
+    use pytest_language_server::FixtureDatabase;
+
+    let db = Arc::new(FixtureDatabase::new());
+    let test_path = std::env::temp_dir()
+        .join("test_utf8_positions")
+        .join("test_example.py");
+    let content = "import pytest\n\n@pytest.fixture\ndef fixture_é():\n    return 1\n\ndef test_ünï(fixture_é):\n    assert fixture_é\n";
+    db.analyze_file(test_path.clone(), content);
+
+    let backend = make_backend_with_db(db);
+    backend
+        .client_utf16
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    let uri = Uri::from_file_path(&test_path).unwrap();
+
+    // Byte column 16 is inside `fixture_é` ("def test_ünï(" is 15 bytes).
+    let params = ReferenceParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position: Position {
+                line: 6,
+                character: 16,
+            },
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+        context: ReferenceContext {
+            include_declaration: true,
+        },
+    };
+
+    let locations = backend
+        .handle_references(params)
+        .await
+        .unwrap()
+        .expect("references should be found for fixture_é");
+
+    // Outbound columns are byte offsets: 15..25 (`fixture_é` is 10 bytes).
+    let param_loc = locations
+        .iter()
+        .find(|l| l.range.start.line == 6)
+        .expect("expected a location on the signature line");
+    assert_eq!(param_loc.range.start.character, 15);
+    assert_eq!(param_loc.range.end.character, 25);
+}

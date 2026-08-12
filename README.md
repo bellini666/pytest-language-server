@@ -337,16 +337,22 @@ The binary will be at `target/release/pytest-language-server`.
 
 ### Neovim
 
-Add this to your config:
+With [nvim-lspconfig](https://github.com/neovim/nvim-lspconfig) installed, the config ships with it:
 
 ```lua
-vim.lsp.config('pytest_lsp', {
+vim.lsp.enable('pytest_language_server')
+```
+
+Without it, define the config yourself:
+
+```lua
+vim.lsp.config('pytest_language_server', {
   cmd = { 'pytest-language-server' },
   filetypes = { 'python' },
-  root_markers = { 'pyproject.toml', 'setup.py', 'setup.cfg', 'pytest.ini', '.git' },
+  root_markers = { 'pytest.ini', 'pyproject.toml', 'setup.py', 'setup.cfg', '.git' },
 })
 
-vim.lsp.enable('pytest_lsp')
+vim.lsp.enable('pytest_language_server')
 ```
 
 ### Zed

@@ -32,7 +32,7 @@ jobs:
           shared-key: "security-audit"
 
       - name: Install cargo-audit
-        uses: taiki-e/install-action@v2.86.3
+        uses: taiki-e/install-action@v2.86.8
         with:
           tool: cargo-audit
 

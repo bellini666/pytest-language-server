@@ -42,7 +42,7 @@ insta = { version = "1.47", features = ["yaml"] }
 assert_cmd = "2.2"
 predicates = "3.1"
 tempfile = "3.27.0"
-ntest = "0.9"
+ntest = "0.10"
 
 [profile.release]
 lto = true

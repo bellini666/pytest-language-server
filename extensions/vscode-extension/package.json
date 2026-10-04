@@ -94,16 +94,16 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@types/node": "^26.6.2",
+    "@types/node": "^26.6.3",
     "@types/vscode": "1.110.0",
     "eslint": "^10.11.0",
     "ts-loader": "^9.6.2",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.70.1",
+    "typescript-eslint": "^8.71.0",
     "webpack": "^5.111.1",
     "webpack-cli": "^7.2.3"
   },
   "dependencies": {
-    "vscode-languageclient": "^10.1.1"
+    "vscode-languageclient": "^10.1.2"
   }
 }

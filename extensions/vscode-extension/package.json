@@ -104,6 +104,6 @@
     "webpack-cli": "^7.2.3"
   },
   "dependencies": {
-    "vscode-languageclient": "^10.1.2"
+    "vscode-languageclient": "^11.0.0"
   }
 }

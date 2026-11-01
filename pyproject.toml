@@ -1,5 +1,5 @@
 [build-system]
-requires = ["maturin>=1.10,<2.0"]
+requires = ["maturin>=1.16,<2.0"]
 build-backend = "maturin"
 
 [project]
@@ -36,6 +36,6 @@ bindings = "bin"
 
 [dependency-groups]
 dev = [
-    "maturin>=1.10.1",
+    "maturin>=1.16.0",
     "pre-commit>=4.0.0",
 ]

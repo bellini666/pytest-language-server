@@ -128,6 +128,7 @@ impl LanguageServer for Backend {
 
         info!("Returning initialize result with capabilities");
         Ok(InitializeResult {
+            offset_encoding: None,
             server_info: Some(ServerInfo {
                 name: "pytest-language-server".to_string(),
                 version: Some(env!("CARGO_PKG_VERSION").to_string()),

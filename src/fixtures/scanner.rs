@@ -819,6 +819,8 @@ impl FixtureDatabase {
             is_third_party: true,
             is_plugin: true,
             dependencies: vec![],
+            parameters: None,
+            is_async: false,
             scope: FixtureScope::Function,
             yield_line: None,
             autouse: false,

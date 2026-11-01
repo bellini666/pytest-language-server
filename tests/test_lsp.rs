@@ -3,7 +3,7 @@
 //! All tests have a 30-second timeout to prevent hangs from blocking CI.
 
 use ntest::timeout;
-use pytest_language_server::FixtureDefinition;
+use pytest_language_server::{Backend, FixtureDefinition};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tower_lsp_server::ls_types::*;
@@ -23,28 +23,7 @@ fn test_hover_content_with_leading_newline() {
         ..Default::default()
     };
 
-    // Build hover content (same logic as hover method)
-    let mut content = String::new();
-
-    // Add "from" line with relative path (using just filename for test)
-    let relative_path = definition
-        .file_path
-        .file_name()
-        .and_then(|f| f.to_str())
-        .unwrap_or("unknown");
-    content.push_str(&format!("**from** `{}`\n", relative_path));
-
-    // Add code block with fixture signature
-    content.push_str(&format!(
-        "```python\n@pytest.fixture\ndef {}(...):\n```",
-        definition.name
-    ));
-
-    // Add docstring if present
-    if let Some(ref docstring) = definition.docstring {
-        content.push_str("\n\n---\n\n");
-        content.push_str(docstring);
-    }
+    let content = Backend::format_fixture_documentation(&definition, None);
 
     // Verify the structure
     let lines: Vec<&str> = content.lines().collect();
@@ -85,22 +64,7 @@ fn test_hover_content_structure_without_docstring() {
         ..Default::default()
     };
 
-    // Build hover content
-    let mut content = String::new();
-
-    // Add "from" line with relative path (using just filename for test)
-    let relative_path = definition
-        .file_path
-        .file_name()
-        .and_then(|f| f.to_str())
-        .unwrap_or("unknown");
-    content.push_str(&format!("**from** `{}`\n", relative_path));
-
-    // Add code block with fixture signature
-    content.push_str(&format!(
-        "```python\n@pytest.fixture\ndef {}(...):\n```",
-        definition.name
-    ));
+    let content = Backend::format_fixture_documentation(&definition, None);
 
     // For a fixture without docstring, the content should end with the code block
     let lines: Vec<&str> = content.lines().collect();
@@ -7452,6 +7416,8 @@ async fn test_request_inlay_hint_shown_when_definition_available() {
         is_third_party: true,
         is_plugin: true,
         dependencies: vec![],
+        parameters: None,
+        is_async: false,
         scope: pytest_language_server::FixtureScope::Function,
         yield_line: None,
         autouse: false,
@@ -7521,6 +7487,8 @@ async fn test_request_code_action_fix_all_annotates_request_param() {
         is_third_party: true,
         is_plugin: true,
         dependencies: vec![],
+        parameters: None,
+        is_async: false,
         scope: pytest_language_server::FixtureScope::Function,
         yield_line: None,
         autouse: false,
@@ -7633,6 +7601,8 @@ async fn test_request_hover_returns_fixture_request_type() {
         is_third_party: true,
         is_plugin: true,
         dependencies: vec![],
+        parameters: None,
+        is_async: false,
         scope: pytest_language_server::FixtureScope::Function,
         yield_line: None,
         autouse: false,

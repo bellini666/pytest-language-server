@@ -294,8 +294,11 @@ impl Backend {
         };
 
         content.push_str(&format!(
-            "```python\n@pytest.fixture\ndef {}(...){}:\n```",
-            fixture.name, return_annotation
+            "```python\n@pytest.fixture\n{}def {}({}){}:\n```",
+            if fixture.is_async { "async " } else { "" },
+            fixture.name,
+            fixture.parameters.as_deref().unwrap_or("..."),
+            return_annotation
         ));
 
         // Add docstring if present

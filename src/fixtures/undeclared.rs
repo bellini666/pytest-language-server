@@ -203,7 +203,12 @@ impl FixtureDatabase {
 
                 for handler in handlers {
                     let ExceptHandler::ExceptHandler(h) = handler;
-                    let mut handler_bound = after_body.clone();
+                    // Several `except*` handlers can run for one exception group.
+                    let mut handler_bound = if matches!(stmt, Stmt::TryStar(_)) {
+                        bound.clone()
+                    } else {
+                        after_body.clone()
+                    };
                     if let Some(ref name) = h.name {
                         handler_bound.insert(name.to_string());
                     }
@@ -227,13 +232,15 @@ impl FixtureDatabase {
             }
             Stmt::Match(match_stmt) => {
                 self.visit_expr_for_names(&match_stmt.subject, ctx, bound);
-                let before_cases = bound.clone();
+                let mut next_case_bound = bound.clone();
 
                 for case in &match_stmt.cases {
-                    let mut case_bound = before_cases.clone();
+                    let mut case_bound = next_case_bound.clone();
                     bind_pattern_names(&case.pattern, &mut case_bound);
                     if let Some(ref guard) = case.guard {
                         self.visit_expr_for_names(guard, ctx, &mut case_bound);
+                        // Captures stay bound when the guard fails and matching continues.
+                        next_case_bound.clone_from(&case_bound);
                     }
                     self.visit_body_for_names(&case.body, ctx, &mut case_bound);
                     bound.extend(case_bound);
@@ -343,10 +350,10 @@ impl FixtureDatabase {
                 }
             }
             Expr::Dict(dict) => {
-                for k in dict.keys.iter().flatten() {
-                    self.visit_expr_for_names(k, ctx, bound);
-                }
-                for value in &dict.values {
+                for (key, value) in dict.keys.iter().zip(&dict.values) {
+                    if let Some(key) = key {
+                        self.visit_expr_for_names(key, ctx, bound);
+                    }
                     self.visit_expr_for_names(value, ctx, bound);
                 }
             }
@@ -360,8 +367,11 @@ impl FixtureDatabase {
             }
             Expr::IfExp(if_exp) => {
                 self.visit_expr_for_names(&if_exp.test, ctx, bound);
+
+                let mut orelse_bound = bound.clone();
                 self.visit_expr_for_names(&if_exp.body, ctx, bound);
-                self.visit_expr_for_names(&if_exp.orelse, ctx, bound);
+                self.visit_expr_for_names(&if_exp.orelse, ctx, &mut orelse_bound);
+                bound.extend(orelse_bound);
             }
             Expr::NamedExpr(named) => {
                 // Only the value is a read; the walrus target is a binding.
@@ -610,6 +620,22 @@ mod tests {
                 "    x = [(my_fixture := 1)]\n    _ = my_fixture\n",
             ),
             (
+                "assigned in except star handler, read in a later one",
+                "    try:\n        pass\n    except* ValueError:\n        my_fixture = 1\n    except* TypeError:\n        _ = my_fixture\n",
+            ),
+            (
+                "capture read in the case after a guarded one",
+                "    match c:\n        case my_fixture if c:\n            pass\n        case _:\n            _ = my_fixture\n",
+            ),
+            (
+                "walrus in dict value, read in the next key",
+                "    _ = {\"a\": (my_fixture := 1), my_fixture: 2}\n",
+            ),
+            (
+                "walrus in ternary branch, read after",
+                "    x = (my_fixture := 1) if c else 2\n    _ = my_fixture\n",
+            ),
+            (
                 "walrus read on the same line",
                 "    if (my_fixture := 1) and my_fixture:\n        pass\n",
             ),
@@ -690,6 +716,26 @@ mod tests {
                 "other if branch, imported",
                 "    if c:\n        import my_fixture\n    else:\n        _ = my_fixture\n",
                 5,
+            ),
+            (
+                "other except handler",
+                "    try:\n        pass\n    except ValueError:\n        my_fixture = 1\n    except TypeError:\n        _ = my_fixture\n",
+                7,
+            ),
+            (
+                "case after a guarded case's body",
+                "    match c:\n        case 1 if c:\n            my_fixture = 1\n        case 2:\n            _ = my_fixture\n",
+                6,
+            ),
+            (
+                "dict value before the walrus in the next key",
+                "    _ = {\"a\": my_fixture, (my_fixture := 1): 2}\n",
+                2,
+            ),
+            (
+                "other ternary branch",
+                "    x = (my_fixture := 1) if c else my_fixture\n",
+                2,
             ),
             (
                 "other match case",

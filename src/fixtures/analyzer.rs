@@ -8,7 +8,7 @@ use super::decorators;
 use super::types::{FixtureDefinition, FixtureUsage, TypeImportSpec};
 use super::FixtureDatabase;
 use rustpython_parser::ast::{Arg, ArgWithDefault, Arguments, Expr, Ranged, Stmt};
-use rustpython_parser::{lexer, parse, Mode};
+use rustpython_parser::{lexer, parse, Mode, Tok};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
@@ -254,22 +254,30 @@ impl FixtureDatabase {
 
     /// Render a function's parameter list as declared, on one line and without parentheses.
     fn format_parameters(args: &Arguments, content: &str) -> String {
-        let source = |expr: &Expr| {
+        let source = |expr: &Expr, search_start: usize| {
             let range = expr.range();
             let (mut expr_start, mut expr_end) = (range.start().to_usize(), range.end().to_usize());
 
-            // `expr.range()` excludes enclosing parentheses. Annotations and defaults follow `:` or
-            // `=`, so an adjacent `(` can only group this expression.
-            // shortcut: a comment next to the parenthesis hides it, so it is dropped; walk tokens
-            // instead if that ever renders invalid syntax for a real fixture.
-            loop {
-                let before = content[..expr_start].trim_end();
-                let after = content[expr_end..].trim_start();
-                if !before.ends_with('(') || !after.starts_with(')') {
-                    break;
+            // `expr.range()` excludes enclosing parentheses. Between `search_start` and the
+            // expression, every `(` token groups this expression.
+            let openings: Vec<usize> =
+                lexer::lex(&content[search_start..expr_start], Mode::Expression)
+                    .map_while(Result::ok)
+                    .filter(|(token, _)| matches!(token, Tok::Lpar))
+                    .map(|(_, token_range)| search_start + token_range.start().to_usize())
+                    .collect();
+            if let Some(&first_opening) = openings.first() {
+                // Opened again here so the lexer treats line breaks after the expression as nested.
+                let unclosed = "(".repeat(openings.len());
+                let suffix = format!("{unclosed}{}", &content[expr_end..]);
+                let last_closing = lexer::lex(&suffix, Mode::Expression)
+                    .map_while(Result::ok)
+                    .filter(|(token, _)| matches!(token, Tok::Rpar))
+                    .nth(openings.len() - 1);
+                if let Some((_, token_range)) = last_closing {
+                    expr_start = first_opening;
+                    expr_end += token_range.end().to_usize() - unclosed.len();
                 }
-                expr_start = before.len() - 1;
-                expr_end = content.len() - after.len() + 1;
             }
 
             // Lexed inside parentheses so a multi-line expression yields no indentation errors.
@@ -288,25 +296,37 @@ impl FixtureDatabase {
                 }
                 previous_end = Some(end);
 
-                let text = &wrapped[start..end];
-                if text.contains(['\n', '\r']) {
-                    // A kept newline in a triple-quoted string could close the hover's code fence.
-                    rendered.push_str(&text.split_whitespace().collect::<Vec<_>>().join(" "));
-                } else {
-                    rendered.push_str(text);
-                }
+                // Escaped because a real newline in a triple-quoted string could close the hover's
+                // code fence.
+                // shortcut: reads wrong for raw strings and backslash-newline inside a string,
+                // check the string prefix if a real fixture needs those.
+                rendered.push_str(
+                    &wrapped[start..end]
+                        .replace("\r\n", "\\n")
+                        .replace(['\n', '\r'], "\\n"),
+                );
             }
 
-            rendered
+            (rendered, expr_end)
         };
 
         let render = |arg: &Arg, prefix: &str, default: Option<&Expr>| {
             let name = format!("{prefix}{}", arg.arg);
-            match (arg.annotation.as_deref().map(source), default.map(source)) {
+            let name_start = arg.range.start().to_usize();
+            let annotation = arg
+                .annotation
+                .as_deref()
+                .map(|annotation| source(annotation, name_start));
+            let default_search_start = annotation.as_ref().map_or(name_start, |(_, end)| *end);
+            let default = default.map(|default| source(default, default_search_start));
+
+            match (annotation, default) {
                 (None, None) => name,
-                (Some(annotation), None) => format!("{name}: {annotation}"),
-                (None, Some(default)) => format!("{name}={default}"),
-                (Some(annotation), Some(default)) => format!("{name}: {annotation} = {default}"),
+                (Some((annotation, _)), None) => format!("{name}: {annotation}"),
+                (None, Some((default, _))) => format!("{name}={default}"),
+                (Some((annotation, _)), Some((default, _))) => {
+                    format!("{name}: {annotation} = {default}")
+                }
             }
         };
         let render_positional = |arg: &ArgWithDefault| render(&arg.def, "", arg.default.as_deref());
@@ -1300,8 +1320,15 @@ mod tests {
             ("x=[\n    1,  # one\n    2,\n], y=2", "x=[ 1, 2, ], y=2"),
             ("x=1 + \\\n    2", "x=1 + 2"),
             ("x=(a\n        + b\n    + c)", "x=(a + b + c)"),
-            ("x=(  # c\n        a\n    + b)", "x=a + b"),
-            ("t='''l1\n    l2'''", "t='''l1 l2'''"),
+            ("x=(  # c\n        a\n    + b)", "x=( a + b)"),
+            ("x=(  # (c\n    y:=1), z=2", "x=( y:=1), z=2"),
+            ("x=(y:=1  # c)\n), z=2", "x=(y:=1 ), z=2"),
+            (
+                "x: (  # c\n    int\n) = (  # d\n    1\n)",
+                "x: ( int ) = ( 1 )",
+            ),
+            ("t='''l1\n    l2'''", "t='''l1\\n    l2'''"),
+            ("t='''l1\r\n    l2'''", "t='''l1\\n    l2'''"),
         ];
 
         for (signature, expected) in unchanged

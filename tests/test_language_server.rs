@@ -892,6 +892,97 @@ async fn test_hover_returns_content_for_known_fixture() {
     assert!(result.is_ok());
 }
 
+async fn hover_markdown_for_conftest(dir: &str, conftest: &str, test_source: &str) -> String {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    let conftest_path = tfile(dir, "conftest.py");
+    db.analyze_file(conftest_path.clone(), conftest);
+    backend
+        .uri_cache
+        .insert(conftest_path, turi(dir, "conftest.py"));
+
+    db.analyze_file(tfile(dir, "test_example.py"), test_source);
+
+    let hover = backend
+        .hover(HoverParams {
+            text_document_position_params: tdp(turi(dir, "test_example.py"), 0, 12),
+            work_done_progress_params: wdp(),
+        })
+        .await
+        .unwrap()
+        .expect("hover should resolve the fixture");
+
+    match hover.contents {
+        HoverContents::Markup(markup) => markup.value,
+        other => panic!("expected markup hover, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_hover_shows_fixture_parameters() {
+    let markdown = hover_markdown_for_conftest(
+        "test_ls_hover_params",
+        "import pytest\n\n@pytest.fixture\ndef my_fixture(engine: Engine, *, echo: bool = False) -> Session:\n    return 1\n",
+        "def test_it(my_fixture):\n    pass\n",
+    )
+    .await;
+
+    assert!(
+        markdown.contains("def my_fixture(engine: Engine, *, echo: bool = False) -> Session:"),
+        "unexpected hover: {markdown}"
+    );
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_hover_shows_async_fixture() {
+    let markdown = hover_markdown_for_conftest(
+        "test_ls_hover_async",
+        "import pytest\n\n@pytest.fixture\nasync def my_fixture(db):\n    return 1\n",
+        "def test_it(my_fixture):\n    pass\n",
+    )
+    .await;
+
+    assert!(
+        markdown.contains("\nasync def my_fixture(db):"),
+        "unexpected hover: {markdown}"
+    );
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_hover_shows_empty_parentheses_for_fixture_without_parameters() {
+    let markdown = hover_markdown_for_conftest(
+        "test_ls_hover_no_params",
+        "import pytest\n\n@pytest.fixture\ndef my_fixture():\n    return 1\n",
+        "def test_it(my_fixture):\n    pass\n",
+    )
+    .await;
+
+    assert!(
+        markdown.contains("def my_fixture():"),
+        "unexpected hover: {markdown}"
+    );
+}
+
+#[tokio::test]
+#[timeout(30000)]
+async fn test_hover_shows_ellipsis_for_assignment_style_fixture() {
+    let markdown = hover_markdown_for_conftest(
+        "test_ls_hover_assignment",
+        "import pytest\n\ndef impl(db):\n    return 1\n\nmy_fixture = pytest.fixture()(impl)\n",
+        "def test_it(my_fixture):\n    pass\n",
+    )
+    .await;
+
+    assert!(
+        markdown.contains("def my_fixture(...):"),
+        "unexpected hover: {markdown}"
+    );
+}
+
 // ── references ────────────────────────────────────────────────────────────
 
 #[tokio::test]

@@ -7,8 +7,8 @@
 use super::decorators;
 use super::types::{FixtureDefinition, FixtureUsage, TypeImportSpec};
 use super::FixtureDatabase;
-use rustpython_parser::ast::{ArgWithDefault, Arguments, Expr, Stmt};
-use rustpython_parser::{parse, Mode};
+use rustpython_parser::ast::{Arg, ArgWithDefault, Arguments, Expr, Ranged, Stmt};
+use rustpython_parser::{lexer, parse, Mode};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
@@ -250,6 +250,84 @@ impl FixtureDatabase {
             .iter()
             .chain(args.args.iter())
             .chain(args.kwonlyargs.iter())
+    }
+
+    /// Render a function's parameter list as declared, on one line and without parentheses.
+    fn format_parameters(args: &Arguments, content: &str) -> String {
+        let source = |expr: &Expr| {
+            let range = expr.range();
+            let (mut expr_start, mut expr_end) = (range.start().to_usize(), range.end().to_usize());
+
+            // `expr.range()` excludes enclosing parentheses. Annotations and defaults follow `:` or
+            // `=`, so an adjacent `(` can only group this expression.
+            // shortcut: a comment next to the parenthesis hides it, so it is dropped; walk tokens
+            // instead if that ever renders invalid syntax for a real fixture.
+            loop {
+                let before = content[..expr_start].trim_end();
+                let after = content[expr_end..].trim_start();
+                if !before.ends_with('(') || !after.starts_with(')') {
+                    break;
+                }
+                expr_start = before.len() - 1;
+                expr_end = content.len() - after.len() + 1;
+            }
+
+            // Lexed inside parentheses so a multi-line expression yields no indentation errors.
+            let wrapped = format!("({})", &content[expr_start..expr_end]);
+
+            let mut rendered = String::new();
+            let mut previous_end = None;
+            for (_, token_range) in lexer::lex(&wrapped, Mode::Expression).map_while(Result::ok) {
+                let (start, end) = (token_range.start().to_usize(), token_range.end().to_usize());
+                if start == 0 || end >= wrapped.len() {
+                    continue;
+                }
+
+                if previous_end.is_some_and(|previous| previous != start) {
+                    rendered.push(' ');
+                }
+                previous_end = Some(end);
+
+                let text = &wrapped[start..end];
+                if text.contains(['\n', '\r']) {
+                    // A kept newline in a triple-quoted string could close the hover's code fence.
+                    rendered.push_str(&text.split_whitespace().collect::<Vec<_>>().join(" "));
+                } else {
+                    rendered.push_str(text);
+                }
+            }
+
+            rendered
+        };
+
+        let render = |arg: &Arg, prefix: &str, default: Option<&Expr>| {
+            let name = format!("{prefix}{}", arg.arg);
+            match (arg.annotation.as_deref().map(source), default.map(source)) {
+                (None, None) => name,
+                (Some(annotation), None) => format!("{name}: {annotation}"),
+                (None, Some(default)) => format!("{name}={default}"),
+                (Some(annotation), Some(default)) => format!("{name}: {annotation} = {default}"),
+            }
+        };
+        let render_positional = |arg: &ArgWithDefault| render(&arg.def, "", arg.default.as_deref());
+
+        let mut parts: Vec<String> = args.posonlyargs.iter().map(render_positional).collect();
+        if !args.posonlyargs.is_empty() {
+            parts.push("/".to_string());
+        }
+        parts.extend(args.args.iter().map(render_positional));
+
+        match &args.vararg {
+            Some(vararg) => parts.push(render(vararg, "*", None)),
+            None if !args.kwonlyargs.is_empty() => parts.push("*".to_string()),
+            None => {}
+        }
+        parts.extend(args.kwonlyargs.iter().map(render_positional));
+        if let Some(kwarg) = &args.kwarg {
+            parts.push(render(kwarg, "**", None));
+        }
+
+        parts.join(", ")
     }
 
     /// Helper to record a fixture usage in the database.
@@ -565,6 +643,8 @@ impl FixtureDatabase {
                 is_third_party,
                 is_plugin,
                 dependencies: dependencies.clone(),
+                parameters: Some(Self::format_parameters(args, content)),
+                is_async: matches!(stmt, Stmt::AsyncFunctionDef(_)),
                 scope,
                 yield_line: self.find_yield_line(body, line_index),
                 autouse,
@@ -718,6 +798,8 @@ impl FixtureDatabase {
                                 is_third_party,
                                 is_plugin,
                                 dependencies: Vec::new(), // Assignment-style fixtures don't have explicit dependencies
+                                parameters: None,
+                                is_async: false,
                                 scope: decorators::extract_fixture_scope(&outer_call.func)
                                     .unwrap_or_default(),
                                 yield_line: None, // Assignment-style fixtures don't have yield statements
@@ -1173,3 +1255,76 @@ impl FixtureDatabase {
 }
 
 // Undeclared fixtures scanning methods are in undeclared.rs
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture_parameters(source: &str) -> Option<String> {
+        let db = FixtureDatabase::new();
+        let path = std::env::temp_dir()
+            .join("pls_analyzer_unit")
+            .join("conftest.py");
+        db.analyze_file(path, source);
+        db.definitions
+            .get("fx")
+            .and_then(|defs| defs.value().first().cloned())
+            .and_then(|d| d.parameters)
+    }
+
+    #[test]
+    fn test_parameters_render_as_declared() {
+        let unchanged = [
+            "",
+            "db, cache",
+            "db: Engine, retries=3, name: str = 'x', pair=(1, 2)",
+            "a, /, b, *, c: int = 1",
+            "a, *args: int, b, **kwargs",
+            "name='é🎉', other: 'ñ' = 1",
+            "sep='a  b', tab='a\tb'",
+            "nbsp='a\u{a0}b'",
+            "x=(y:=1)",
+            "x=(yield)",
+            "x=(1), y: (int) = 2",
+            "x=((1))",
+        ];
+        let normalized = [
+            (
+                "\n    db: dict[\n        str, int\n    ],\n    cache,\n",
+                "db: dict[ str, int ], cache",
+            ),
+            (
+                "db: dict[  # keys\n    str, int\n] = None, other=1",
+                "db: dict[ str, int ] = None, other=1",
+            ),
+            ("x=[\n    1,  # one\n    2,\n], y=2", "x=[ 1, 2, ], y=2"),
+            ("x=1 + \\\n    2", "x=1 + 2"),
+            ("x=(a\n        + b\n    + c)", "x=(a + b + c)"),
+            ("x=(  # c\n        a\n    + b)", "x=a + b"),
+            ("t='''l1\n    l2'''", "t='''l1 l2'''"),
+        ];
+
+        for (signature, expected) in unchanged
+            .into_iter()
+            .map(|signature| (signature, signature))
+            .chain(normalized)
+        {
+            let source =
+                format!("import pytest\n@pytest.fixture\ndef fx({signature}):\n    return 1\n");
+            assert_eq!(
+                fixture_parameters(&source).as_deref(),
+                Some(expected),
+                "signature: {signature:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parameters_method_keeps_self_and_request() {
+        let source = "import pytest\nclass TestX:\n    @pytest.fixture\n    def fx(self, request, db):\n        return 1\n";
+        assert_eq!(
+            fixture_parameters(source),
+            Some("self, request, db".to_string())
+        );
+    }
+}

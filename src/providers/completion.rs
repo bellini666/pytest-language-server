@@ -430,6 +430,8 @@ mod tests {
             is_third_party: false,
             is_plugin: false,
             dependencies: vec![],
+            parameters: None,
+            is_async: false,
             scope,
             yield_line: None,
             autouse: false,

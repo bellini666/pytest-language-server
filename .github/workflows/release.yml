@@ -137,7 +137,7 @@ jobs:
         include:
           - runner: macos-15
             target: x86_64
-          - runner: macos-14
+          - runner: macos-15
             target: aarch64
     steps:
       - uses: actions/checkout@v7
@@ -346,7 +346,7 @@ jobs:
           - os: macos-15
             target: x86_64-apple-darwin
             binary_name: pytest-language-server-x86_64-apple-darwin
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             binary_name: pytest-language-server-aarch64-apple-darwin
           - os: windows-latest

@@ -5,8 +5,12 @@
 
 use super::types::UndeclaredFixture;
 use super::FixtureDatabase;
-use rustpython_parser::ast::{Expr, Stmt};
-use std::collections::{HashMap, HashSet};
+use rustpython_parser::ast::{
+    ExceptHandler, Expr, Pattern, Stmt, StmtAsyncFor, StmtAsyncFunctionDef, StmtAsyncWith,
+    StmtClassDef, StmtFor, StmtFunctionDef, StmtImport, StmtImportFrom, StmtTry, StmtTryStar,
+    StmtWith,
+};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tracing::info;
 
@@ -16,51 +20,33 @@ pub(crate) struct BodyScanContext<'a> {
     pub file_path: &'a PathBuf,
     pub line_index: &'a [usize],
     pub declared_params: &'a HashSet<String>,
-    pub local_vars: &'a HashMap<String, usize>,
     pub function_name: &'a str,
     pub function_line: usize,
 }
 
-/// Collect names bound by walrus (`:=`) expressions anywhere inside `expr`.
-fn collect_walrus_targets(expr: &Expr, names: &mut HashSet<String>) {
-    if let Expr::NamedExpr(named) = expr {
-        if let Expr::Name(name) = named.target.as_ref() {
-            names.insert(name.id.to_string());
-        }
-        collect_walrus_targets(&named.value, names);
-        return;
+/// Add the names a `match` pattern captures to `bound`.
+fn bind_pattern_names(pattern: &Pattern, bound: &mut HashSet<String>) {
+    let (patterns, captured): (Vec<&Pattern>, Option<&str>) = match pattern {
+        Pattern::MatchSequence(p) => (p.patterns.iter().collect(), None),
+        Pattern::MatchMapping(p) => (
+            p.patterns.iter().collect(),
+            p.rest.as_ref().map(|name| name.as_str()),
+        ),
+        Pattern::MatchClass(p) => (p.patterns.iter().chain(&p.kwd_patterns).collect(), None),
+        Pattern::MatchStar(p) => (Vec::new(), p.name.as_ref().map(|name| name.as_str())),
+        Pattern::MatchAs(p) => (
+            p.pattern.iter().map(|inner| inner.as_ref()).collect(),
+            p.name.as_ref().map(|name| name.as_str()),
+        ),
+        Pattern::MatchOr(p) => (p.patterns.iter().collect(), None),
+        Pattern::MatchValue(_) | Pattern::MatchSingleton(_) => (Vec::new(), None),
+    };
+
+    if let Some(name) = captured {
+        bound.insert(name.to_string());
     }
-    // Recurse into the common containers a walrus realistically appears in.
-    match expr {
-        Expr::BoolOp(e) => e
-            .values
-            .iter()
-            .for_each(|v| collect_walrus_targets(v, names)),
-        Expr::BinOp(e) => {
-            collect_walrus_targets(&e.left, names);
-            collect_walrus_targets(&e.right, names);
-        }
-        Expr::UnaryOp(e) => collect_walrus_targets(&e.operand, names),
-        Expr::Compare(e) => {
-            collect_walrus_targets(&e.left, names);
-            e.comparators
-                .iter()
-                .for_each(|c| collect_walrus_targets(c, names));
-        }
-        Expr::Call(e) => {
-            collect_walrus_targets(&e.func, names);
-            e.args.iter().for_each(|a| collect_walrus_targets(a, names));
-            e.keywords
-                .iter()
-                .for_each(|kw| collect_walrus_targets(&kw.value, names));
-        }
-        Expr::Tuple(e) => e.elts.iter().for_each(|v| collect_walrus_targets(v, names)),
-        Expr::IfExp(e) => {
-            collect_walrus_targets(&e.test, names);
-            collect_walrus_targets(&e.body, names);
-            collect_walrus_targets(&e.orelse, names);
-        }
-        _ => {}
+    for inner in patterns {
+        bind_pattern_names(inner, bound);
     }
 }
 
@@ -77,264 +63,203 @@ impl FixtureDatabase {
         function_name: &str,
         function_line: usize,
     ) {
-        // First, collect all local variable names with their definition line numbers
-        let mut local_vars = HashMap::new();
-        self.collect_local_variables(body, line_index, &mut local_vars);
-
-        // Also add imported names to local_vars (they shouldn't be flagged as undeclared fixtures)
-        if let Some(imports) = self.imports.get(file_path) {
-            for import in imports.iter() {
-                local_vars.insert(import.clone(), 0);
-            }
-        }
+        // Imported names shouldn't be flagged as undeclared fixtures
+        let mut bound: HashSet<String> = self
+            .imports
+            .get(file_path)
+            .map(|imports| imports.iter().cloned().collect())
+            .unwrap_or_default();
 
         let ctx = BodyScanContext {
             file_path,
             line_index,
             declared_params,
-            local_vars: &local_vars,
             function_name,
             function_line,
         };
 
-        // Walk through the function body and find all Name references
-        for stmt in body {
-            self.visit_stmt_for_names(stmt, &ctx);
-        }
+        self.visit_body_for_names(body, &ctx, &mut bound);
     }
 
-    /// Collect all local variable names from a function body.
-    /// Records the line number where each variable is defined for scope checking.
-    #[allow(clippy::only_used_in_recursion)]
-    pub(crate) fn collect_local_variables(
+    fn visit_body_for_names(
         &self,
         body: &[Stmt],
-        line_index: &[usize],
-        local_vars: &mut HashMap<String, usize>,
+        ctx: &BodyScanContext,
+        bound: &mut HashSet<String>,
     ) {
         for stmt in body {
-            match stmt {
-                Stmt::Assign(assign) => {
-                    let line =
-                        self.get_line_from_offset(assign.range.start().to_usize(), line_index);
-                    let mut temp_names = HashSet::new();
-                    for target in &assign.targets {
-                        self.collect_names_from_expr(target, &mut temp_names);
-                    }
-                    collect_walrus_targets(&assign.value, &mut temp_names);
-                    for name in temp_names {
-                        local_vars.insert(name, line);
-                    }
-                }
-                Stmt::AnnAssign(ann_assign) => {
-                    let line =
-                        self.get_line_from_offset(ann_assign.range.start().to_usize(), line_index);
-                    let mut temp_names = HashSet::new();
-                    self.collect_names_from_expr(&ann_assign.target, &mut temp_names);
-                    for name in temp_names {
-                        local_vars.insert(name, line);
-                    }
-                }
-                Stmt::AugAssign(aug_assign) => {
-                    let line =
-                        self.get_line_from_offset(aug_assign.range.start().to_usize(), line_index);
-                    let mut temp_names = HashSet::new();
-                    self.collect_names_from_expr(&aug_assign.target, &mut temp_names);
-                    for name in temp_names {
-                        local_vars.insert(name, line);
-                    }
-                }
-                Stmt::For(for_stmt) => {
-                    let line =
-                        self.get_line_from_offset(for_stmt.range.start().to_usize(), line_index);
-                    let mut temp_names = HashSet::new();
-                    self.collect_names_from_expr(&for_stmt.target, &mut temp_names);
-                    for name in temp_names {
-                        local_vars.insert(name, line);
-                    }
-                    self.collect_local_variables(&for_stmt.body, line_index, local_vars);
-                }
-                Stmt::AsyncFor(for_stmt) => {
-                    let line =
-                        self.get_line_from_offset(for_stmt.range.start().to_usize(), line_index);
-                    let mut temp_names = HashSet::new();
-                    self.collect_names_from_expr(&for_stmt.target, &mut temp_names);
-                    for name in temp_names {
-                        local_vars.insert(name, line);
-                    }
-                    self.collect_local_variables(&for_stmt.body, line_index, local_vars);
-                }
-                Stmt::While(while_stmt) => {
-                    let line =
-                        self.get_line_from_offset(while_stmt.range.start().to_usize(), line_index);
-                    let mut temp_names = HashSet::new();
-                    collect_walrus_targets(&while_stmt.test, &mut temp_names);
-                    for name in temp_names {
-                        local_vars.insert(name, line);
-                    }
-                    self.collect_local_variables(&while_stmt.body, line_index, local_vars);
-                }
-                Stmt::If(if_stmt) => {
-                    let line =
-                        self.get_line_from_offset(if_stmt.range.start().to_usize(), line_index);
-                    let mut temp_names = HashSet::new();
-                    collect_walrus_targets(&if_stmt.test, &mut temp_names);
-                    for name in temp_names {
-                        local_vars.insert(name, line);
-                    }
-                    self.collect_local_variables(&if_stmt.body, line_index, local_vars);
-                    self.collect_local_variables(&if_stmt.orelse, line_index, local_vars);
-                }
-                Stmt::With(with_stmt) => {
-                    let line =
-                        self.get_line_from_offset(with_stmt.range.start().to_usize(), line_index);
-                    for item in &with_stmt.items {
-                        if let Some(ref optional_vars) = item.optional_vars {
-                            let mut temp_names = HashSet::new();
-                            self.collect_names_from_expr(optional_vars, &mut temp_names);
-                            for name in temp_names {
-                                local_vars.insert(name, line);
-                            }
-                        }
-                    }
-                    self.collect_local_variables(&with_stmt.body, line_index, local_vars);
-                }
-                Stmt::AsyncWith(with_stmt) => {
-                    let line =
-                        self.get_line_from_offset(with_stmt.range.start().to_usize(), line_index);
-                    for item in &with_stmt.items {
-                        if let Some(ref optional_vars) = item.optional_vars {
-                            let mut temp_names = HashSet::new();
-                            self.collect_names_from_expr(optional_vars, &mut temp_names);
-                            for name in temp_names {
-                                local_vars.insert(name, line);
-                            }
-                        }
-                    }
-                    self.collect_local_variables(&with_stmt.body, line_index, local_vars);
-                }
-                Stmt::Try(try_stmt) => {
-                    self.collect_local_variables(&try_stmt.body, line_index, local_vars);
-                    self.collect_local_variables(&try_stmt.orelse, line_index, local_vars);
-                    self.collect_local_variables(&try_stmt.finalbody, line_index, local_vars);
-                }
-                _ => {}
-            }
+            self.visit_stmt_for_names(stmt, ctx, bound);
         }
     }
 
-    /// Visit a statement and check for undeclared fixture references.
-    fn visit_stmt_for_names(&self, stmt: &Stmt, ctx: &BodyScanContext) {
+    /// Check a statement for undeclared fixture reads, then add what it binds to `bound`.
+    ///
+    /// `bound` holds the names that may be bound at this point. A name bound on only
+    /// some paths through a branch counts as bound after it, and a sibling branch never
+    /// sees it.
+    fn visit_stmt_for_names(
+        &self,
+        stmt: &Stmt,
+        ctx: &BodyScanContext,
+        bound: &mut HashSet<String>,
+    ) {
         match stmt {
             Stmt::Expr(expr_stmt) => {
-                self.visit_expr_for_names(&expr_stmt.value, ctx);
+                self.visit_expr_for_names(&expr_stmt.value, ctx, bound);
             }
             Stmt::Assign(assign) => {
-                self.visit_expr_for_names(&assign.value, ctx);
+                self.visit_expr_for_names(&assign.value, ctx, bound);
+                for target in &assign.targets {
+                    self.collect_names_from_expr(target, bound);
+                }
             }
             Stmt::AugAssign(aug_assign) => {
-                self.visit_expr_for_names(&aug_assign.value, ctx);
-            }
-            Stmt::Return(ret) => {
-                if let Some(ref value) = ret.value {
-                    self.visit_expr_for_names(value, ctx);
-                }
-            }
-            Stmt::If(if_stmt) => {
-                self.visit_expr_for_names(&if_stmt.test, ctx);
-                for stmt in &if_stmt.body {
-                    self.visit_stmt_for_names(stmt, ctx);
-                }
-                for stmt in &if_stmt.orelse {
-                    self.visit_stmt_for_names(stmt, ctx);
-                }
-            }
-            Stmt::While(while_stmt) => {
-                self.visit_expr_for_names(&while_stmt.test, ctx);
-                for stmt in &while_stmt.body {
-                    self.visit_stmt_for_names(stmt, ctx);
-                }
-                for stmt in &while_stmt.orelse {
-                    self.visit_stmt_for_names(stmt, ctx);
-                }
-            }
-            Stmt::For(for_stmt) => {
-                self.visit_expr_for_names(&for_stmt.iter, ctx);
-                for stmt in &for_stmt.body {
-                    self.visit_stmt_for_names(stmt, ctx);
-                }
-                for stmt in &for_stmt.orelse {
-                    self.visit_stmt_for_names(stmt, ctx);
-                }
-            }
-            Stmt::With(with_stmt) => {
-                for item in &with_stmt.items {
-                    self.visit_expr_for_names(&item.context_expr, ctx);
-                }
-                for stmt in &with_stmt.body {
-                    self.visit_stmt_for_names(stmt, ctx);
-                }
-            }
-            Stmt::AsyncFor(for_stmt) => {
-                self.visit_expr_for_names(&for_stmt.iter, ctx);
-                for stmt in &for_stmt.body {
-                    self.visit_stmt_for_names(stmt, ctx);
-                }
-            }
-            Stmt::AsyncWith(with_stmt) => {
-                for item in &with_stmt.items {
-                    self.visit_expr_for_names(&item.context_expr, ctx);
-                }
-                for stmt in &with_stmt.body {
-                    self.visit_stmt_for_names(stmt, ctx);
-                }
-            }
-            Stmt::Assert(assert_stmt) => {
-                self.visit_expr_for_names(&assert_stmt.test, ctx);
-                if let Some(ref msg) = assert_stmt.msg {
-                    self.visit_expr_for_names(msg, ctx);
-                }
+                self.visit_expr_for_names(&aug_assign.value, ctx, bound);
+                self.collect_names_from_expr(&aug_assign.target, bound);
             }
             Stmt::AnnAssign(ann_assign) => {
                 if let Some(ref value) = ann_assign.value {
-                    self.visit_expr_for_names(value, ctx);
+                    self.visit_expr_for_names(value, ctx, bound);
+                }
+                self.collect_names_from_expr(&ann_assign.target, bound);
+            }
+            Stmt::Return(ret) => {
+                if let Some(ref value) = ret.value {
+                    self.visit_expr_for_names(value, ctx, bound);
+                }
+            }
+            Stmt::If(if_stmt) => {
+                self.visit_expr_for_names(&if_stmt.test, ctx, bound);
+
+                let mut orelse_bound = bound.clone();
+                self.visit_body_for_names(&if_stmt.body, ctx, bound);
+                self.visit_body_for_names(&if_stmt.orelse, ctx, &mut orelse_bound);
+                bound.extend(orelse_bound);
+            }
+            Stmt::While(while_stmt) => {
+                self.visit_expr_for_names(&while_stmt.test, ctx, bound);
+                self.visit_body_for_names(&while_stmt.body, ctx, bound);
+                self.visit_body_for_names(&while_stmt.orelse, ctx, bound);
+            }
+            Stmt::For(StmtFor {
+                target,
+                iter,
+                body,
+                orelse,
+                ..
+            })
+            | Stmt::AsyncFor(StmtAsyncFor {
+                target,
+                iter,
+                body,
+                orelse,
+                ..
+            }) => {
+                self.visit_expr_for_names(iter, ctx, bound);
+                self.collect_names_from_expr(target, bound);
+                self.visit_body_for_names(body, ctx, bound);
+                self.visit_body_for_names(orelse, ctx, bound);
+            }
+            Stmt::With(StmtWith { items, body, .. })
+            | Stmt::AsyncWith(StmtAsyncWith { items, body, .. }) => {
+                for item in items {
+                    self.visit_expr_for_names(&item.context_expr, ctx, bound);
+                    if let Some(ref optional_vars) = item.optional_vars {
+                        self.collect_names_from_expr(optional_vars, bound);
+                    }
+                }
+                self.visit_body_for_names(body, ctx, bound);
+            }
+            Stmt::Assert(assert_stmt) => {
+                self.visit_expr_for_names(&assert_stmt.test, ctx, bound);
+                if let Some(ref msg) = assert_stmt.msg {
+                    self.visit_expr_for_names(msg, ctx, bound);
                 }
             }
             Stmt::Raise(raise_stmt) => {
                 if let Some(ref exc) = raise_stmt.exc {
-                    self.visit_expr_for_names(exc, ctx);
+                    self.visit_expr_for_names(exc, ctx, bound);
                 }
                 if let Some(ref cause) = raise_stmt.cause {
-                    self.visit_expr_for_names(cause, ctx);
+                    self.visit_expr_for_names(cause, ctx, bound);
                 }
             }
-            Stmt::Try(try_stmt) => {
-                for stmt in &try_stmt.body {
-                    self.visit_stmt_for_names(stmt, ctx);
-                }
-                for handler in &try_stmt.handlers {
-                    let rustpython_parser::ast::ExceptHandler::ExceptHandler(h) = handler;
-                    for stmt in &h.body {
-                        self.visit_stmt_for_names(stmt, ctx);
+            Stmt::Try(StmtTry {
+                body,
+                handlers,
+                orelse,
+                finalbody,
+                ..
+            })
+            | Stmt::TryStar(StmtTryStar {
+                body,
+                handlers,
+                orelse,
+                finalbody,
+                ..
+            }) => {
+                self.visit_body_for_names(body, ctx, bound);
+                let after_body = bound.clone();
+
+                for handler in handlers {
+                    let ExceptHandler::ExceptHandler(h) = handler;
+                    // Several `except*` handlers can run for one exception group.
+                    let mut handler_bound = if matches!(stmt, Stmt::TryStar(_)) {
+                        bound.clone()
+                    } else {
+                        after_body.clone()
+                    };
+                    if let Some(ref name) = h.name {
+                        handler_bound.insert(name.to_string());
                     }
+
+                    self.visit_body_for_names(&h.body, ctx, &mut handler_bound);
+
+                    // Python unbinds `except E as name` when the handler ends.
+                    if let Some(ref name) = h.name {
+                        if !after_body.contains(name.as_str()) {
+                            handler_bound.remove(name.as_str());
+                        }
+                    }
+                    bound.extend(handler_bound);
                 }
-                for stmt in &try_stmt.orelse {
-                    self.visit_stmt_for_names(stmt, ctx);
-                }
-                for stmt in &try_stmt.finalbody {
-                    self.visit_stmt_for_names(stmt, ctx);
-                }
+
+                let mut orelse_bound = after_body;
+                self.visit_body_for_names(orelse, ctx, &mut orelse_bound);
+                bound.extend(orelse_bound);
+
+                self.visit_body_for_names(finalbody, ctx, bound);
             }
             Stmt::Match(match_stmt) => {
-                self.visit_expr_for_names(&match_stmt.subject, ctx);
+                self.visit_expr_for_names(&match_stmt.subject, ctx, bound);
+                let mut next_case_bound = bound.clone();
+
                 for case in &match_stmt.cases {
+                    let mut case_bound = next_case_bound.clone();
+                    bind_pattern_names(&case.pattern, &mut case_bound);
                     if let Some(ref guard) = case.guard {
-                        self.visit_expr_for_names(guard, ctx);
+                        self.visit_expr_for_names(guard, ctx, &mut case_bound);
+                        // Captures stay bound when the guard fails and matching continues.
+                        next_case_bound.clone_from(&case_bound);
                     }
-                    for stmt in &case.body {
-                        self.visit_stmt_for_names(stmt, ctx);
-                    }
+                    self.visit_body_for_names(&case.body, ctx, &mut case_bound);
+                    bound.extend(case_bound);
                 }
+            }
+            Stmt::Import(StmtImport { names, .. })
+            | Stmt::ImportFrom(StmtImportFrom { names, .. }) => {
+                for alias in names {
+                    let name = match alias.asname {
+                        Some(ref asname) => asname.as_str(),
+                        None => alias.name.split('.').next().unwrap_or(&alias.name),
+                    };
+                    bound.insert(name.to_string());
+                }
+            }
+            Stmt::FunctionDef(StmtFunctionDef { name, .. })
+            | Stmt::AsyncFunctionDef(StmtAsyncFunctionDef { name, .. })
+            | Stmt::ClassDef(StmtClassDef { name, .. }) => {
+                bound.insert(name.to_string());
             }
             _ => {}
         }
@@ -342,20 +267,19 @@ impl FixtureDatabase {
 
     /// Visit an expression and check for undeclared fixture references.
     #[allow(clippy::only_used_in_recursion)]
-    fn visit_expr_for_names(&self, expr: &Expr, ctx: &BodyScanContext) {
+    fn visit_expr_for_names(
+        &self,
+        expr: &Expr,
+        ctx: &BodyScanContext,
+        bound: &mut HashSet<String>,
+    ) {
         match expr {
             Expr::Name(name) => {
                 let name_str = name.id.as_str();
                 let line = self.get_line_from_offset(name.range.start().to_usize(), ctx.line_index);
 
-                let is_local_var_in_scope = ctx
-                    .local_vars
-                    .get(name_str)
-                    .map(|def_line| *def_line < line)
-                    .unwrap_or(false);
-
                 if !ctx.declared_params.contains(name_str)
-                    && !is_local_var_in_scope
+                    && !bound.contains(name_str)
                     && self.is_available_fixture(ctx.file_path, name_str)
                 {
                     let start_char = self.get_char_position_from_offset(
@@ -387,80 +311,87 @@ impl FixtureDatabase {
                 }
             }
             Expr::Call(call) => {
-                self.visit_expr_for_names(&call.func, ctx);
+                self.visit_expr_for_names(&call.func, ctx, bound);
                 for arg in &call.args {
-                    self.visit_expr_for_names(arg, ctx);
+                    self.visit_expr_for_names(arg, ctx, bound);
+                }
+                for keyword in &call.keywords {
+                    self.visit_expr_for_names(&keyword.value, ctx, bound);
                 }
             }
             Expr::Attribute(attr) => {
-                self.visit_expr_for_names(&attr.value, ctx);
+                self.visit_expr_for_names(&attr.value, ctx, bound);
             }
             Expr::BinOp(binop) => {
-                self.visit_expr_for_names(&binop.left, ctx);
-                self.visit_expr_for_names(&binop.right, ctx);
+                self.visit_expr_for_names(&binop.left, ctx, bound);
+                self.visit_expr_for_names(&binop.right, ctx, bound);
             }
             Expr::UnaryOp(unaryop) => {
-                self.visit_expr_for_names(&unaryop.operand, ctx);
+                self.visit_expr_for_names(&unaryop.operand, ctx, bound);
             }
             Expr::Compare(compare) => {
-                self.visit_expr_for_names(&compare.left, ctx);
+                self.visit_expr_for_names(&compare.left, ctx, bound);
                 for comparator in &compare.comparators {
-                    self.visit_expr_for_names(comparator, ctx);
+                    self.visit_expr_for_names(comparator, ctx, bound);
                 }
             }
             Expr::Subscript(subscript) => {
-                self.visit_expr_for_names(&subscript.value, ctx);
-                self.visit_expr_for_names(&subscript.slice, ctx);
+                self.visit_expr_for_names(&subscript.value, ctx, bound);
+                self.visit_expr_for_names(&subscript.slice, ctx, bound);
             }
             Expr::List(list) => {
                 for elt in &list.elts {
-                    self.visit_expr_for_names(elt, ctx);
+                    self.visit_expr_for_names(elt, ctx, bound);
                 }
             }
             Expr::Tuple(tuple) => {
                 for elt in &tuple.elts {
-                    self.visit_expr_for_names(elt, ctx);
+                    self.visit_expr_for_names(elt, ctx, bound);
                 }
             }
             Expr::Dict(dict) => {
-                for k in dict.keys.iter().flatten() {
-                    self.visit_expr_for_names(k, ctx);
-                }
-                for value in &dict.values {
-                    self.visit_expr_for_names(value, ctx);
+                for (key, value) in dict.keys.iter().zip(&dict.values) {
+                    if let Some(key) = key {
+                        self.visit_expr_for_names(key, ctx, bound);
+                    }
+                    self.visit_expr_for_names(value, ctx, bound);
                 }
             }
             Expr::Await(await_expr) => {
-                self.visit_expr_for_names(&await_expr.value, ctx);
+                self.visit_expr_for_names(&await_expr.value, ctx, bound);
             }
             Expr::BoolOp(bool_op) => {
                 for value in &bool_op.values {
-                    self.visit_expr_for_names(value, ctx);
+                    self.visit_expr_for_names(value, ctx, bound);
                 }
             }
             Expr::IfExp(if_exp) => {
-                self.visit_expr_for_names(&if_exp.test, ctx);
-                self.visit_expr_for_names(&if_exp.body, ctx);
-                self.visit_expr_for_names(&if_exp.orelse, ctx);
+                self.visit_expr_for_names(&if_exp.test, ctx, bound);
+
+                let mut orelse_bound = bound.clone();
+                self.visit_expr_for_names(&if_exp.body, ctx, bound);
+                self.visit_expr_for_names(&if_exp.orelse, ctx, &mut orelse_bound);
+                bound.extend(orelse_bound);
             }
             Expr::NamedExpr(named) => {
                 // Only the value is a read; the walrus target is a binding.
-                self.visit_expr_for_names(&named.value, ctx);
+                self.visit_expr_for_names(&named.value, ctx, bound);
+                self.collect_names_from_expr(&named.target, bound);
             }
             Expr::Starred(starred) => {
-                self.visit_expr_for_names(&starred.value, ctx);
+                self.visit_expr_for_names(&starred.value, ctx, bound);
             }
             Expr::JoinedStr(joined) => {
                 for value in &joined.values {
-                    self.visit_expr_for_names(value, ctx);
+                    self.visit_expr_for_names(value, ctx, bound);
                 }
             }
             Expr::FormattedValue(formatted) => {
-                self.visit_expr_for_names(&formatted.value, ctx);
+                self.visit_expr_for_names(&formatted.value, ctx, bound);
             }
             Expr::Set(set) => {
                 for elt in &set.elts {
-                    self.visit_expr_for_names(elt, ctx);
+                    self.visit_expr_for_names(elt, ctx, bound);
                 }
             }
             Expr::Slice(slice) => {
@@ -468,7 +399,7 @@ impl FixtureDatabase {
                     .into_iter()
                     .flatten()
                 {
-                    self.visit_expr_for_names(part, ctx);
+                    self.visit_expr_for_names(part, ctx, bound);
                 }
             }
             // Comprehensions: only the iterables are visited — elements and
@@ -476,22 +407,22 @@ impl FixtureDatabase {
             // which would produce false positives without scope tracking.
             Expr::ListComp(comp) => {
                 for generator in &comp.generators {
-                    self.visit_expr_for_names(&generator.iter, ctx);
+                    self.visit_expr_for_names(&generator.iter, ctx, bound);
                 }
             }
             Expr::SetComp(comp) => {
                 for generator in &comp.generators {
-                    self.visit_expr_for_names(&generator.iter, ctx);
+                    self.visit_expr_for_names(&generator.iter, ctx, bound);
                 }
             }
             Expr::GeneratorExp(comp) => {
                 for generator in &comp.generators {
-                    self.visit_expr_for_names(&generator.iter, ctx);
+                    self.visit_expr_for_names(&generator.iter, ctx, bound);
                 }
             }
             Expr::DictComp(comp) => {
                 for generator in &comp.generators {
-                    self.visit_expr_for_names(&generator.iter, ctx);
+                    self.visit_expr_for_names(&generator.iter, ctx, bound);
                 }
             }
             _ => {}
@@ -579,6 +510,269 @@ mod tests {
             "for-loop target should be a local, got {:?}",
             undeclared
         );
+    }
+
+    #[test]
+    fn test_local_bindings_shadow_fixture_after_first_binding() {
+        let cases = [
+            (
+                "read between assignments",
+                "    my_fixture = 1\n    _ = my_fixture\n    my_fixture = 2\n",
+            ),
+            (
+                "assigned in except body",
+                "    try:\n        pass\n    except LookupError:\n        my_fixture = 1\n    _ = my_fixture\n",
+            ),
+            (
+                "except as name",
+                "    try:\n        pass\n    except LookupError as my_fixture:\n        _ = my_fixture\n",
+            ),
+            (
+                "except as name on the handler line",
+                "    try:\n        pass\n    except LookupError as my_fixture: _ = my_fixture\n",
+            ),
+            (
+                "assigned in except star body",
+                "    try:\n        pass\n    except* LookupError:\n        my_fixture = 1\n    _ = my_fixture\n",
+            ),
+            (
+                "assigned in try, read in handler",
+                "    try:\n        my_fixture = 1\n    except LookupError:\n        _ = my_fixture\n",
+            ),
+            (
+                "assigned in try, read in finally",
+                "    try:\n        my_fixture = 1\n    finally:\n        _ = my_fixture\n",
+            ),
+            (
+                "assigned in try else, read after",
+                "    try:\n        pass\n    except LookupError:\n        pass\n    else:\n        my_fixture = 1\n    _ = my_fixture\n",
+            ),
+            (
+                "assigned in one branch, read after",
+                "    if c:\n        my_fixture = 1\n    _ = my_fixture\n",
+            ),
+            (
+                "assigned in for else",
+                "    for i in []:\n        pass\n    else:\n        my_fixture = 1\n    _ = my_fixture\n",
+            ),
+            (
+                "assigned in while else",
+                "    while c:\n        pass\n    else:\n        my_fixture = 1\n    _ = my_fixture\n",
+            ),
+            (
+                "assigned in match body",
+                "    match c:\n        case 1:\n            my_fixture = 1\n    _ = my_fixture\n",
+            ),
+            (
+                "match capture",
+                "    match c:\n        case my_fixture:\n            _ = my_fixture\n",
+            ),
+            (
+                "match as pattern",
+                "    match c:\n        case int() as my_fixture:\n            _ = my_fixture\n",
+            ),
+            (
+                "match sequence star",
+                "    match c:\n        case [1, *my_fixture]:\n            _ = my_fixture\n",
+            ),
+            (
+                "match mapping rest",
+                "    match c:\n        case {\"a\": 1, **my_fixture}:\n            _ = my_fixture\n",
+            ),
+            (
+                "match class keyword pattern",
+                "    match c:\n        case C(a=my_fixture):\n            _ = my_fixture\n",
+            ),
+            (
+                "match or pattern",
+                "    match c:\n        case [my_fixture] | (my_fixture, 1):\n            _ = my_fixture\n",
+            ),
+            (
+                "match capture used in guard",
+                "    match c:\n        case my_fixture if my_fixture:\n            pass\n",
+            ),
+            (
+                "walrus in expression statement",
+                "    print(my_fixture := 1)\n    _ = my_fixture\n",
+            ),
+            (
+                "walrus in assert",
+                "    assert (my_fixture := 1).real\n    _ = my_fixture\n",
+            ),
+            (
+                "walrus in annotated assignment",
+                "    x: int = (my_fixture := 1)\n    _ = my_fixture\n",
+            ),
+            (
+                "walrus in augmented assignment",
+                "    x += (my_fixture := 1)\n    _ = my_fixture\n",
+            ),
+            (
+                "walrus in for iterable",
+                "    for i in (my_fixture := []):\n        pass\n    _ = my_fixture\n",
+            ),
+            (
+                "walrus in with item",
+                "    with (my_fixture := open(\"x\")):\n        _ = my_fixture\n",
+            ),
+            (
+                "walrus nested in list",
+                "    x = [(my_fixture := 1)]\n    _ = my_fixture\n",
+            ),
+            (
+                "assigned in except star handler, read in a later one",
+                "    try:\n        pass\n    except* ValueError:\n        my_fixture = 1\n    except* TypeError:\n        _ = my_fixture\n",
+            ),
+            (
+                "capture read in the case after a guarded one",
+                "    match c:\n        case my_fixture if c:\n            pass\n        case _:\n            _ = my_fixture\n",
+            ),
+            (
+                "walrus in dict value, read in the next key",
+                "    _ = {\"a\": (my_fixture := 1), my_fixture: 2}\n",
+            ),
+            (
+                "walrus in ternary branch, read after",
+                "    x = (my_fixture := 1) if c else 2\n    _ = my_fixture\n",
+            ),
+            (
+                "walrus read on the same line",
+                "    if (my_fixture := 1) and my_fixture:\n        pass\n",
+            ),
+            (
+                "from import alias in body",
+                "    from mymod import other as my_fixture\n    _ = my_fixture\n",
+            ),
+            (
+                "import on the same line as the read",
+                "    import my_fixture; _ = my_fixture\n",
+            ),
+            (
+                "dotted import in body",
+                "    import my_fixture.sub\n    _ = my_fixture\n",
+            ),
+            (
+                "nested def",
+                "    def my_fixture():\n        return 2\n    _ = my_fixture()\n",
+            ),
+            (
+                "nested async def",
+                "    async def my_fixture():\n        return 2\n    _ = my_fixture()\n",
+            ),
+            (
+                "nested class",
+                "    class my_fixture:\n        pass\n    _ = my_fixture()\n",
+            ),
+        ];
+
+        let flagged: Vec<&str> = cases
+            .iter()
+            .filter(|(_, body)| {
+                analyze_with_conftest(body)
+                    .iter()
+                    .any(|u| u.name == "my_fixture")
+            })
+            .map(|(label, _)| *label)
+            .collect();
+
+        assert!(flagged.is_empty(), "wrongly flagged: {:?}", flagged);
+    }
+
+    #[test]
+    fn test_read_no_binding_reaches_stays_flagged() {
+        let cases = [
+            (
+                "before two assignments",
+                "    _ = my_fixture\n    my_fixture = 1\n    my_fixture = 2\n",
+                2,
+            ),
+            (
+                "before import in body",
+                "    _ = my_fixture\n    from mymod import my_fixture\n",
+                2,
+            ),
+            (
+                "before nested def",
+                "    _ = my_fixture\n    def my_fixture():\n        return 2\n",
+                2,
+            ),
+            (
+                "assignment reading the fixture",
+                "    my_fixture = my_fixture\n",
+                2,
+            ),
+            (
+                "multi-line assignment reading the fixture",
+                "    my_fixture = wrap(\n        my_fixture,\n    )\n",
+                3,
+            ),
+            ("call keyword value", "    _ = f(kw=my_fixture)\n", 2),
+            (
+                "other if branch, assigned later",
+                "    if c:\n        my_fixture = 1\n    else:\n        _ = my_fixture\n        my_fixture = 2\n",
+                5,
+            ),
+            (
+                "other if branch, imported",
+                "    if c:\n        import my_fixture\n    else:\n        _ = my_fixture\n",
+                5,
+            ),
+            (
+                "other except handler",
+                "    try:\n        pass\n    except ValueError:\n        my_fixture = 1\n    except TypeError:\n        _ = my_fixture\n",
+                7,
+            ),
+            (
+                "case after a guarded case's body",
+                "    match c:\n        case 1 if c:\n            my_fixture = 1\n        case 2:\n            _ = my_fixture\n",
+                6,
+            ),
+            (
+                "dict value before the walrus in the next key",
+                "    _ = {\"a\": my_fixture, (my_fixture := 1): 2}\n",
+                2,
+            ),
+            (
+                "other ternary branch",
+                "    x = (my_fixture := 1) if c else my_fixture\n",
+                2,
+            ),
+            (
+                "other match case",
+                "    match c:\n        case 1:\n            my_fixture = 1\n        case 2:\n            _ = my_fixture\n",
+                6,
+            ),
+            (
+                "after the handler that named it",
+                "    try:\n        pass\n    except LookupError as my_fixture:\n        pass\n    _ = my_fixture\n",
+                6,
+            ),
+            (
+                "try else after assignment in handler",
+                "    try:\n        pass\n    except LookupError:\n        my_fixture = 1\n    else:\n        _ = my_fixture\n",
+                7,
+            ),
+            (
+                "inside try star body",
+                "    try:\n        _ = my_fixture\n    except* LookupError:\n        pass\n",
+                3,
+            ),
+            (
+                "inside async for else",
+                "    async for i in []:\n        pass\n    else:\n        _ = my_fixture\n",
+                5,
+            ),
+        ];
+
+        for (label, body, line) in cases {
+            let lines: Vec<usize> = analyze_with_conftest(body)
+                .iter()
+                .filter(|u| u.name == "my_fixture")
+                .map(|u| u.line)
+                .collect();
+
+            assert_eq!(lines, vec![line], "{}", label);
+        }
     }
 
     #[test]

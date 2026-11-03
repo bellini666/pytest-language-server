@@ -129,6 +129,7 @@ impl FixtureDatabase {
                     &import_map,
                     &module_level_names,
                     &type_aliases,
+                    None,
                 );
             }
         }
@@ -403,8 +404,7 @@ impl FixtureDatabase {
             .or_default()
             .insert(fixture_name);
 
-        // Invalidate cycle cache since definitions changed
-        self.invalidate_cycle_cache();
+        self.bump_definitions_version();
     }
 
     /// Visit a statement and extract fixture definitions and usages
@@ -419,10 +419,11 @@ impl FixtureDatabase {
         import_map: &HashMap<String, TypeImportSpec>,
         module_level_names: &HashSet<String>,
         type_aliases: &HashMap<String, String>,
+        enclosing_class: Option<&str>,
     ) {
         // First check for assignment-style fixtures: fixture_name = pytest.fixture()(func)
         if let Stmt::Assign(assign) = stmt {
-            self.visit_assignment_fixture(assign, file_path, content, line_index);
+            self.visit_assignment_fixture(assign, file_path, content, line_index, enclosing_class);
 
             // Check for pytestmark = pytest.mark.usefixtures(...) or
             // pytestmark = [pytest.mark.usefixtures(...), ...]
@@ -484,6 +485,11 @@ impl FixtureDatabase {
                 }
             }
 
+            let class_name = match enclosing_class {
+                Some(outer) => format!("{outer}.{}", class_def.name),
+                None => class_def.name.to_string(),
+            };
+
             for class_stmt in &class_def.body {
                 self.visit_stmt(
                     class_stmt,
@@ -494,6 +500,7 @@ impl FixtureDatabase {
                     import_map,
                     module_level_names,
                     type_aliases,
+                    Some(&class_name),
                 );
             }
             return;
@@ -668,6 +675,7 @@ impl FixtureDatabase {
                 scope,
                 yield_line: self.find_yield_line(body, line_index),
                 autouse,
+                enclosing_class: enclosing_class.map(str::to_string),
             };
 
             self.record_fixture_definition(definition);
@@ -777,6 +785,7 @@ impl FixtureDatabase {
         file_path: &PathBuf,
         _content: &str,
         line_index: &[usize],
+        enclosing_class: Option<&str>,
     ) {
         if let Expr::Call(outer_call) = &*assign.value {
             if let Expr::Call(inner_call) = &*outer_call.func {
@@ -824,6 +833,7 @@ impl FixtureDatabase {
                                     .unwrap_or_default(),
                                 yield_line: None, // Assignment-style fixtures don't have yield statements
                                 autouse: false,   // Assignment-style fixtures are never autouse
+                                enclosing_class: enclosing_class.map(str::to_string),
                             };
 
                             self.record_fixture_definition(definition);

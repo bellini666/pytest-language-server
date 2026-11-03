@@ -97,6 +97,7 @@ pub struct FixtureDefinition {
     pub scope: FixtureScope, // The fixture's scope (function, class, module, package, session)
     pub yield_line: Option<usize>, // Line number of the yield statement (for generator fixtures)
     pub autouse: bool,       // Whether this fixture has autouse=True
+    pub enclosing_class: Option<String>, // Dotted name of the class defining this fixture ("Outer.Inner")
 }
 
 /// A fixture usage (reference) in a Python file.

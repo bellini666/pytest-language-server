@@ -7421,6 +7421,7 @@ async fn test_request_inlay_hint_shown_when_definition_available() {
         scope: pytest_language_server::FixtureScope::Function,
         yield_line: None,
         autouse: false,
+        enclosing_class: None,
     };
     db.definitions
         .entry("request".to_string())
@@ -7492,6 +7493,7 @@ async fn test_request_code_action_fix_all_annotates_request_param() {
         scope: pytest_language_server::FixtureScope::Function,
         yield_line: None,
         autouse: false,
+        enclosing_class: None,
     };
     db.definitions
         .entry("request".to_string())
@@ -7606,6 +7608,7 @@ async fn test_request_hover_returns_fixture_request_type() {
         scope: pytest_language_server::FixtureScope::Function,
         yield_line: None,
         autouse: false,
+        enclosing_class: None,
     };
     db.definitions
         .entry("request".to_string())

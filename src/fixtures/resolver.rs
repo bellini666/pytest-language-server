@@ -219,20 +219,21 @@ impl FixtureDatabase {
             debug!("  Checking conftest.py at: {:?}", conftest_path);
 
             // First check if the fixture is defined directly in this conftest
-            for def in definitions.iter() {
-                if def.file_path == conftest_path && filter(def) {
-                    info!(
-                        "Found fixture {} in conftest.py: {:?}",
-                        fixture_name, conftest_path
-                    );
-                    return Some(def.clone());
-                }
+            if let Some(def) = definitions
+                .iter()
+                .filter(|def| def.file_path == conftest_path && filter(def))
+                .max_by_key(|def| def.line)
+            {
+                info!(
+                    "Found fixture {} in conftest.py: {:?}",
+                    fixture_name, conftest_path
+                );
+                return Some(def.clone());
             }
 
             // Then check if the conftest imports this fixture
-            // Check both filesystem and file cache for conftest existence
-            let conftest_in_cache = self.file_cache.contains_key(&conftest_path);
-            if conftest_path.exists() || conftest_in_cache {
+            // Check both file cache and filesystem for conftest existence
+            if self.file_cache.contains_key(&conftest_path) || conftest_path.exists() {
                 let mut visited = HashSet::new();
                 let imported = self.get_imported_fixtures(&conftest_path, &mut visited);
                 if let Some(source) = imported.get(fixture_name) {
@@ -245,10 +246,17 @@ impl FixtureDatabase {
                         "Fixture {} is imported in conftest.py: {:?} (from {:?})",
                         fixture_name, conftest_path, source
                     );
+                    let source_indexed = definitions.iter().any(|def| &def.file_path == source);
                     if let Some(def) = definitions
                         .iter()
-                        .find(|def| &def.file_path == source && filter(def))
-                        .or_else(|| definitions.iter().find(|def| filter(def)))
+                        .filter(|def| &def.file_path == source && filter(def))
+                        .max_by_key(|def| def.line)
+                        .or_else(|| {
+                            definitions
+                                .iter()
+                                .filter(|def| !source_indexed && filter(def))
+                                .min_by(|a, b| a.file_path.cmp(&b.file_path))
+                        })
                     {
                         info!(
                             "Found imported fixture {} via conftest.py: {:?} (original: {:?})",
@@ -272,14 +280,16 @@ impl FixtureDatabase {
             "No fixture {} found in conftest hierarchy, checking plugins",
             fixture_name
         );
-        for def in definitions.iter() {
-            if def.is_plugin && !def.is_third_party && filter(def) {
-                info!(
-                    "Found plugin fixture {} via pytest11 entry point: {:?}",
-                    fixture_name, def.file_path
-                );
-                return Some(def.clone());
-            }
+        if let Some(def) = definitions
+            .iter()
+            .filter(|def| def.is_plugin && !def.is_third_party && filter(def))
+            .min_by(|a, b| a.file_path.cmp(&b.file_path))
+        {
+            info!(
+                "Found plugin fixture {} via pytest11 entry point: {:?}",
+                fixture_name, def.file_path
+            );
+            return Some(def.clone());
         }
 
         // Priority 4: Third-party fixtures (site-packages)
@@ -287,14 +297,16 @@ impl FixtureDatabase {
             "No fixture {} found in plugins, checking third-party",
             fixture_name
         );
-        for def in definitions.iter() {
-            if def.is_third_party && filter(def) {
-                info!(
-                    "Found third-party fixture {} in site-packages: {:?}",
-                    fixture_name, def.file_path
-                );
-                return Some(def.clone());
-            }
+        if let Some(def) = definitions
+            .iter()
+            .filter(|def| def.is_third_party && filter(def))
+            .min_by(|a, b| a.file_path.cmp(&b.file_path))
+        {
+            info!(
+                "Found third-party fixture {} in site-packages: {:?}",
+                fixture_name, def.file_path
+            );
+            return Some(def.clone());
         }
 
         debug!(
@@ -1518,167 +1530,258 @@ impl FixtureDatabase {
 
     // ============ Cycle Detection ============
 
-    /// Detect circular dependencies in fixtures with caching.
-    /// Results are cached and only recomputed when definitions change.
-    /// Returns Arc to avoid cloning the potentially large Vec.
-    pub fn detect_fixture_cycles(&self) -> std::sync::Arc<Vec<super::types::FixtureCycle>> {
-        use std::sync::Arc;
-
-        let current_version = self
-            .definitions_version
-            .load(std::sync::atomic::Ordering::SeqCst);
-
-        // Check cache first
-        if let Some(cached) = self.cycle_cache.get(&()) {
-            let (cached_version, cached_cycles) = cached.value();
-            if *cached_version == current_version {
-                return Arc::clone(cached_cycles);
-            }
-        }
-
-        // Compute cycles
-        let cycles = Arc::new(self.compute_fixture_cycles());
-
-        // Store in cache
-        self.cycle_cache
-            .insert((), (current_version, Arc::clone(&cycles)));
-
-        cycles
-    }
-
-    /// Actually compute fixture cycles using iterative DFS (Tarjan-like approach).
-    /// Uses iterative algorithm to avoid stack overflow on deep dependency graphs.
-    fn compute_fixture_cycles(&self) -> Vec<super::types::FixtureCycle> {
-        use super::types::FixtureCycle;
-        use std::collections::HashMap;
-
-        // Build dependency graph: fixture_name -> dependencies (only known fixtures)
-        let mut dep_graph: HashMap<String, Vec<String>> = HashMap::new();
-        let mut fixture_defs: HashMap<String, FixtureDefinition> = HashMap::new();
-
-        for entry in self.definitions.iter() {
-            let fixture_name = entry.key().clone();
-            if let Some(def) = entry.value().first() {
-                fixture_defs.insert(fixture_name.clone(), def.clone());
-                // Only include dependencies that are known fixtures
-                let valid_deps: Vec<String> = def
-                    .dependencies
-                    .iter()
-                    .filter(|d| self.definitions.contains_key(*d))
-                    .cloned()
-                    .collect();
-                dep_graph.insert(fixture_name, valid_deps);
-            }
-        }
-
-        let mut cycles = Vec::new();
-        let mut visited: HashSet<String> = HashSet::new();
-        let mut seen_cycles: HashSet<String> = HashSet::new(); // Deduplicate cycles
-
-        // Iterative DFS using explicit stack
-        for start_fixture in dep_graph.keys() {
-            if visited.contains(start_fixture) {
-                continue;
-            }
-
-            // Stack entries: (fixture_name, iterator_index, path_to_here)
-            let mut stack: Vec<(String, usize, Vec<String>)> =
-                vec![(start_fixture.clone(), 0, vec![])];
-            let mut rec_stack: HashSet<String> = HashSet::new();
-
-            while let Some((current, idx, mut path)) = stack.pop() {
-                if idx == 0 {
-                    // First time visiting this node
-                    if rec_stack.contains(&current) {
-                        // Found a cycle
-                        let cycle_start_idx = path.iter().position(|f| f == &current).unwrap_or(0);
-                        let mut cycle_path: Vec<String> = path[cycle_start_idx..].to_vec();
-                        cycle_path.push(current.clone());
-
-                        // Create a canonical key for deduplication (sorted cycle representation)
-                        let mut cycle_key: Vec<String> =
-                            cycle_path[..cycle_path.len() - 1].to_vec();
-                        cycle_key.sort();
-                        let cycle_key_str = cycle_key.join(",");
-
-                        if !seen_cycles.contains(&cycle_key_str) {
-                            seen_cycles.insert(cycle_key_str);
-                            if let Some(fixture_def) = fixture_defs.get(&current) {
-                                cycles.push(FixtureCycle {
-                                    cycle_path,
-                                    fixture: fixture_def.clone(),
-                                });
-                            }
-                        }
-                        continue;
-                    }
-
-                    rec_stack.insert(current.clone());
-                    path.push(current.clone());
-                }
-
-                // Get dependencies for current node
-                let deps = match dep_graph.get(&current) {
-                    Some(d) => d,
-                    None => {
-                        rec_stack.remove(&current);
-                        continue;
-                    }
-                };
-
-                if idx < deps.len() {
-                    // Push current back with next index
-                    stack.push((current.clone(), idx + 1, path.clone()));
-
-                    let dep = &deps[idx];
-                    if rec_stack.contains(dep) {
-                        // Found a cycle through this dependency
-                        let cycle_start_idx = path.iter().position(|f| f == dep).unwrap_or(0);
-                        let mut cycle_path: Vec<String> = path[cycle_start_idx..].to_vec();
-                        cycle_path.push(dep.clone());
-
-                        let mut cycle_key: Vec<String> =
-                            cycle_path[..cycle_path.len() - 1].to_vec();
-                        cycle_key.sort();
-                        let cycle_key_str = cycle_key.join(",");
-
-                        if !seen_cycles.contains(&cycle_key_str) {
-                            seen_cycles.insert(cycle_key_str);
-                            if let Some(fixture_def) = fixture_defs.get(dep) {
-                                cycles.push(FixtureCycle {
-                                    cycle_path,
-                                    fixture: fixture_def.clone(),
-                                });
-                            }
-                        }
-                    } else if !visited.contains(dep) {
-                        // Explore this dependency
-                        stack.push((dep.clone(), 0, path.clone()));
-                    }
-                } else {
-                    // Done with this node
-                    visited.insert(current.clone());
-                    rec_stack.remove(&current);
-                }
-            }
-        }
-
-        cycles
-    }
-
-    /// Detect cycles for fixtures in a specific file.
-    /// Returns cycles where the first fixture in the cycle is defined in the given file.
-    /// Uses cached cycle detection results for efficiency.
+    /// Detect cycles that include a fixture defined in the given file.
+    ///
+    /// Only what the file's fixtures reach gets resolved, because this runs on every edit. A
+    /// dependency the defining file can't see is retried from the given file: pytest resolves
+    /// dependencies from the requesting test, so a fixture there may fill it in. Uses iterative
+    /// DFS to avoid stack overflow on deep dependency graphs.
     pub fn detect_fixture_cycles_in_file(
         &self,
         file_path: &Path,
     ) -> Vec<super::types::FixtureCycle> {
-        let all_cycles = self.detect_fixture_cycles();
-        all_cycles
+        use super::types::FixtureCycle;
+        use std::collections::HashMap;
+
+        let mut defs = self.live_definitions_in_file(file_path);
+        let mut node_of: HashMap<(PathBuf, usize), usize> = defs
             .iter()
-            .filter(|cycle| cycle.fixture.file_path == file_path)
-            .cloned()
-            .collect()
+            .enumerate()
+            .map(|(node, def)| ((def.file_path.clone(), def.line), node))
+            .collect();
+        let mut dep_graph: Vec<Vec<usize>> = Vec::new();
+
+        // `defs` grows as dependencies resolve, so this covers everything the file reaches.
+        while dep_graph.len() < defs.len() {
+            let node = dep_graph.len();
+            let def = defs[node].clone();
+            let mut deps = Vec::new();
+
+            for dep in &def.dependencies {
+                let target = self.resolve_fixture_dependency(&def, dep).or_else(|| {
+                    (*dep != def.name)
+                        .then(|| self.find_closest_definition(file_path, dep))
+                        .flatten()
+                });
+
+                match target {
+                    Some(target) => {
+                        let next_node = defs.len();
+                        let target_node = *node_of
+                            .entry((target.file_path.clone(), target.line))
+                            .or_insert(next_node);
+                        if target_node == next_node {
+                            defs.push(target);
+                        }
+                        deps.push(target_node);
+                    }
+                    None if *dep == def.name && !self.may_have_hidden_parent(&def) => {
+                        deps.push(node)
+                    }
+                    None => {}
+                }
+            }
+
+            dep_graph.push(deps);
+        }
+
+        let mut cycles = Vec::new();
+        let mut visited: HashSet<usize> = HashSet::new();
+        let mut seen_cycles: HashSet<Vec<usize>> = HashSet::new();
+
+        for start_fixture in 0..defs.len() {
+            if visited.contains(&start_fixture) {
+                continue;
+            }
+
+            // Stack entries: (node, iterator_index, path_to_here)
+            let mut stack: Vec<(usize, usize, Vec<usize>)> = vec![(start_fixture, 0, vec![])];
+            let mut rec_stack: HashSet<usize> = HashSet::new();
+
+            while let Some((current, idx, mut path)) = stack.pop() {
+                if idx == 0 {
+                    rec_stack.insert(current);
+                    path.push(current);
+                }
+
+                let deps = &dep_graph[current];
+
+                if idx >= deps.len() {
+                    visited.insert(current);
+                    rec_stack.remove(&current);
+                    continue;
+                }
+
+                stack.push((current, idx + 1, path.clone()));
+
+                let dep = deps[idx];
+                if !rec_stack.contains(&dep) {
+                    if !visited.contains(&dep) {
+                        stack.push((dep, 0, path));
+                    }
+                    continue;
+                }
+
+                let cycle_start = path.iter().position(|node| *node == dep).unwrap_or(0);
+                let mut cycle_nodes = path[cycle_start..].to_vec();
+
+                let mut cycle_key = cycle_nodes.clone();
+                cycle_key.sort();
+                if !seen_cycles.insert(cycle_key) {
+                    continue;
+                }
+
+                // The node closing the cycle depends on traversal, so report on the file's
+                // first member to keep the diagnostic in the file and on a stable line.
+                let reported = cycle_nodes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, node)| defs[**node].file_path == file_path)
+                    .min_by_key(|(_, node)| defs[**node].line)
+                    .map(|(position, _)| position);
+                if let Some(position) = reported {
+                    cycle_nodes.rotate_left(position);
+                    let mut cycle_path: Vec<String> = cycle_nodes
+                        .iter()
+                        .map(|node| defs[*node].name.clone())
+                        .collect();
+                    cycle_path.push(defs[cycle_nodes[0]].name.clone());
+                    cycles.push(FixtureCycle {
+                        cycle_path,
+                        fixture: defs[cycle_nodes[0]].clone(),
+                    });
+                }
+            }
+        }
+
+        cycles
+    }
+
+    /// List the definitions in a file that pytest would register, ordered by line.
+    ///
+    /// A later definition of a name replaces earlier ones in the same module or class.
+    fn live_definitions_in_file(&self, file_path: &Path) -> Vec<FixtureDefinition> {
+        let fixture_names = self
+            .file_definitions
+            .get(file_path)
+            .map(|names| names.value().clone())
+            .unwrap_or_default();
+        let mut defs: Vec<FixtureDefinition> = fixture_names
+            .iter()
+            .filter_map(|name| {
+                self.definitions.get(name).map(|defs| {
+                    defs.iter()
+                        .filter(|d| d.file_path == file_path)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+            })
+            .flatten()
+            .collect();
+
+        defs.sort_by_key(|d| std::cmp::Reverse(d.line));
+        let mut seen = HashSet::new();
+        defs.retain(|d| seen.insert((d.name.clone(), d.enclosing_class.clone())));
+        defs.reverse();
+        defs
+    }
+
+    /// Resolve a fixture's dependency the way pytest would for a test beside the fixture.
+    fn resolve_fixture_dependency(
+        &self,
+        def: &FixtureDefinition,
+        dep_name: &str,
+    ) -> Option<FixtureDefinition> {
+        let is_self_reference = dep_name == def.name;
+
+        let mut class_scope = def.enclosing_class.as_deref();
+        if is_self_reference {
+            class_scope =
+                class_scope.and_then(|class| class.rsplit_once('.').map(|(outer, _)| outer));
+        }
+        while let Some(class) = class_scope {
+            let in_class = self.definitions.get(dep_name).and_then(|defs| {
+                defs.iter()
+                    .filter(|d| d.file_path == def.file_path)
+                    .filter(|d| d.enclosing_class.as_deref() == Some(class))
+                    .max_by_key(|d| d.line)
+                    .cloned()
+            });
+            if in_class.is_some() {
+                return in_class;
+            }
+            class_scope = class.rsplit_once('.').map(|(outer, _)| outer);
+        }
+
+        let visible = |candidate: &FixtureDefinition| {
+            candidate.enclosing_class.is_none()
+                && (candidate.is_third_party || !def.is_third_party)
+                && !(is_self_reference
+                    && def.enclosing_class.is_none()
+                    && candidate.file_path == def.file_path)
+        };
+
+        let closest = self.find_closest_definition_with_filter(&def.file_path, dep_name, visible);
+        if closest
+            .as_ref()
+            .is_some_and(|d| d.file_path == def.file_path)
+        {
+            return closest;
+        }
+
+        let is_conftest = def.file_path.ends_with("conftest.py");
+        if !is_conftest {
+            let imported = self.get_imported_fixtures(&def.file_path, &mut HashSet::new());
+            if let Some(source) = imported.get(dep_name) {
+                let from_own_import = self.definitions.get(dep_name).and_then(|defs| {
+                    defs.iter()
+                        .filter(|d| &d.file_path == source && visible(d))
+                        .max_by_key(|d| d.line)
+                        .cloned()
+                });
+                if from_own_import.is_some() {
+                    return from_own_import;
+                }
+            }
+        }
+
+        if closest.is_some() || is_conftest || def.is_third_party {
+            return closest;
+        }
+
+        // A helper module runs in the context of whichever conftest imports it.
+        let mut conftests: Vec<PathBuf> = self
+            .file_cache
+            .iter()
+            .filter(|entry| entry.key().ends_with("conftest.py"))
+            .map(|entry| entry.key().clone())
+            .collect();
+        conftests.sort();
+
+        conftests.iter().find_map(|conftest| {
+            let imported = self.get_imported_fixtures(conftest, &mut HashSet::new());
+            (imported.get(&def.name) == Some(&def.file_path))
+                .then(|| self.find_closest_definition_with_filter(conftest, dep_name, visible))
+                .flatten()
+        })
+    }
+
+    /// Check whether a self-referencing fixture's parent could exist unseen by the resolver.
+    ///
+    /// Another definition of the name outside this directory's subtree means the name comes from
+    /// somewhere the resolver doesn't model, such as an unscanned plugin. Definitions below this
+    /// directory and class-level ones can't be the parent.
+    fn may_have_hidden_parent(&self, def: &FixtureDefinition) -> bool {
+        let dir = def.file_path.parent().unwrap_or(&def.file_path);
+
+        self.definitions.get(&def.name).is_some_and(|defs| {
+            defs.iter()
+                .filter(|other| other.enclosing_class.is_none())
+                .filter(|other| other.file_path != def.file_path)
+                .any(|other| {
+                    other.file_path.parent() == Some(dir) || !other.file_path.starts_with(dir)
+                })
+        })
     }
 
     // ============ Scope Validation ============
@@ -1694,38 +1797,21 @@ impl FixtureDatabase {
 
         let mut mismatches = Vec::new();
 
-        // Get fixtures defined in this file
-        let Some(fixture_names) = self.file_definitions.get(file_path) else {
-            return mismatches;
-        };
-
-        for fixture_name in fixture_names.iter() {
-            // Get the fixture definition
-            let Some(definitions) = self.definitions.get(fixture_name) else {
+        for fixture_def in self.live_definitions_in_file(file_path) {
+            // Function is the narrowest scope, so these can't mismatch and need no lookups.
+            if fixture_def.scope == FixtureScope::Function {
                 continue;
-            };
+            }
 
-            // Find the definition in this file
-            let Some(fixture_def) = definitions.iter().find(|d| d.file_path == file_path) else {
-                continue;
-            };
-
-            // Check each dependency
             for dep_name in &fixture_def.dependencies {
-                // Find the dependency's definition (use resolution logic to get correct one)
-                if let Some(dep_definitions) = self.definitions.get(dep_name) {
-                    // Find best matching definition for the dependency
-                    // Use the first one (most local) - matches cycle detection behavior
-                    if let Some(dep_def) = dep_definitions.first() {
-                        // Check if scope mismatch: fixture has broader scope than dependency
-                        // FixtureScope is ordered: Function < Class < Module < Package < Session
-                        if fixture_def.scope > dep_def.scope {
-                            mismatches.push(ScopeMismatch {
-                                fixture: fixture_def.clone(),
-                                dependency: dep_def.clone(),
-                            });
-                        }
-                    }
+                let dep_def = self.resolve_fixture_dependency(&fixture_def, dep_name);
+
+                // FixtureScope is ordered: Function < Class < Module < Package < Session
+                if let Some(dep_def) = dep_def.filter(|d| fixture_def.scope > d.scope) {
+                    mismatches.push(ScopeMismatch {
+                        fixture: fixture_def.clone(),
+                        dependency: dep_def,
+                    });
                 }
             }
         }

@@ -178,8 +178,6 @@ impl FixtureDatabase {
         }
     }
 
-    /// Increment the definitions version.
-    /// Called whenever fixture definitions are modified.
     pub(crate) fn bump_definitions_version(&self) {
         self.definitions_version
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);

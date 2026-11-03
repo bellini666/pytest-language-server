@@ -435,6 +435,7 @@ mod tests {
             scope,
             yield_line: None,
             autouse: false,
+            enclosing_class: None,
         }
     }
 

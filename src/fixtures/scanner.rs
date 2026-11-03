@@ -824,6 +824,7 @@ impl FixtureDatabase {
             scope: FixtureScope::Function,
             yield_line: None,
             autouse: false,
+            enclosing_class: None,
         };
 
         info!("Registering synthetic 'request' fixture definition");

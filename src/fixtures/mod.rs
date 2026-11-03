@@ -55,10 +55,6 @@ type LineIndexCacheEntry = (u64, Arc<Vec<usize>>);
 /// The content hash is used to invalidate the cache when file content changes.
 type AstCacheEntry = (u64, Arc<rustpython_parser::ast::Mod>);
 
-/// Cache entry for fixture cycles: (definitions_version, cycles).
-/// The version is incremented when definitions change to invalidate the cache.
-type CycleCacheEntry = (u64, Arc<Vec<types::FixtureCycle>>);
-
 /// Cache entry for available fixtures: (definitions_version, fixtures).
 /// The version is incremented when definitions change to invalidate the cache.
 type AvailableFixturesCacheEntry = (u64, Arc<Vec<FixtureDefinition>>);
@@ -123,11 +119,8 @@ pub struct FixtureDatabase {
     /// Stores (content_hash, ast) to invalidate when content changes.
     pub ast_cache: Arc<DashMap<PathBuf, AstCacheEntry>>,
     /// Version counter for definitions, incremented on each change.
-    /// Used to invalidate cycle detection cache and available fixtures cache.
+    /// Used to invalidate the available and imported fixtures caches.
     pub definitions_version: Arc<std::sync::atomic::AtomicU64>,
-    /// Cache of detected fixture cycles.
-    /// Stores (definitions_version, cycles) to invalidate when definitions change.
-    pub cycle_cache: Arc<DashMap<(), CycleCacheEntry>>,
     /// Cache of available fixtures per file.
     /// Stores (definitions_version, fixtures) to invalidate when definitions change.
     pub available_fixtures_cache: Arc<DashMap<PathBuf, AvailableFixturesCacheEntry>>,
@@ -175,7 +168,6 @@ impl FixtureDatabase {
             line_index_by_identity: Arc::new(DashMap::new()),
             ast_cache: Arc::new(DashMap::new()),
             definitions_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            cycle_cache: Arc::new(DashMap::new()),
             available_fixtures_cache: Arc::new(DashMap::new()),
             imported_fixtures_cache: Arc::new(DashMap::new()),
             site_packages_paths: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -186,9 +178,9 @@ impl FixtureDatabase {
         }
     }
 
-    /// Increment the definitions version to invalidate cycle cache.
+    /// Increment the definitions version.
     /// Called whenever fixture definitions are modified.
-    pub(crate) fn invalidate_cycle_cache(&self) {
+    pub(crate) fn bump_definitions_version(&self) {
         self.definitions_version
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }

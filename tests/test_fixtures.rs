@@ -3918,7 +3918,7 @@ def b(a):
     let path = PathBuf::from("/tmp/test_req_cycle/conftest.py");
     db.analyze_file(path.clone(), content);
 
-    let cycles = db.detect_fixture_cycles();
+    let cycles = db.detect_fixture_cycles_in_file(&path);
     assert!(
         cycles.is_empty(),
         "There should be no cycles; request must not cause false cycle detection"
@@ -9723,7 +9723,7 @@ def fixture_b(fixture_a):
     let path = PathBuf::from("/tmp/test/conftest.py");
     db.analyze_file(path.clone(), content);
 
-    let cycles = db.detect_fixture_cycles();
+    let cycles = db.detect_fixture_cycles_in_file(&path);
     assert!(!cycles.is_empty(), "Should detect the A->B->A cycle");
 
     // Check the cycle contains both fixtures
@@ -9756,7 +9756,7 @@ def fixture_c(fixture_a):
     let path = PathBuf::from("/tmp/test/conftest.py");
     db.analyze_file(path.clone(), content);
 
-    let cycles = db.detect_fixture_cycles();
+    let cycles = db.detect_fixture_cycles_in_file(&path);
     assert!(!cycles.is_empty(), "Should detect the A->B->C->A cycle");
 
     // The cycle should contain all three fixtures
@@ -9791,7 +9791,7 @@ def top_fixture(dependent_fixture):
     let path = PathBuf::from("/tmp/test/conftest.py");
     db.analyze_file(path.clone(), content);
 
-    let cycles = db.detect_fixture_cycles();
+    let cycles = db.detect_fixture_cycles_in_file(&path);
     assert!(cycles.is_empty(), "Should not detect any cycles in a DAG");
 }
 
@@ -9800,9 +9800,7 @@ def top_fixture(dependent_fixture):
 fn test_cycle_detection_self_referencing() {
     let db = FixtureDatabase::new();
 
-    // Self-referencing fixture (same name as parameter) - this is actually valid
-    // in pytest when overriding a parent fixture, but we detect it as a cycle
-    // Note: In practice, pytest resolves this by looking up the conftest hierarchy
+    // No parent fixture to override: pytest raises "recursive dependency".
     let content = r#"
 import pytest
 
@@ -9814,57 +9812,12 @@ def my_fixture(my_fixture):
     let path = PathBuf::from("/tmp/test/conftest.py");
     db.analyze_file(path.clone(), content);
 
-    let cycles = db.detect_fixture_cycles();
+    let cycles = db.detect_fixture_cycles_in_file(&path);
     // Self-reference creates a cycle A->A
     assert!(
         !cycles.is_empty(),
         "Should detect self-referencing as a cycle"
     );
-}
-
-#[test]
-#[timeout(30000)]
-fn test_cycle_detection_caching() {
-    let db = FixtureDatabase::new();
-
-    let content = r#"
-import pytest
-
-@pytest.fixture
-def fixture_a(fixture_b):
-    return "a"
-
-@pytest.fixture
-def fixture_b(fixture_a):
-    return "b"
-"#;
-
-    let path = PathBuf::from("/tmp/test/conftest.py");
-    db.analyze_file(path.clone(), content);
-
-    // First call computes cycles
-    let cycles1 = db.detect_fixture_cycles();
-    assert!(!cycles1.is_empty());
-
-    // Second call should use cache (same Arc)
-    let cycles2 = db.detect_fixture_cycles();
-    assert_eq!(cycles1.len(), cycles2.len());
-
-    // Add new content to invalidate cache
-    let content2 = r#"
-import pytest
-
-@pytest.fixture
-def standalone():
-    return "standalone"
-"#;
-    let path2 = PathBuf::from("/tmp/test/other.py");
-    db.analyze_file(path2, content2);
-
-    // Cache should be invalidated, cycles recalculated
-    let cycles3 = db.detect_fixture_cycles();
-    // Original cycle should still be detected
-    assert!(!cycles3.is_empty());
 }
 
 #[test]
@@ -9934,7 +9887,7 @@ def other_fixture(my_fixture):
     db.analyze_file(path.clone(), content);
 
     // No cycles - unknown_fixture is not in the graph
-    let cycles = db.detect_fixture_cycles();
+    let cycles = db.detect_fixture_cycles_in_file(&path);
     assert!(
         cycles.is_empty(),
         "Unknown fixtures should not cause false positive cycles"
@@ -9975,13 +9928,203 @@ def cycle2_z(cycle2_x):
     let path = PathBuf::from("/tmp/test/conftest.py");
     db.analyze_file(path.clone(), content);
 
-    let cycles = db.detect_fixture_cycles();
+    let cycles = db.detect_fixture_cycles_in_file(&path);
     // Should detect both cycles (may be reported as 2+ depending on detection order)
     assert!(
         cycles.len() >= 2,
         "Should detect multiple independent cycles, got {}",
         cycles.len()
     );
+}
+
+#[test]
+#[timeout(30000)]
+fn test_cycle_detection_override_requesting_parent_is_not_a_cycle() {
+    let db = FixtureDatabase::new();
+
+    let sub_path = PathBuf::from("/tmp/test_cycle_override/sub/conftest.py");
+    db.analyze_file(
+        sub_path.clone(),
+        r#"
+import pytest
+
+@pytest.fixture
+def db(db):
+    return db
+"#,
+    );
+    db.analyze_file(
+        PathBuf::from("/tmp/test_cycle_override/conftest.py"),
+        r#"
+import pytest
+
+@pytest.fixture
+def db():
+    return "db"
+"#,
+    );
+
+    assert!(db.detect_fixture_cycles_in_file(&sub_path).is_empty());
+}
+
+#[test]
+#[timeout(30000)]
+fn test_cycle_detection_ignores_overrides_in_unrelated_directories() {
+    let db = FixtureDatabase::new();
+
+    let a_path = PathBuf::from("/tmp/test_cycle_unrelated/a/conftest.py");
+    let b_path = PathBuf::from("/tmp/test_cycle_unrelated/b/conftest.py");
+    db.analyze_file(
+        a_path.clone(),
+        r#"
+import pytest
+
+@pytest.fixture
+def foo(bar):
+    return bar
+"#,
+    );
+    db.analyze_file(
+        b_path.clone(),
+        r#"
+import pytest
+
+@pytest.fixture
+def bar(foo):
+    return foo
+"#,
+    );
+    db.analyze_file(
+        PathBuf::from("/tmp/test_cycle_unrelated/conftest.py"),
+        r#"
+import pytest
+
+@pytest.fixture
+def foo():
+    return "foo"
+
+@pytest.fixture
+def bar():
+    return "bar"
+"#,
+    );
+
+    assert!(db.detect_fixture_cycles_in_file(&a_path).is_empty());
+    assert!(db.detect_fixture_cycles_in_file(&b_path).is_empty());
+}
+
+#[test]
+#[timeout(30000)]
+fn test_cycle_detection_finds_cycle_when_other_directory_defines_same_name() {
+    let db = FixtureDatabase::new();
+
+    let cycle_path = PathBuf::from("/tmp/test_cycle_hidden/x/conftest.py");
+    db.analyze_file(
+        PathBuf::from("/tmp/test_cycle_hidden/other/conftest.py"),
+        r#"
+import pytest
+
+@pytest.fixture
+def a():
+    return "a"
+"#,
+    );
+    db.analyze_file(
+        cycle_path.clone(),
+        r#"
+import pytest
+
+@pytest.fixture
+def a(b):
+    return b
+
+@pytest.fixture
+def b(a):
+    return a
+"#,
+    );
+
+    assert!(!db.detect_fixture_cycles_in_file(&cycle_path).is_empty());
+}
+
+#[test]
+#[timeout(30000)]
+fn test_cycle_detection_reports_same_named_cycles_in_each_directory() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def a(b):
+    return b
+
+@pytest.fixture
+def b(a):
+    return a
+"#;
+    let x_path = PathBuf::from("/tmp/test_cycle_same_names/x/conftest.py");
+    let y_path = PathBuf::from("/tmp/test_cycle_same_names/y/conftest.py");
+    db.analyze_file(x_path.clone(), content);
+    db.analyze_file(y_path.clone(), content);
+
+    assert!(!db.detect_fixture_cycles_in_file(&x_path).is_empty());
+    assert!(!db.detect_fixture_cycles_in_file(&y_path).is_empty());
+}
+
+#[test]
+#[timeout(30000)]
+fn test_cycle_detection_reports_cross_file_cycle_on_each_file() {
+    let db = FixtureDatabase::new();
+
+    let module_path = PathBuf::from("/tmp/test_cycle_cross_file/fixture_module.py");
+    let conftest_path = PathBuf::from("/tmp/test_cycle_cross_file/conftest.py");
+    db.analyze_file(
+        module_path.clone(),
+        r#"
+import pytest
+
+@pytest.fixture
+def b(a):
+    return a
+"#,
+    );
+    db.analyze_file(
+        conftest_path.clone(),
+        r#"
+from .fixture_module import *
+
+import pytest
+
+@pytest.fixture
+def a(b):
+    return b
+"#,
+    );
+
+    assert!(!db.detect_fixture_cycles_in_file(&module_path).is_empty());
+    assert!(!db.detect_fixture_cycles_in_file(&conftest_path).is_empty());
+}
+
+#[test]
+#[timeout(30000)]
+fn test_cycle_detection_self_reference_chain_reports_fixture_without_parent() {
+    let db = FixtureDatabase::new();
+
+    let content = r#"
+import pytest
+
+@pytest.fixture
+def db(db):
+    return db
+"#;
+    let sub_path = PathBuf::from("/tmp/test_cycle_chain/sub/conftest.py");
+    let root_path = PathBuf::from("/tmp/test_cycle_chain/conftest.py");
+    db.analyze_file(sub_path.clone(), content);
+    db.analyze_file(root_path.clone(), content);
+
+    assert!(db.detect_fixture_cycles_in_file(&sub_path).is_empty());
+    assert!(!db.detect_fixture_cycles_in_file(&root_path).is_empty());
 }
 
 // ============ Scope Validation Tests ============
@@ -10183,6 +10326,193 @@ def session_fixture(func_a, func_b):
 
     let mismatches = db.detect_scope_mismatches_in_file(&path);
     assert_eq!(mismatches.len(), 2, "Should detect two scope mismatches");
+}
+
+#[test]
+#[timeout(30000)]
+fn test_scope_mismatch_ignores_same_name_fixture_in_unrelated_file() {
+    let db = FixtureDatabase::new();
+
+    let conftest_path = PathBuf::from("/tmp/test_scope_unrelated/conftest.py");
+    db.analyze_file(
+        PathBuf::from("/tmp/test_scope_unrelated/sub/test_other.py"),
+        r#"
+import pytest
+
+@pytest.fixture
+def exporter():
+    return object()
+
+def test_uses_its_own_exporter(exporter):
+    assert exporter is not None
+"#,
+    );
+    db.analyze_file(
+        conftest_path.clone(),
+        r#"
+import pytest
+
+@pytest.fixture(scope="class")
+def exporter():
+    return object()
+
+@pytest.fixture(scope="class")
+def provider(exporter):
+    return exporter
+"#,
+    );
+
+    assert!(db
+        .detect_scope_mismatches_in_file(&conftest_path)
+        .is_empty());
+}
+
+#[test]
+#[timeout(30000)]
+fn test_scope_mismatch_uses_closest_definition_when_broader_one_exists_elsewhere() {
+    let db = FixtureDatabase::new();
+
+    let conftest_path = PathBuf::from("/tmp/test_scope_shadow/conftest.py");
+    db.analyze_file(
+        PathBuf::from("/tmp/test_scope_shadow/sub/test_other.py"),
+        r#"
+import pytest
+
+@pytest.fixture(scope="session")
+def exporter():
+    return object()
+"#,
+    );
+    db.analyze_file(
+        conftest_path.clone(),
+        r#"
+import pytest
+
+@pytest.fixture
+def exporter():
+    return object()
+
+@pytest.fixture(scope="class")
+def provider(exporter):
+    return exporter
+"#,
+    );
+
+    let mismatches = db.detect_scope_mismatches_in_file(&conftest_path);
+
+    assert_eq!(mismatches.len(), 1);
+    assert_eq!(mismatches[0].fixture.name, "provider");
+    assert_eq!(mismatches[0].dependency.file_path, conftest_path);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_scope_mismatch_self_reference_checks_parent_definition() {
+    let db = FixtureDatabase::new();
+
+    let sub_path = PathBuf::from("/tmp/test_scope_self_ref/sub/conftest.py");
+    let root_path = PathBuf::from("/tmp/test_scope_self_ref/conftest.py");
+    db.analyze_file(
+        sub_path.clone(),
+        r#"
+import pytest
+
+@pytest.fixture(scope="session")
+def db(db):
+    return db
+"#,
+    );
+    db.analyze_file(
+        root_path.clone(),
+        r#"
+import pytest
+
+@pytest.fixture
+def db():
+    return "db"
+"#,
+    );
+
+    let mismatches = db.detect_scope_mismatches_in_file(&sub_path);
+
+    assert_eq!(mismatches.len(), 1);
+    assert_eq!(mismatches[0].dependency.file_path, root_path);
+}
+
+#[test]
+#[timeout(30000)]
+fn test_scope_mismatch_resolves_star_imported_dependency() {
+    let db = FixtureDatabase::new();
+
+    let conftest_path = PathBuf::from("/tmp/test_scope_star_import/conftest.py");
+    db.analyze_file(
+        PathBuf::from("/tmp/test_scope_star_import/sub/test_other.py"),
+        r#"
+import pytest
+
+@pytest.fixture
+def exporter():
+    return object()
+"#,
+    );
+    db.analyze_file(
+        PathBuf::from("/tmp/test_scope_star_import/fixture_module.py"),
+        r#"
+import pytest
+
+@pytest.fixture(scope="class")
+def exporter():
+    return object()
+"#,
+    );
+    db.analyze_file(
+        conftest_path.clone(),
+        r#"
+from .fixture_module import *
+
+import pytest
+
+@pytest.fixture(scope="class")
+def provider(exporter):
+    return exporter
+"#,
+    );
+
+    assert!(db
+        .detect_scope_mismatches_in_file(&conftest_path)
+        .is_empty());
+}
+
+#[test]
+#[timeout(30000)]
+fn test_scope_mismatch_skips_dependency_not_visible_from_fixture() {
+    let db = FixtureDatabase::new();
+
+    let conftest_path = PathBuf::from("/tmp/test_scope_not_visible/conftest.py");
+    db.analyze_file(
+        PathBuf::from("/tmp/test_scope_not_visible/sub/test_other.py"),
+        r#"
+import pytest
+
+@pytest.fixture
+def exporter():
+    return object()
+"#,
+    );
+    db.analyze_file(
+        conftest_path.clone(),
+        r#"
+import pytest
+
+@pytest.fixture(scope="class")
+def provider(exporter):
+    return exporter
+"#,
+    );
+
+    assert!(db
+        .detect_scope_mismatches_in_file(&conftest_path)
+        .is_empty());
 }
 
 #[test]

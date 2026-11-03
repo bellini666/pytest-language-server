@@ -1518,146 +1518,127 @@ impl FixtureDatabase {
 
     // ============ Cycle Detection ============
 
-    /// Detect circular dependencies in fixtures with caching.
-    /// Results are cached and only recomputed when definitions change.
-    /// Returns Arc to avoid cloning the potentially large Vec.
-    pub fn detect_fixture_cycles(&self) -> std::sync::Arc<Vec<super::types::FixtureCycle>> {
-        use std::sync::Arc;
-
-        let current_version = self
-            .definitions_version
-            .load(std::sync::atomic::Ordering::SeqCst);
-
-        // Check cache first
-        if let Some(cached) = self.cycle_cache.get(&()) {
-            let (cached_version, cached_cycles) = cached.value();
-            if *cached_version == current_version {
-                return Arc::clone(cached_cycles);
-            }
-        }
-
-        // Compute cycles
-        let cycles = Arc::new(self.compute_fixture_cycles());
-
-        // Store in cache
-        self.cycle_cache
-            .insert((), (current_version, Arc::clone(&cycles)));
-
-        cycles
-    }
-
-    /// Actually compute fixture cycles using iterative DFS (Tarjan-like approach).
+    /// Compute the fixture cycles reachable from `seeds` using iterative DFS (Tarjan-like approach).
     /// Uses iterative algorithm to avoid stack overflow on deep dependency graphs.
-    fn compute_fixture_cycles(&self) -> Vec<super::types::FixtureCycle> {
+    fn compute_fixture_cycles(
+        &self,
+        seeds: Vec<FixtureDefinition>,
+    ) -> Vec<super::types::FixtureCycle> {
         use super::types::FixtureCycle;
         use std::collections::HashMap;
 
-        // Build dependency graph: fixture_name -> dependencies (only known fixtures)
-        let mut dep_graph: HashMap<String, Vec<String>> = HashMap::new();
-        let mut fixture_defs: HashMap<String, FixtureDefinition> = HashMap::new();
+        let mut defs = seeds;
+        let mut node_of: HashMap<(PathBuf, usize), usize> = defs
+            .iter()
+            .enumerate()
+            .map(|(node, def)| ((def.file_path.clone(), def.line), node))
+            .collect();
+        let mut dep_graph: Vec<Vec<usize>> = Vec::with_capacity(defs.len());
 
-        for entry in self.definitions.iter() {
-            let fixture_name = entry.key().clone();
-            if let Some(def) = entry.value().first() {
-                fixture_defs.insert(fixture_name.clone(), def.clone());
-                // Only include dependencies that are known fixtures
-                let valid_deps: Vec<String> = def
-                    .dependencies
-                    .iter()
-                    .filter(|d| self.definitions.contains_key(*d))
-                    .cloned()
-                    .collect();
-                dep_graph.insert(fixture_name, valid_deps);
+        // `defs` grows as dependencies resolve, so this covers everything the seeds reach.
+        while dep_graph.len() < defs.len() {
+            let node = dep_graph.len();
+            let def = defs[node].clone();
+            let mut deps = Vec::new();
+
+            for dep in &def.dependencies {
+                match self.find_closest_definition_excluding(&def.file_path, dep, Some(&def)) {
+                    Some(target) => {
+                        let next_node = defs.len();
+                        let target_node = *node_of
+                            .entry((target.file_path.clone(), target.line))
+                            .or_insert(next_node);
+                        if target_node == next_node {
+                            defs.push(target);
+                        }
+                        deps.push(target_node);
+                    }
+                    // Nothing left to override: pytest raises "recursive dependency".
+                    None if *dep == def.name => deps.push(node),
+                    None => {}
+                }
             }
+
+            dep_graph.push(deps);
         }
 
         let mut cycles = Vec::new();
-        let mut visited: HashSet<String> = HashSet::new();
-        let mut seen_cycles: HashSet<String> = HashSet::new(); // Deduplicate cycles
+        let mut visited: HashSet<usize> = HashSet::new();
+        let mut seen_cycles: HashSet<Vec<usize>> = HashSet::new(); // Deduplicate cycles
 
         // Iterative DFS using explicit stack
-        for start_fixture in dep_graph.keys() {
-            if visited.contains(start_fixture) {
+        for start_fixture in 0..defs.len() {
+            if visited.contains(&start_fixture) {
                 continue;
             }
 
-            // Stack entries: (fixture_name, iterator_index, path_to_here)
-            let mut stack: Vec<(String, usize, Vec<String>)> =
-                vec![(start_fixture.clone(), 0, vec![])];
-            let mut rec_stack: HashSet<String> = HashSet::new();
+            // Stack entries: (node, iterator_index, path_to_here)
+            let mut stack: Vec<(usize, usize, Vec<usize>)> = vec![(start_fixture, 0, vec![])];
+            let mut rec_stack: HashSet<usize> = HashSet::new();
 
             while let Some((current, idx, mut path)) = stack.pop() {
                 if idx == 0 {
                     // First time visiting this node
                     if rec_stack.contains(&current) {
                         // Found a cycle
-                        let cycle_start_idx = path.iter().position(|f| f == &current).unwrap_or(0);
-                        let mut cycle_path: Vec<String> = path[cycle_start_idx..].to_vec();
-                        cycle_path.push(current.clone());
+                        let cycle_start_idx = path.iter().position(|f| *f == current).unwrap_or(0);
+                        let mut cycle_nodes: Vec<usize> = path[cycle_start_idx..].to_vec();
+                        cycle_nodes.push(current);
 
                         // Create a canonical key for deduplication (sorted cycle representation)
-                        let mut cycle_key: Vec<String> =
-                            cycle_path[..cycle_path.len() - 1].to_vec();
-                        cycle_key.sort();
-                        let cycle_key_str = cycle_key.join(",");
+                        let mut cycle_key: Vec<usize> =
+                            cycle_nodes[..cycle_nodes.len() - 1].to_vec();
+                        cycle_key.sort_unstable();
 
-                        if !seen_cycles.contains(&cycle_key_str) {
-                            seen_cycles.insert(cycle_key_str);
-                            if let Some(fixture_def) = fixture_defs.get(&current) {
-                                cycles.push(FixtureCycle {
-                                    cycle_path,
-                                    fixture: fixture_def.clone(),
-                                });
-                            }
+                        if seen_cycles.insert(cycle_key) {
+                            cycles.push(FixtureCycle {
+                                cycle_path: cycle_nodes
+                                    .iter()
+                                    .map(|&n| defs[n].name.clone())
+                                    .collect(),
+                                fixture: defs[current].clone(),
+                            });
                         }
                         continue;
                     }
 
-                    rec_stack.insert(current.clone());
-                    path.push(current.clone());
+                    rec_stack.insert(current);
+                    path.push(current);
                 }
 
-                // Get dependencies for current node
-                let deps = match dep_graph.get(&current) {
-                    Some(d) => d,
-                    None => {
-                        rec_stack.remove(&current);
-                        continue;
-                    }
-                };
+                let deps = &dep_graph[current];
 
                 if idx < deps.len() {
                     // Push current back with next index
-                    stack.push((current.clone(), idx + 1, path.clone()));
+                    stack.push((current, idx + 1, path.clone()));
 
-                    let dep = &deps[idx];
-                    if rec_stack.contains(dep) {
+                    let dep = deps[idx];
+                    if rec_stack.contains(&dep) {
                         // Found a cycle through this dependency
-                        let cycle_start_idx = path.iter().position(|f| f == dep).unwrap_or(0);
-                        let mut cycle_path: Vec<String> = path[cycle_start_idx..].to_vec();
-                        cycle_path.push(dep.clone());
+                        let cycle_start_idx = path.iter().position(|f| *f == dep).unwrap_or(0);
+                        let mut cycle_nodes: Vec<usize> = path[cycle_start_idx..].to_vec();
+                        cycle_nodes.push(dep);
 
-                        let mut cycle_key: Vec<String> =
-                            cycle_path[..cycle_path.len() - 1].to_vec();
-                        cycle_key.sort();
-                        let cycle_key_str = cycle_key.join(",");
+                        let mut cycle_key: Vec<usize> =
+                            cycle_nodes[..cycle_nodes.len() - 1].to_vec();
+                        cycle_key.sort_unstable();
 
-                        if !seen_cycles.contains(&cycle_key_str) {
-                            seen_cycles.insert(cycle_key_str);
-                            if let Some(fixture_def) = fixture_defs.get(dep) {
-                                cycles.push(FixtureCycle {
-                                    cycle_path,
-                                    fixture: fixture_def.clone(),
-                                });
-                            }
+                        if seen_cycles.insert(cycle_key) {
+                            cycles.push(FixtureCycle {
+                                cycle_path: cycle_nodes
+                                    .iter()
+                                    .map(|&n| defs[n].name.clone())
+                                    .collect(),
+                                fixture: defs[dep].clone(),
+                            });
                         }
-                    } else if !visited.contains(dep) {
+                    } else if !visited.contains(&dep) {
                         // Explore this dependency
-                        stack.push((dep.clone(), 0, path.clone()));
+                        stack.push((dep, 0, path.clone()));
                     }
                 } else {
                     // Done with this node
-                    visited.insert(current.clone());
+                    visited.insert(current);
                     rec_stack.remove(&current);
                 }
             }
@@ -1667,18 +1648,34 @@ impl FixtureDatabase {
     }
 
     /// Detect cycles for fixtures in a specific file.
-    /// Returns cycles where the first fixture in the cycle is defined in the given file.
-    /// Uses cached cycle detection results for efficiency.
+    ///
+    /// Returns cycles that close on a fixture defined in the given file. This runs on every
+    /// edit, so it resolves only what the file's fixtures reach, not the whole workspace.
     pub fn detect_fixture_cycles_in_file(
         &self,
         file_path: &Path,
     ) -> Vec<super::types::FixtureCycle> {
-        let all_cycles = self.detect_fixture_cycles();
-        all_cycles
+        let fixture_names = self
+            .file_definitions
+            .get(file_path)
+            .map(|names| names.value().clone())
+            .unwrap_or_default();
+        let seeds = fixture_names
             .iter()
-            .filter(|cycle| cycle.fixture.file_path == file_path)
-            .cloned()
-            .collect()
+            .filter_map(|name| {
+                self.definitions.get(name).map(|defs| {
+                    defs.iter()
+                        .filter(|d| d.file_path == file_path)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+            })
+            .flatten()
+            .collect();
+
+        let mut cycles = self.compute_fixture_cycles(seeds);
+        cycles.retain(|cycle| cycle.fixture.file_path == file_path);
+        cycles
     }
 
     // ============ Scope Validation ============
@@ -1692,40 +1689,35 @@ impl FixtureDatabase {
     ) -> Vec<super::types::ScopeMismatch> {
         use super::types::ScopeMismatch;
 
-        let mut mismatches = Vec::new();
-
-        // Get fixtures defined in this file
-        let Some(fixture_names) = self.file_definitions.get(file_path) else {
-            return mismatches;
+        let Some(fixture_names) = self
+            .file_definitions
+            .get(file_path)
+            .map(|names| names.value().clone())
+        else {
+            return Vec::new();
         };
 
-        for fixture_name in fixture_names.iter() {
-            // Get the fixture definition
-            let Some(definitions) = self.definitions.get(fixture_name) else {
+        let mut mismatches = Vec::new();
+
+        for fixture_name in &fixture_names {
+            let Some(fixture_def) = self
+                .definitions
+                .get(fixture_name)
+                .and_then(|defs| defs.iter().find(|d| d.file_path == file_path).cloned())
+            else {
                 continue;
             };
 
-            // Find the definition in this file
-            let Some(fixture_def) = definitions.iter().find(|d| d.file_path == file_path) else {
-                continue;
-            };
-
-            // Check each dependency
             for dep_name in &fixture_def.dependencies {
-                // Find the dependency's definition (use resolution logic to get correct one)
-                if let Some(dep_definitions) = self.definitions.get(dep_name) {
-                    // Find best matching definition for the dependency
-                    // Use the first one (most local) - matches cycle detection behavior
-                    if let Some(dep_def) = dep_definitions.first() {
-                        // Check if scope mismatch: fixture has broader scope than dependency
-                        // FixtureScope is ordered: Function < Class < Module < Package < Session
-                        if fixture_def.scope > dep_def.scope {
-                            mismatches.push(ScopeMismatch {
-                                fixture: fixture_def.clone(),
-                                dependency: dep_def.clone(),
-                            });
-                        }
-                    }
+                let dep_def =
+                    self.find_closest_definition_excluding(file_path, dep_name, Some(&fixture_def));
+
+                // FixtureScope is ordered: Function < Class < Module < Package < Session
+                if let Some(dep_def) = dep_def.filter(|d| fixture_def.scope > d.scope) {
+                    mismatches.push(ScopeMismatch {
+                        fixture: fixture_def.clone(),
+                        dependency: dep_def,
+                    });
                 }
             }
         }

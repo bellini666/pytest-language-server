@@ -403,8 +403,7 @@ impl FixtureDatabase {
             .or_default()
             .insert(fixture_name);
 
-        // Invalidate cycle cache since definitions changed
-        self.invalidate_cycle_cache();
+        self.bump_definitions_version();
     }
 
     /// Visit a statement and extract fixture definitions and usages

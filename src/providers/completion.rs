@@ -70,11 +70,7 @@ fn is_fixture_excluded(
     }
 
     // Skip fixtures with incompatible scope
-    if should_exclude_fixture(fixture, opts.fixture_scope) {
-        return true;
-    }
-
-    false
+    should_exclude_fixture(fixture, opts.fixture_scope)
 }
 
 /// Compute a sort priority for a fixture based on its proximity to the current file.

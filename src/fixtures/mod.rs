@@ -81,6 +81,10 @@ type NameImportMapCacheEntry = (
     Arc<HashMap<String, crate::fixtures::types::TypeImportSpec>>,
 );
 
+/// Cache entry for a file's summary: (content_hash, summary).
+/// Evicted alongside `file_cache` entries, like [`NameImportMapCacheEntry`].
+type FileSummaryCacheEntry = (u64, Arc<imports::FileSummary>);
+
 /// Maximum number of files to keep in the file content cache.
 /// When exceeded, a batch of entries (in arbitrary map order — not LRU) is
 /// evicted to prevent unbounded memory growth.
@@ -115,9 +119,11 @@ pub struct FixtureDatabase {
     /// Identity-keyed line-index cache so repeated per-column position
     /// conversions skip re-hashing the whole file.
     pub line_index_by_identity: Arc<DashMap<PathBuf, LineIndexIdentityCacheEntry>>,
-    /// Cache of parsed AST for files to avoid re-parsing.
+    /// Cache of parsed AST for open files to avoid re-parsing.
     /// Stores (content_hash, ast) to invalidate when content changes.
     pub ast_cache: Arc<DashMap<PathBuf, AstCacheEntry>>,
+    /// Canonical paths of files open in the editor.
+    pub open_files: Arc<DashMap<PathBuf, ()>>,
     /// Version counter for definitions, incremented on each change.
     /// Used to invalidate the available and imported fixtures caches.
     pub definitions_version: Arc<std::sync::atomic::AtomicU64>,
@@ -144,6 +150,8 @@ pub struct FixtureDatabase {
     ///
     /// Bounded implicitly: see [`NameImportMapCacheEntry`] for the eviction strategy.
     pub name_import_map_cache: Arc<DashMap<PathBuf, NameImportMapCacheEntry>>,
+    /// Cache of each file's [`imports::FileSummary`]: (content_hash, summary).
+    pub(crate) file_summary_cache: Arc<DashMap<PathBuf, FileSummaryCacheEntry>>,
 }
 
 impl Default for FixtureDatabase {
@@ -167,6 +175,7 @@ impl FixtureDatabase {
             line_index_cache: Arc::new(DashMap::new()),
             line_index_by_identity: Arc::new(DashMap::new()),
             ast_cache: Arc::new(DashMap::new()),
+            open_files: Arc::new(DashMap::new()),
             definitions_version: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             available_fixtures_cache: Arc::new(DashMap::new()),
             imported_fixtures_cache: Arc::new(DashMap::new()),
@@ -175,6 +184,7 @@ impl FixtureDatabase {
             workspace_root: Arc::new(std::sync::Mutex::new(None)),
             plugin_fixture_files: Arc::new(DashMap::new()),
             name_import_map_cache: Arc::new(DashMap::new()),
+            file_summary_cache: Arc::new(DashMap::new()),
         }
     }
 
@@ -297,11 +307,12 @@ impl FixtureDatabase {
         let parsed = rustpython_parser::parse(content, rustpython_parser::Mode::Module, "").ok()?;
         let arc_ast = Arc::new(parsed);
 
-        // Store in cache with content hash
-        self.ast_cache.insert(
-            file_path.to_path_buf(),
-            (content_hash, Arc::clone(&arc_ast)),
-        );
+        if self.open_files.contains_key(file_path) {
+            self.ast_cache.insert(
+                file_path.to_path_buf(),
+                (content_hash, Arc::clone(&arc_ast)),
+            );
+        }
 
         Some(arc_ast)
     }
@@ -397,6 +408,7 @@ impl FixtureDatabase {
 
         // Remove from name_import_map_cache
         self.name_import_map_cache.remove(&canonical);
+        self.file_summary_cache.remove(&canonical);
 
         // Remove from file_cache
         self.file_cache.remove(&canonical);
@@ -457,6 +469,7 @@ impl FixtureDatabase {
                 self.available_fixtures_cache.remove(&path);
                 self.imported_fixtures_cache.remove(&path);
                 self.name_import_map_cache.remove(&path);
+                self.file_summary_cache.remove(&path);
             }
 
             debug!(

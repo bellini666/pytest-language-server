@@ -118,6 +118,18 @@ static STDLIB_MODULES: std::sync::LazyLock<HashSet<&'static str>> =
         .collect()
     });
 
+/// Per-file data taken from the AST, kept so files that aren't open need no re-parse.
+#[derive(Debug, Default)]
+pub(crate) struct FileSummary {
+    /// Every `from X import ...` statement, stdlib modules included: the
+    /// runtime stdlib list may be initialized after a file is summarized, so
+    /// readers filter with `is_standard_library_module`.
+    pub(crate) fixture_imports: Vec<FixtureImport>,
+    pub(crate) pytest_plugins: Vec<String>,
+    /// (start line, end line, name) of top-level functions and class methods.
+    pub(crate) functions: Vec<(usize, usize, String)>,
+}
+
 /// Represents a fixture import in a Python file.
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Fields used for debugging and potential future features
@@ -135,8 +147,51 @@ pub struct FixtureImport {
 }
 
 impl FixtureDatabase {
+    /// Get a file's [`FileSummary`], cached by content hash.
+    pub(crate) fn get_file_summary(
+        &self,
+        file_path: &Path,
+        content: &str,
+    ) -> Option<Arc<FileSummary>> {
+        let content_hash = Self::hash_content(content);
+        if let Some(cached) = self.file_summary_cache.get(file_path) {
+            let (cached_hash, summary) = cached.value();
+            if *cached_hash == content_hash {
+                return Some(Arc::clone(summary));
+            }
+        }
+
+        let parsed = self.get_parsed_ast(file_path, content)?;
+        Some(self.cache_file_summary(file_path, content, content_hash, &parsed))
+    }
+
+    /// Build a parsed file's [`FileSummary`] and store it in `file_summary_cache`.
+    pub(crate) fn cache_file_summary(
+        &self,
+        file_path: &Path,
+        content: &str,
+        content_hash: u64,
+        parsed: &rustpython_parser::ast::Mod,
+    ) -> Arc<FileSummary> {
+        let mut summary = FileSummary::default();
+        if let rustpython_parser::ast::Mod::Module(module) = parsed {
+            let line_index = self.get_line_index(file_path, content);
+            summary.fixture_imports =
+                self.extract_fixture_imports(&module.body, file_path, &line_index);
+            summary.pytest_plugins = self.extract_pytest_plugins(&module.body);
+            self.collect_function_spans(&module.body, &line_index, &mut summary.functions);
+        }
+
+        let summary = Arc::new(summary);
+        self.file_summary_cache.insert(
+            file_path.to_path_buf(),
+            (content_hash, Arc::clone(&summary)),
+        );
+        summary
+    }
+
     /// Extract fixture imports from a module's statements.
-    /// Returns a list of imports that could potentially bring in fixtures.
+    /// Returns every `from X import ...` statement, stdlib modules included.
     pub(crate) fn extract_fixture_imports(
         &self,
         stmts: &[Stmt],
@@ -147,7 +202,6 @@ impl FixtureDatabase {
 
         for stmt in stmts {
             if let Stmt::ImportFrom(import_from) = stmt {
-                // Skip imports from standard library or well-known non-fixture modules
                 let mut module = import_from
                     .module
                     .as_ref()
@@ -161,11 +215,6 @@ impl FixtureDatabase {
                 if let Some(ref level) = import_from.level {
                     let dots = ".".repeat(level.to_usize());
                     module = dots + &module;
-                }
-
-                // Skip obvious non-fixture imports
-                if self.is_standard_library_module(&module) {
-                    continue;
                 }
 
                 let line =
@@ -286,7 +335,7 @@ impl FixtureDatabase {
 
     /// Check if a module is a standard library module that can't contain fixtures.
     /// Uses a static HashSet for O(1) lookup instead of linear array search.
-    fn is_standard_library_module(&self, module: &str) -> bool {
+    pub(crate) fn is_standard_library_module(&self, module: &str) -> bool {
         is_stdlib_module(module)
     }
 
@@ -490,111 +539,116 @@ impl FixtureDatabase {
     ) -> HashMap<String, PathBuf> {
         let mut imported_fixtures = HashMap::new();
 
-        let Some(parsed) = self.get_parsed_ast(canonical_path, content) else {
+        let Some(summary) = self.get_file_summary(canonical_path, content) else {
             return imported_fixtures;
         };
 
-        let line_index = self.get_line_index(canonical_path, content);
-
-        if let rustpython_parser::ast::Mod::Module(module) = parsed.as_ref() {
-            let imports = self.extract_fixture_imports(&module.body, canonical_path, &line_index);
-
-            for import in imports {
-                // Resolve the import to a file path
-                let Some(resolved_path) =
-                    self.resolve_module_to_file(&import.module_path, canonical_path)
-                else {
-                    debug!(
-                        "Could not resolve module '{}' from {:?}",
-                        import.module_path, canonical_path
-                    );
-                    continue;
-                };
-
-                let resolved_canonical = self.get_canonical_path(resolved_path);
-
+        for import in summary
+            .fixture_imports
+            .iter()
+            .filter(|import| !self.is_standard_library_module(&import.module_path))
+        {
+            // Resolve the import to a file path
+            let Some(resolved_path) =
+                self.resolve_module_to_file(&import.module_path, canonical_path)
+            else {
                 debug!(
-                    "Resolved import '{}' to {:?}",
-                    import.module_path, resolved_canonical
+                    "Could not resolve module '{}' from {:?}",
+                    import.module_path, canonical_path
                 );
+                continue;
+            };
 
-                if import.is_star_import {
-                    // Star import: get all fixtures from the resolved file
-                    // First, get fixtures defined directly in that file
-                    if let Some(file_fixtures) = self.file_definitions.get(&resolved_canonical) {
-                        for fixture_name in file_fixtures.iter() {
-                            imported_fixtures
-                                .insert(fixture_name.clone(), resolved_canonical.clone());
-                        }
-                    }
+            let resolved_canonical = self.get_canonical_path(resolved_path);
 
-                    // Also recursively get fixtures imported into that file.
-                    // Direct imports win over transitive ones on name clashes.
-                    let transitive = self.get_imported_fixtures(&resolved_canonical, visited);
-                    for (name, source) in transitive {
-                        imported_fixtures.entry(name).or_insert(source);
-                    }
-                } else {
-                    // Explicit import: prefer names actually defined in the
-                    // resolved module, then names it re-exports (transitively,
-                    // attributed to their true source). Fall back to any known
-                    // fixture name so modules that were resolved but never
-                    // scanned don't lose their fixtures.
-                    let module_fixtures: HashSet<String> = self
-                        .file_definitions
-                        .get(&resolved_canonical)
-                        .map(|entry| entry.value().clone())
-                        .unwrap_or_default();
-                    // Recurse with a clone of `visited`: it must still guard the
-                    // current path against cycles, but marking the module as
-                    // globally visited here would make a later import of the
-                    // same module (e.g. a subsequent star import) hit the
-                    // circular guard and silently lose its transitive fixtures.
-                    let mut nested_visited = visited.clone();
-                    let reexported =
-                        self.get_imported_fixtures(&resolved_canonical, &mut nested_visited);
+            debug!(
+                "Resolved import '{}' to {:?}",
+                import.module_path, resolved_canonical
+            );
 
-                    for name in &import.imported_names {
-                        if module_fixtures.contains(name) {
-                            imported_fixtures.insert(name.clone(), resolved_canonical.clone());
-                        } else if let Some(source) = reexported.get(name) {
-                            imported_fixtures.insert(name.clone(), source.clone());
-                        } else if self.definitions.contains_key(name) {
-                            imported_fixtures.insert(name.clone(), resolved_canonical.clone());
-                        }
-                    }
-                }
-            }
-
-            // Process pytest_plugins variable (treated like star imports)
-            let plugin_modules = self.extract_pytest_plugins(&module.body);
-            for module_path in plugin_modules {
-                let Some(resolved_path) = self.resolve_module_to_file(&module_path, canonical_path)
-                else {
-                    debug!(
-                        "Could not resolve pytest_plugins module '{}' from {:?}",
-                        module_path, canonical_path
-                    );
-                    continue;
-                };
-
-                let resolved_canonical = self.get_canonical_path(resolved_path);
-
-                debug!(
-                    "Resolved pytest_plugins '{}' to {:?}",
-                    module_path, resolved_canonical
-                );
-
+            if import.is_star_import {
+                // Star import: get all fixtures from the resolved file
+                // First, get fixtures defined directly in that file
                 if let Some(file_fixtures) = self.file_definitions.get(&resolved_canonical) {
                     for fixture_name in file_fixtures.iter() {
                         imported_fixtures.insert(fixture_name.clone(), resolved_canonical.clone());
                     }
                 }
 
+                // Also recursively get fixtures imported into that file.
+                // Direct imports win over transitive ones on name clashes.
                 let transitive = self.get_imported_fixtures(&resolved_canonical, visited);
                 for (name, source) in transitive {
                     imported_fixtures.entry(name).or_insert(source);
                 }
+            } else {
+                // Explicit import: prefer names actually defined in the
+                // resolved module, then names it re-exports (transitively,
+                // attributed to their true source). Fall back to any known
+                // fixture name so modules that were resolved but never
+                // scanned don't lose their fixtures.
+                let module_fixtures: HashSet<String> = self
+                    .file_definitions
+                    .get(&resolved_canonical)
+                    .map(|entry| entry.value().clone())
+                    .unwrap_or_default();
+                // Only known fixtures can be inserted below, so skip the walk
+                // (which parses the whole module tree, e.g. a large library)
+                // unless a name could come from a re-export.
+                let needs_reexport = import.imported_names.iter().any(|name| {
+                    !module_fixtures.contains(name) && self.definitions.contains_key(name)
+                });
+                let reexported = if needs_reexport {
+                    // Recurse with a clone of `visited`: it must still guard the
+                    // current path against cycles, but marking the module as
+                    // globally visited here would make a later import of the
+                    // same module (e.g. a subsequent star import) hit the
+                    // circular guard and silently lose its transitive fixtures.
+                    let mut nested_visited = visited.clone();
+                    self.get_imported_fixtures(&resolved_canonical, &mut nested_visited)
+                } else {
+                    HashMap::new()
+                };
+
+                for name in &import.imported_names {
+                    if module_fixtures.contains(name) {
+                        imported_fixtures.insert(name.clone(), resolved_canonical.clone());
+                    } else if let Some(source) = reexported.get(name) {
+                        imported_fixtures.insert(name.clone(), source.clone());
+                    } else if self.definitions.contains_key(name) {
+                        imported_fixtures.insert(name.clone(), resolved_canonical.clone());
+                    }
+                }
+            }
+        }
+
+        // Process pytest_plugins variable (treated like star imports)
+        for module_path in &summary.pytest_plugins {
+            let Some(resolved_path) = self.resolve_module_to_file(module_path, canonical_path)
+            else {
+                debug!(
+                    "Could not resolve pytest_plugins module '{}' from {:?}",
+                    module_path, canonical_path
+                );
+                continue;
+            };
+
+            let resolved_canonical = self.get_canonical_path(resolved_path);
+
+            debug!(
+                "Resolved pytest_plugins '{}' to {:?}",
+                module_path, resolved_canonical
+            );
+
+            if let Some(file_fixtures) = self.file_definitions.get(&resolved_canonical) {
+                for fixture_name in file_fixtures.iter() {
+                    imported_fixtures.insert(fixture_name.clone(), resolved_canonical.clone());
+                }
+            }
+
+            let transitive = self.get_imported_fixtures(&resolved_canonical, visited);
+            for (name, source) in transitive {
+                imported_fixtures.entry(name).or_insert(source);
             }
         }
 
@@ -1236,5 +1290,26 @@ mod tests {
             !map.contains_key("collections.abc"),
             "dotted path must not be keyed when alias present"
         );
+    }
+
+    #[test]
+    fn test_file_summary_cache_follows_file_cache_cleanup_and_eviction() {
+        let db = FixtureDatabase::new();
+        let base = std::env::temp_dir().join("pls_summary_eviction");
+        let first = base.join("test_0.py");
+
+        db.analyze_file(first.clone(), "x = 1\n");
+        assert!(db.file_summary_cache.contains_key(&first));
+        db.cleanup_file_cache(&first);
+        assert!(!db.file_summary_cache.contains_key(&first));
+
+        for i in 0..2101 {
+            db.analyze_file(base.join(format!("test_{i}.py")), "x = 1\n");
+        }
+        assert!(db.file_summary_cache.len() < 2101);
+        assert!(db
+            .file_summary_cache
+            .iter()
+            .all(|entry| db.file_cache.contains_key(entry.key())));
     }
 }

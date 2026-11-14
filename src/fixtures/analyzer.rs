@@ -53,10 +53,13 @@ impl FixtureDatabase {
             }
         };
         let content_hash = Self::hash_content(content);
-        self.ast_cache.insert(
-            file_path.clone(),
-            (content_hash, std::sync::Arc::clone(&parsed)),
-        );
+        if self.open_files.contains_key(&file_path) {
+            self.ast_cache.insert(
+                file_path.clone(),
+                (content_hash, std::sync::Arc::clone(&parsed)),
+            );
+        }
+        self.cache_file_summary(&file_path, content, content_hash, &parsed);
 
         // Clear previous usages for this file (only after successful parse)
         self.cleanup_usages_for_file(&file_path);

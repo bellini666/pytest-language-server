@@ -650,6 +650,42 @@ async fn test_did_close_clears_uri_cache() {
 
 #[tokio::test]
 #[timeout(30000)]
+async fn test_open_files_tracks_did_open_and_did_close() {
+    let db = Arc::new(FixtureDatabase::new());
+    let backend = make_backend_with_db(Arc::clone(&db));
+
+    // Opened before it exists on disk, created before close: on macOS the
+    // path canonicalizes differently at close (/var -> /private/var).
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("test_new.py");
+    let file_uri = Uri::from_file_path(&file_path).unwrap();
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: file_uri.clone(),
+                language_id: "python".to_string(),
+                version: 1,
+                text: "def test_a():\n    pass\n".to_string(),
+            },
+        })
+        .await;
+
+    let open_path = backend.uri_to_path(&file_uri).unwrap();
+    assert!(db.open_files.contains_key(&open_path));
+    assert!(db.ast_cache.contains_key(&open_path));
+
+    std::fs::write(&file_path, "def test_a():\n    pass\n").unwrap();
+    backend
+        .did_close(DidCloseTextDocumentParams {
+            text_document: TextDocumentIdentifier { uri: file_uri },
+        })
+        .await;
+
+    assert!(db.open_files.is_empty());
+}
+
+#[tokio::test]
+#[timeout(30000)]
 async fn test_did_close_unknown_file_does_not_panic() {
     let backend = make_backend();
 

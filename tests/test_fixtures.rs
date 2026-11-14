@@ -5,7 +5,9 @@
 use ntest::timeout;
 use pytest_language_server::FixtureDatabase;
 use std::collections::HashSet;
+use std::fs;
 use std::path::PathBuf;
+use tempfile::tempdir;
 
 #[test]
 #[timeout(30000)]
@@ -16017,6 +16019,93 @@ fn test_completion_context_text_fallback_fixture_scope_single_quotes() {
     }
 }
 
+#[test]
+#[timeout(30000)]
+fn test_explicit_import_of_non_fixture_does_not_walk_module() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    fs::create_dir(root.join("biglib")).unwrap();
+    fs::write(root.join("biglib/__init__.py"), "from .sub import *\n").unwrap();
+    fs::write(root.join("biglib/sub.py"), "class Engine:\n    pass\n").unwrap();
+
+    let db = FixtureDatabase::new();
+    let conftest_path = root.join("conftest.py");
+    db.analyze_file(
+        conftest_path.clone(),
+        "from biglib import Engine\nimport pytest\n\n@pytest.fixture\ndef engine():\n    return Engine()\n",
+    );
+
+    let mut visited = HashSet::new();
+    let imported = db.get_imported_fixtures(&conftest_path, &mut visited);
+
+    assert!(imported.is_empty());
+    for path in [root.join("biglib/__init__.py"), root.join("biglib/sub.py")] {
+        assert!(!db.file_cache.contains_key(&path), "{path:?} was read");
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_imported_fixtures_follow_content_change_without_reanalysis() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let fixture_module =
+        |name: &str| format!("import pytest\n\n@pytest.fixture\ndef {name}():\n    return 1\n");
+    fs::write(root.join("mod_a.py"), fixture_module("fixture_a")).unwrap();
+    fs::write(root.join("mod_b.py"), fixture_module("fixture_b")).unwrap();
+
+    let db = FixtureDatabase::new();
+    db.analyze_file(root.join("mod_a.py"), &fixture_module("fixture_a"));
+    db.analyze_file(root.join("mod_b.py"), &fixture_module("fixture_b"));
+    let conftest_path = root.join("conftest.py");
+    db.analyze_file(conftest_path.clone(), "from mod_a import *\n");
+    let imported = db.get_imported_fixtures(&conftest_path, &mut HashSet::new());
+    assert!(imported.contains_key("fixture_a"));
+
+    // An editor buffer that fails to parse updates file_cache without re-analysis.
+    db.file_cache.insert(
+        conftest_path.clone(),
+        std::sync::Arc::new("from mod_b import *\n".to_string()),
+    );
+    let imported = db.get_imported_fixtures(&conftest_path, &mut HashSet::new());
+    assert!(imported.contains_key("fixture_b"));
+    assert!(!imported.contains_key("fixture_a"));
+}
+
+#[test]
+#[timeout(30000)]
+fn test_star_import_from_stdlib_named_local_module_is_ignored() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let json_content = "import pytest\n\n@pytest.fixture\ndef json_fixture():\n    return 1\n";
+    fs::write(root.join("json.py"), json_content).unwrap();
+    fs::write(root.join("conftest.py"), "from json import *\n").unwrap();
+
+    let db = FixtureDatabase::new();
+    db.scan_workspace(&root);
+    assert!(!db.definitions.contains_key("json_fixture"));
+
+    db.analyze_file(root.join("json.py"), json_content);
+    let imported = db.get_imported_fixtures(&root.join("conftest.py"), &mut HashSet::new());
+    assert!(!imported.contains_key("json_fixture"));
+}
+
+#[test]
+#[timeout(30000)]
+fn test_ast_cache_only_holds_open_files() {
+    let dir = tempdir().unwrap();
+    let test_path = dir.path().canonicalize().unwrap().join("test_a.py");
+
+    let db = FixtureDatabase::new();
+    db.analyze_file(test_path.clone(), "def test_a():\n    pass\n");
+    db.is_inside_function(&test_path, 1, 4);
+    assert!(!db.ast_cache.contains_key(&test_path));
+
+    db.open_files.insert(test_path.clone(), ());
+    db.is_inside_function(&test_path, 1, 4);
+    assert!(db.ast_cache.contains_key(&test_path));
+}
+
 // ── Cache eviction ──────────────────────────────────────────────────────
 
 #[test]
@@ -16029,6 +16118,7 @@ fn test_file_cache_eviction_bounds_cache_size() {
     let total = 2101;
     for i in 0..total {
         let path = base.join(format!("test_file_{i}.py"));
+        db.open_files.insert(path.clone(), ());
         db.analyze_file(path, "x = 1\n");
     }
 

@@ -1887,65 +1887,39 @@ impl FixtureDatabase {
     /// Used for call hierarchy to identify callers.
     pub fn find_containing_function(&self, file_path: &Path, line: usize) -> Option<String> {
         let content = self.get_file_content(file_path)?;
+        let summary = self.get_file_summary(file_path, &content)?;
 
-        // Use cached AST to avoid re-parsing
-        let parsed = self.get_parsed_ast(file_path, &content)?;
-
-        if let rustpython_parser::ast::Mod::Module(module) = parsed.as_ref() {
-            // Use cached line index for position calculations
-            let line_index = self.get_line_index(file_path, &content);
-
-            for stmt in &module.body {
-                if let Some(name) = self.find_function_containing_line(stmt, line, &line_index) {
-                    return Some(name);
-                }
-            }
-        }
-
-        None
+        summary
+            .functions
+            .iter()
+            .find(|(start, end, _)| (*start..=*end).contains(&line))
+            .map(|(_, _, name)| name.clone())
     }
 
-    /// Recursively search for a function containing the given line.
-    fn find_function_containing_line(
+    /// Collect (start line, end line, name) of top-level functions and
+    /// methods of (nested) classes, in source order.
+    pub(crate) fn collect_function_spans(
         &self,
-        stmt: &Stmt,
-        target_line: usize,
+        stmts: &[Stmt],
         line_index: &[usize],
-    ) -> Option<String> {
-        match stmt {
-            Stmt::FunctionDef(func_def) => {
-                let start_line =
-                    self.get_line_from_offset(func_def.range.start().to_usize(), line_index);
-                let end_line =
-                    self.get_line_from_offset(func_def.range.end().to_usize(), line_index);
-
-                if target_line >= start_line && target_line <= end_line {
-                    return Some(func_def.name.to_string());
+        spans: &mut Vec<(usize, usize, String)>,
+    ) {
+        for stmt in stmts {
+            let (range, name) = match stmt {
+                Stmt::FunctionDef(func_def) => (func_def.range, &func_def.name),
+                Stmt::AsyncFunctionDef(func_def) => (func_def.range, &func_def.name),
+                Stmt::ClassDef(class_def) => {
+                    self.collect_function_spans(&class_def.body, line_index, spans);
+                    continue;
                 }
-            }
-            Stmt::AsyncFunctionDef(func_def) => {
-                let start_line =
-                    self.get_line_from_offset(func_def.range.start().to_usize(), line_index);
-                let end_line =
-                    self.get_line_from_offset(func_def.range.end().to_usize(), line_index);
-
-                if target_line >= start_line && target_line <= end_line {
-                    return Some(func_def.name.to_string());
-                }
-            }
-            Stmt::ClassDef(class_def) => {
-                // Check methods inside the class
-                for class_stmt in &class_def.body {
-                    if let Some(name) =
-                        self.find_function_containing_line(class_stmt, target_line, line_index)
-                    {
-                        return Some(name);
-                    }
-                }
-            }
-            _ => {}
+                _ => continue,
+            };
+            spans.push((
+                self.get_line_from_offset(range.start().to_usize(), line_index),
+                self.get_line_from_offset(range.end().to_usize(), line_index),
+                name.to_string(),
+            ));
         }
-        None
     }
 }
 

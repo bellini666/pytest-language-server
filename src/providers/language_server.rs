@@ -227,6 +227,7 @@ impl LanguageServer for Backend {
             // Cache the original URI for this canonical path
             // This ensures we respond with URIs the client recognizes
             self.uri_cache.insert(file_path.clone(), uri.clone());
+            self.fixture_db.open_files.insert(file_path.clone(), ());
 
             info!("Analyzing file: {:?}", file_path);
             self.fixture_db
@@ -363,6 +364,12 @@ impl LanguageServer for Backend {
         let uri = params.text_document.uri;
         info!("did_close: {:?}", uri);
         if let Some(file_path) = self.uri_to_path(&uri) {
+            self.fixture_db.open_files.remove(&file_path);
+            // A file opened before it existed on disk was keyed by its raw,
+            // uncanonicalized path.
+            if let Some(raw_path) = uri.to_file_path() {
+                self.fixture_db.open_files.remove(raw_path.as_ref());
+            }
             // Clean up cached data for this file to prevent unbounded memory growth
             self.fixture_db.cleanup_file_cache(&file_path);
             // Clean up URI cache entry

@@ -1884,16 +1884,18 @@ impl FixtureDatabase {
 
     /// Find the name of the function/fixture containing a given line.
     ///
-    /// Used for call hierarchy to identify callers.
-    pub fn find_containing_function(&self, file_path: &Path, line: usize) -> Option<String> {
-        let content = self.get_file_content(file_path)?;
-
-        // Use cached AST to avoid re-parsing
-        let parsed = self.get_parsed_ast(file_path, &content)?;
-
-        if let rustpython_parser::ast::Mod::Module(module) = parsed.as_ref() {
+    /// Used for call hierarchy to identify callers. Takes the parsed module so
+    /// callers can parse a file once for many lines.
+    pub fn find_containing_function(
+        &self,
+        file_path: &Path,
+        content: &str,
+        parsed: &rustpython_parser::ast::Mod,
+        line: usize,
+    ) -> Option<String> {
+        if let rustpython_parser::ast::Mod::Module(module) = parsed {
             // Use cached line index for position calculations
-            let line_index = self.get_line_index(file_path, &content);
+            let line_index = self.get_line_index(file_path, content);
 
             for stmt in &module.body {
                 if let Some(name) = self.find_function_containing_line(stmt, line, &line_index) {

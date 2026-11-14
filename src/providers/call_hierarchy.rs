@@ -5,6 +5,7 @@
 //! - Outgoing calls: fixtures this fixture depends on
 
 use super::Backend;
+use std::collections::HashMap;
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 use tracing::info;
@@ -114,6 +115,8 @@ impl Backend {
         let references = self.fixture_db.find_references_for_definition(definition);
 
         let mut incoming_calls: Vec<CallHierarchyIncomingCall> = Vec::new();
+        // Usage files are mostly closed, so their ASTs aren't cached: parse each once.
+        let mut parsed_files = HashMap::new();
 
         for usage in references {
             // Skip self-references (the definition itself)
@@ -138,9 +141,22 @@ impl Backend {
             };
 
             // Try to find what fixture/test this usage is in
-            let caller_name = self
-                .fixture_db
-                .find_containing_function(&usage.file_path, usage.line)
+            let caller_name = parsed_files
+                .entry(usage.file_path.clone())
+                .or_insert_with(|| {
+                    let content = self.fixture_db.get_file_content(&usage.file_path)?;
+                    let parsed = self.fixture_db.get_parsed_ast(&usage.file_path, &content)?;
+                    Some((content, parsed))
+                })
+                .as_ref()
+                .and_then(|(content, parsed)| {
+                    self.fixture_db.find_containing_function(
+                        &usage.file_path,
+                        content,
+                        parsed,
+                        usage.line,
+                    )
+                })
                 .unwrap_or_else(|| "<unknown>".to_string());
 
             let from_item = CallHierarchyItem {

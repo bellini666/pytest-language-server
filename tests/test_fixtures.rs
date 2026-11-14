@@ -11409,27 +11409,31 @@ def test_something(my_fixture):
 
     let path = PathBuf::from("/tmp/test/test_example.py");
     db.analyze_file(path.clone(), content);
+    let parsed = rustpython_parser::parse(content, rustpython_parser::Mode::Module, "").unwrap();
 
     // Line 9 is inside test_something (the assert line)
     assert_eq!(
-        db.find_containing_function(&path, 9),
+        db.find_containing_function(&path, content, &parsed, 9),
         Some("test_something".to_string())
     );
 
     // Line 8 is the def line of test_something
     assert_eq!(
-        db.find_containing_function(&path, 8),
+        db.find_containing_function(&path, content, &parsed, 8),
         Some("test_something".to_string())
     );
 
     // Line 6 is inside my_fixture (the return line)
     assert_eq!(
-        db.find_containing_function(&path, 6),
+        db.find_containing_function(&path, content, &parsed, 6),
         Some("my_fixture".to_string())
     );
 
     // Line 10 is empty - outside any function
-    assert_eq!(db.find_containing_function(&path, 10), None);
+    assert_eq!(
+        db.find_containing_function(&path, content, &parsed, 10),
+        None
+    );
 }
 
 #[test]
@@ -16017,6 +16021,81 @@ fn test_completion_context_text_fallback_fixture_scope_single_quotes() {
     }
 }
 
+#[test]
+#[timeout(30000)]
+fn test_explicit_import_of_non_fixture_does_not_walk_module() {
+    use std::fs;
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    fs::create_dir(root.join("biglib")).unwrap();
+    fs::write(root.join("biglib/__init__.py"), "from .sub import *\n").unwrap();
+    fs::write(root.join("biglib/sub.py"), "class Engine:\n    pass\n").unwrap();
+
+    let db = FixtureDatabase::new();
+    let conftest_path = root.join("conftest.py");
+    db.analyze_file(
+        conftest_path.clone(),
+        "from biglib import Engine\nimport pytest\n\n@pytest.fixture\ndef engine():\n    return Engine()\n",
+    );
+
+    let mut visited = HashSet::new();
+    let imported = db.get_imported_fixtures(&conftest_path, &mut visited);
+
+    assert!(imported.is_empty());
+    for path in [root.join("biglib/__init__.py"), root.join("biglib/sub.py")] {
+        assert!(!db.file_cache.contains_key(&path), "{path:?} was read");
+    }
+}
+
+#[test]
+#[timeout(30000)]
+fn test_explicit_import_of_reexported_fixture_resolves_to_source() {
+    use std::fs;
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    fs::create_dir(root.join("biglib")).unwrap();
+    fs::write(root.join("biglib/__init__.py"), "from .sub import *\n").unwrap();
+    let sub_content = "import pytest\n\n@pytest.fixture\ndef lib_fixture():\n    return 1\n";
+    fs::write(root.join("biglib/sub.py"), sub_content).unwrap();
+
+    let db = FixtureDatabase::new();
+    let sub_path = root.join("biglib/sub.py");
+    db.analyze_file(sub_path.clone(), sub_content);
+    let conftest_path = root.join("conftest.py");
+    db.analyze_file(conftest_path.clone(), "from biglib import lib_fixture\n");
+
+    let mut visited = HashSet::new();
+    let imported = db.get_imported_fixtures(&conftest_path, &mut visited);
+
+    assert_eq!(imported.get("lib_fixture"), Some(&sub_path));
+}
+
+#[test]
+#[timeout(30000)]
+fn test_ast_cache_holds_only_open_files_and_conftests() {
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let test_path = root.join("test_a.py");
+    let conftest_path = root.join("conftest.py");
+
+    let db = FixtureDatabase::new();
+    db.analyze_file(test_path.clone(), "def test_a():\n    pass\n");
+    db.analyze_file(conftest_path.clone(), "x = 1\n");
+    db.is_inside_function(&test_path, 1, 4);
+    assert!(!db.ast_cache.contains_key(&test_path));
+    assert!(db.ast_cache.contains_key(&conftest_path));
+
+    db.open_files.insert(test_path.clone(), ());
+    db.is_inside_function(&test_path, 1, 4);
+    assert!(db.ast_cache.contains_key(&test_path));
+}
+
 // ── Cache eviction ──────────────────────────────────────────────────────
 
 #[test]
@@ -16029,6 +16108,7 @@ fn test_file_cache_eviction_bounds_cache_size() {
     let total = 2101;
     for i in 0..total {
         let path = base.join(format!("test_file_{i}.py"));
+        db.open_files.insert(path.clone(), ());
         db.analyze_file(path, "x = 1\n");
     }
 

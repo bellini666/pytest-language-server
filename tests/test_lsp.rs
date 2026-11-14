@@ -3764,14 +3764,13 @@ def test_example(outer_fixture):
 "#;
     let file_path = PathBuf::from("/tmp/project/test_example.py");
     db.analyze_file(file_path.clone(), content);
-    let parsed = rustpython_parser::parse(content, rustpython_parser::Mode::Module, "").unwrap();
 
     // Line 9 (1-indexed) is inside test_example
-    let containing = db.find_containing_function(&file_path, content, &parsed, 9);
+    let containing = db.find_containing_function(&file_path, 9);
     assert_eq!(containing, Some("test_example".to_string()));
 
     // Line 5 (1-indexed) is inside outer_fixture
-    let containing = db.find_containing_function(&file_path, content, &parsed, 5);
+    let containing = db.find_containing_function(&file_path, 5);
     assert_eq!(containing, Some("outer_fixture".to_string()));
 }
 

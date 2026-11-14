@@ -81,6 +81,10 @@ type NameImportMapCacheEntry = (
     Arc<HashMap<String, crate::fixtures::types::TypeImportSpec>>,
 );
 
+/// Cache entry for a file's summary: (content_hash, summary).
+/// Evicted alongside `file_cache` entries, like [`NameImportMapCacheEntry`].
+type FileSummaryCacheEntry = (u64, Arc<imports::FileSummary>);
+
 /// Maximum number of files to keep in the file content cache.
 /// When exceeded, a batch of entries (in arbitrary map order — not LRU) is
 /// evicted to prevent unbounded memory growth.
@@ -115,7 +119,7 @@ pub struct FixtureDatabase {
     /// Identity-keyed line-index cache so repeated per-column position
     /// conversions skip re-hashing the whole file.
     pub line_index_by_identity: Arc<DashMap<PathBuf, LineIndexIdentityCacheEntry>>,
-    /// Cache of parsed AST for open files and conftests to avoid re-parsing.
+    /// Cache of parsed AST for open files to avoid re-parsing.
     /// Stores (content_hash, ast) to invalidate when content changes.
     pub ast_cache: Arc<DashMap<PathBuf, AstCacheEntry>>,
     /// Canonical paths of files open in the editor.
@@ -146,6 +150,8 @@ pub struct FixtureDatabase {
     ///
     /// Bounded implicitly: see [`NameImportMapCacheEntry`] for the eviction strategy.
     pub name_import_map_cache: Arc<DashMap<PathBuf, NameImportMapCacheEntry>>,
+    /// Cache of each file's [`imports::FileSummary`]: (content_hash, summary).
+    pub(crate) file_summary_cache: Arc<DashMap<PathBuf, FileSummaryCacheEntry>>,
 }
 
 impl Default for FixtureDatabase {
@@ -178,6 +184,7 @@ impl FixtureDatabase {
             workspace_root: Arc::new(std::sync::Mutex::new(None)),
             plugin_fixture_files: Arc::new(DashMap::new()),
             name_import_map_cache: Arc::new(DashMap::new()),
+            file_summary_cache: Arc::new(DashMap::new()),
         }
     }
 
@@ -300,7 +307,7 @@ impl FixtureDatabase {
         let parsed = rustpython_parser::parse(content, rustpython_parser::Mode::Module, "").ok()?;
         let arc_ast = Arc::new(parsed);
 
-        if self.should_cache_ast(file_path) {
+        if self.open_files.contains_key(file_path) {
             self.ast_cache.insert(
                 file_path.to_path_buf(),
                 (content_hash, Arc::clone(&arc_ast)),
@@ -308,15 +315,6 @@ impl FixtureDatabase {
         }
 
         Some(arc_ast)
-    }
-
-    /// Whether a file's AST is kept in `ast_cache`.
-    ///
-    /// Open files are queried on every request. Conftests are re-walked by
-    /// fixture resolution whenever `definitions_version` changes.
-    pub(crate) fn should_cache_ast(&self, file_path: &Path) -> bool {
-        self.open_files.contains_key(file_path)
-            || file_path.file_name().is_some_and(|n| n == "conftest.py")
     }
 
     /// Get or compute the name→[`TypeImportSpec`] map for a file, with
@@ -410,6 +408,7 @@ impl FixtureDatabase {
 
         // Remove from name_import_map_cache
         self.name_import_map_cache.remove(&canonical);
+        self.file_summary_cache.remove(&canonical);
 
         // Remove from file_cache
         self.file_cache.remove(&canonical);
@@ -470,6 +469,7 @@ impl FixtureDatabase {
                 self.available_fixtures_cache.remove(&path);
                 self.imported_fixtures_cache.remove(&path);
                 self.name_import_map_cache.remove(&path);
+                self.file_summary_cache.remove(&path);
             }
 
             debug!(

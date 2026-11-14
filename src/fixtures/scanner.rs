@@ -315,77 +315,68 @@ impl FixtureDatabase {
                     continue;
                 };
 
-                // Parse the AST
-                let Some(parsed) = self.get_parsed_ast(file_path, &content) else {
+                let Some(summary) = self.get_file_summary(file_path, &content) else {
                     continue;
                 };
 
-                let line_index = self.get_line_index(file_path, &content);
+                for import in summary
+                    .fixture_imports
+                    .iter()
+                    .filter(|import| !self.is_standard_library_module(&import.module_path))
+                {
+                    if let Some(resolved_path) =
+                        self.resolve_module_to_file(&import.module_path, file_path)
+                    {
+                        let canonical = self.get_canonical_path(resolved_path);
 
-                // Extract imports and pytest_plugins
-                if let rustpython_parser::ast::Mod::Module(module) = parsed.as_ref() {
-                    let imports =
-                        self.extract_fixture_imports(&module.body, file_path, &line_index);
+                        // Only star imports propagate plugin status to the
+                        // whole imported module.  Explicit `from X import Y`
+                        // should not mark the entire module as a plugin
+                        // because only specific names are being pulled in.
+                        let should_mark_plugin = importer_is_plugin && import.is_star_import;
 
-                    for import in imports {
-                        if let Some(resolved_path) =
-                            self.resolve_module_to_file(&import.module_path, file_path)
+                        if should_mark_plugin && !self.plugin_fixture_files.contains_key(&canonical)
                         {
-                            let canonical = self.get_canonical_path(resolved_path);
-
-                            // Only star imports propagate plugin status to the
-                            // whole imported module.  Explicit `from X import Y`
-                            // should not mark the entire module as a plugin
-                            // because only specific names are being pulled in.
-                            let should_mark_plugin = importer_is_plugin && import.is_star_import;
-
-                            if should_mark_plugin
-                                && !self.plugin_fixture_files.contains_key(&canonical)
-                            {
-                                self.plugin_fixture_files.insert(canonical.clone(), ());
-                                // If already cached, we need to re-analyze so
-                                // existing definitions get is_plugin=true.
-                                if self.file_cache.contains_key(&canonical) {
-                                    reanalyze_as_plugin.insert(canonical.clone());
-                                }
-                            }
-
-                            if !processed_files.contains(&canonical)
-                                && !self.file_cache.contains_key(&canonical)
-                            {
-                                new_modules.insert(canonical);
+                            self.plugin_fixture_files.insert(canonical.clone(), ());
+                            // If already cached, we need to re-analyze so
+                            // existing definitions get is_plugin=true.
+                            if self.file_cache.contains_key(&canonical) {
+                                reanalyze_as_plugin.insert(canonical.clone());
                             }
                         }
-                    }
 
-                    // Also extract pytest_plugins variable declarations.
-                    // pytest_plugins is an explicit pytest mechanism for
-                    // declaring plugin modules, so the entire referenced module
-                    // should always be marked as a plugin when the importer is
-                    // a plugin file.
-                    let plugin_modules = self.extract_pytest_plugins(&module.body);
-                    for module_path in plugin_modules {
-                        if let Some(resolved_path) =
-                            self.resolve_module_to_file(&module_path, file_path)
+                        if !processed_files.contains(&canonical)
+                            && !self.file_cache.contains_key(&canonical)
                         {
-                            let canonical = self.get_canonical_path(resolved_path);
+                            new_modules.insert(canonical);
+                        }
+                    }
+                }
 
-                            if importer_is_plugin
-                                && !self.plugin_fixture_files.contains_key(&canonical)
-                            {
-                                self.plugin_fixture_files.insert(canonical.clone(), ());
-                                // If already cached, we need to re-analyze so
-                                // existing definitions get is_plugin=true.
-                                if self.file_cache.contains_key(&canonical) {
-                                    reanalyze_as_plugin.insert(canonical.clone());
-                                }
-                            }
+                // Also extract pytest_plugins variable declarations.
+                // pytest_plugins is an explicit pytest mechanism for
+                // declaring plugin modules, so the entire referenced module
+                // should always be marked as a plugin when the importer is
+                // a plugin file.
+                for module_path in &summary.pytest_plugins {
+                    if let Some(resolved_path) = self.resolve_module_to_file(module_path, file_path)
+                    {
+                        let canonical = self.get_canonical_path(resolved_path);
 
-                            if !processed_files.contains(&canonical)
-                                && !self.file_cache.contains_key(&canonical)
-                            {
-                                new_modules.insert(canonical);
+                        if importer_is_plugin && !self.plugin_fixture_files.contains_key(&canonical)
+                        {
+                            self.plugin_fixture_files.insert(canonical.clone(), ());
+                            // If already cached, we need to re-analyze so
+                            // existing definitions get is_plugin=true.
+                            if self.file_cache.contains_key(&canonical) {
+                                reanalyze_as_plugin.insert(canonical.clone());
                             }
+                        }
+
+                        if !processed_files.contains(&canonical)
+                            && !self.file_cache.contains_key(&canonical)
+                        {
+                            new_modules.insert(canonical);
                         }
                     }
                 }
